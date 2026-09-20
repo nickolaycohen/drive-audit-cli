@@ -1,5 +1,6 @@
 import os
 import sys
+import csv
 import time
 import shutil
 import sqlite3
@@ -521,6 +522,105 @@ def show_hosts_summary(db_path: str):
         print(f"{host:<20} | {os_name or 'N/A':<10} | {ip or 'N/A':<15} | {count or 0:<8} | {gb:.2f} GB")
     print("=" * 75)
 
+def generate_largest_files_report(db_path: str):
+    """Generates a detailed report of the largest indexed files, with optional category filter and file export."""
+    if not os.path.exists(db_path):
+        print("\n[Notice] No database found. Run a scan first.")
+        return
+
+    print("\n--- LARGEST FILES REPORT ---")
+    limit_input = input("How many files to show? [Default: 25]: ").strip()
+    try:
+        limit = int(limit_input) if limit_input else 25
+    except ValueError:
+        limit = 25
+
+    cat_input = input("Filter by category (image/video/audio/document/archive/code/other, or Enter for all): ").strip().lower()
+
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+
+    if cat_input and (cat_input in EXTENSION_MAP or cat_input == "other"):
+        query = """
+            SELECT 
+                f.name, f.category, f.size_bytes, f.created_at, f.modified_at,
+                d.path, h.hostname
+            FROM files f
+            JOIN directories d ON f.directory_id = d.id
+            JOIN hosts h ON d.host_id = h.id
+            WHERE f.category = ?
+            ORDER BY f.size_bytes DESC
+            LIMIT ?
+        """
+        cursor.execute(query, (cat_input, limit))
+    else:
+        query = """
+            SELECT 
+                f.name, f.category, f.size_bytes, f.created_at, f.modified_at,
+                d.path, h.hostname
+            FROM files f
+            JOIN directories d ON f.directory_id = d.id
+            JOIN hosts h ON d.host_id = h.id
+            ORDER BY f.size_bytes DESC
+            LIMIT ?
+        """
+        cursor.execute(query, (limit,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        print("\nNo files found matching criteria.")
+        return
+
+    print("\n" + "=" * 90)
+    filter_label = f" (Category: {cat_input.upper()})" if cat_input else ""
+    print(f"TOP {len(rows)} LARGEST FILES{filter_label}")
+    print("=" * 90)
+
+    for idx, (name, category, size_bytes, created_at, modified_at, dir_path, host) in enumerate(rows, 1):
+        size_str = format_size(size_bytes)
+        mod_date = modified_at.replace("T", " ")[:19] if modified_at else "N/A"
+        cre_date = created_at.replace("T", " ")[:19] if created_at else "N/A"
+        print(f"{idx:>3}. [{size_str:>9}] [{category.upper():<8}] {name}")
+        print(f"     Modified: {mod_date} | Created: {cre_date} | Host: {host}")
+        print(f"     Path: {dir_path}/{name}\n")
+
+    print("=" * 90)
+
+    # Optional export to CSV or Markdown
+    export_choice = input("Export report to file? (c = CSV, m = Markdown, n = No) [Default: n]: ").strip().lower()
+    if export_choice == "c":
+        filename = "largest_files_report.csv"
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Rank", "Hostname", "File Name", "Category", "Size Bytes", "Size Formatted", "Modified At", "Created At", "Directory Path", "Full Path"])
+                for idx, (name, category, size_bytes, created_at, modified_at, dir_path, host) in enumerate(rows, 1):
+                    writer.writerow([idx, host, name, category, size_bytes, format_size(size_bytes), modified_at or "", created_at or "", dir_path, f"{dir_path}/{name}"])
+            print(f"[Success] Report exported to: {os.path.abspath(filename)}")
+        except Exception as e:
+            print(f"[Error] Failed to export CSV: {e}")
+
+    elif export_choice == "m":
+        filename = "largest_files_report.md"
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"# Top {len(rows)} Largest Files Report\n\n")
+                if cat_input:
+                    f.write(f"**Category Filter**: `{cat_input}`\n\n")
+                f.write(f"**Generated**: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n")
+                f.write("| # | File Name | Category | Size | Modified Date | Created Date | Path |\n")
+                f.write("|---|---|---|---|---|---|---|\n")
+                for idx, (name, category, size_bytes, created_at, modified_at, dir_path, host) in enumerate(rows, 1):
+                    mod_str = modified_at.replace('T', ' ')[:19] if modified_at else 'N/A'
+                    cre_str = created_at.replace('T', ' ')[:19] if created_at else 'N/A'
+                    f.write(f"| {idx} | `{name}` | `{category}` | **{format_size(size_bytes)}** | {mod_str} | {cre_str} | `{dir_path}/{name}` |\n")
+            print(f"[Success] Report exported to: {os.path.abspath(filename)}")
+        except Exception as e:
+            print(f"[Error] Failed to export Markdown: {e}")
+
+
 def add_manual_directory_tag(db_path: str):
     """Manually tag a directory via CLI interface."""
     if not os.path.exists(db_path):
@@ -677,24 +777,27 @@ def main():
         print("=" * 45)
         print("1. Scan local directory (Sync Finder Tags)")
         print("2. View hosts & storage overview")
-        print("3. List all active tags (Directory & File)")
-        print("4. Add manual tag to a directory")
-        print("5. Search files by tag (Finder & Manual)")
-        print("6. Exit")
+        print("3. Generate report of largest files")
+        print("4. List all active tags (Directory & File)")
+        print("5. Add manual tag to a directory")
+        print("6. Search files by tag (Finder & Manual)")
+        print("7. Exit")
 
-        choice = input("\nSelect option (1-6): ").strip()
+        choice = input("\nSelect option (1-7): ").strip()
 
         if choice == "1":
             audit_directory_interactive(db_file)
         elif choice == "2":
             show_hosts_summary(db_file)
         elif choice == "3":
-            list_all_tags(db_file)
+            generate_largest_files_report(db_file)
         elif choice == "4":
-            add_manual_directory_tag(db_file)
+            list_all_tags(db_file)
         elif choice == "5":
-            search_files_by_tag(db_file)
+            add_manual_directory_tag(db_file)
         elif choice == "6":
+            search_files_by_tag(db_file)
+        elif choice == "7":
             print("\nExiting Drive Audit Manager. Goodbye!")
             break
         else:
