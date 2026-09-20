@@ -10,6 +10,7 @@ import platform
 import plistlib
 import subprocess
 import logging
+from collections import deque
 from pathlib import Path
 try:
     import exifread
@@ -246,34 +247,162 @@ def get_finder_folder_size(folder_path: Path) -> int | None:
         pass
     return None
 
-def update_scan_progress(scanned_dirs: int, scanned_files: int, scanned_bytes: int, current_path: str, start_time: float, skipped_dirs: int = 0, total_target_bytes: int | None = None):
-    """Prints a single-line live progress indicator with ETA, percentage, and current speed."""
-    elapsed = max(0.001, time.time() - start_time)
-    mins, secs = divmod(int(elapsed), 60)
-    elapsed_str = f"{mins:02d}:{secs:02d}"
-    speed_bytes_sec = scanned_bytes / elapsed
-    speed_str = f"{format_size(int(speed_bytes_sec))}/s"
-    cols = shutil.get_terminal_size((80, 20)).columns
+class ScanProgressTracker:
+    """Tracks scan throughput, progress percentage, and calculates a stable ETA based on total size and processing speed."""
+    def __init__(self, total_target_bytes: int | None = None):
+        self.total_target_bytes = total_target_bytes
+        self.start_time = time.time()
+        self.cached_bytes = 0
+        self.fresh_bytes = 0
+        self.fresh_files = 0
+        self.fresh_start_time = None
+        self.history = deque()  # stores (timestamp, fresh_bytes, total_processed_bytes)
+        self.smoothed_eta_sec = None
+        self.smoothed_speed = None
 
+    def add_cached(self, byte_count: int):
+        self.cached_bytes += byte_count
+
+    def add_fresh_file(self, byte_count: int):
+        if self.fresh_start_time is None:
+            self.fresh_start_time = time.time()
+        self.fresh_bytes += byte_count
+        self.fresh_files += 1
+
+    def get_progress_info(self):
+        now = time.time()
+        elapsed = max(0.01, now - self.start_time)
+        mins, secs = divmod(int(elapsed), 60)
+        hours, mins = divmod(mins, 60)
+        elapsed_str = f"{hours:02d}:{mins:02d}:{secs:02d}" if hours > 0 else f"{mins:02d}:{secs:02d}"
+
+        total_processed_bytes = self.cached_bytes + self.fresh_bytes
+
+        # Sliding window history over the last 15 seconds
+        self.history.append((now, self.fresh_bytes, total_processed_bytes))
+        while len(self.history) > 1 and (now - self.history[0][0]) > 15.0:
+            self.history.popleft()
+
+        oldest_time, oldest_fresh, oldest_total = self.history[0]
+        dt = now - oldest_time
+
+        # 1. Disk Throughput (measured on fresh files read from disk)
+        if dt >= 1.5 and self.fresh_bytes > oldest_fresh:
+            window_fresh_speed = (self.fresh_bytes - oldest_fresh) / dt
+        else:
+            window_fresh_speed = 0.0
+
+        if self.fresh_start_time is not None:
+            fresh_elapsed = max(0.1, now - self.fresh_start_time)
+            cum_fresh_speed = self.fresh_bytes / fresh_elapsed
+        else:
+            cum_fresh_speed = 0.0
+
+        # Effective fresh disk speed (blends 15s window with cumulative fresh rate)
+        if window_fresh_speed > 0 and cum_fresh_speed > 0:
+            eff_fresh_speed = 0.60 * window_fresh_speed + 0.40 * cum_fresh_speed
+        elif cum_fresh_speed > 0:
+            eff_fresh_speed = cum_fresh_speed
+        elif window_fresh_speed > 0:
+            eff_fresh_speed = window_fresh_speed
+        else:
+            eff_fresh_speed = 0.0
+
+        # Overall throughput for display (smooth EMA)
+        if eff_fresh_speed > 0:
+            if self.smoothed_speed is None:
+                self.smoothed_speed = eff_fresh_speed
+            else:
+                self.smoothed_speed = 0.85 * self.smoothed_speed + 0.15 * eff_fresh_speed
+        elif self.cached_bytes > 0 and self.fresh_bytes == 0:
+            # Pure cache scan
+            self.smoothed_speed = total_processed_bytes / elapsed
+
+        display_speed = max(self.smoothed_speed or 0.0, 0.0)
+        speed_str = f"{format_size(int(display_speed))}/s" if display_speed > 0 else "--/s"
+
+        eta_label = ""
+        pct_label = ""
+
+        if self.total_target_bytes and self.total_target_bytes > 0:
+            eff_total = max(self.total_target_bytes, total_processed_bytes)
+            pct = min(99.9, (total_processed_bytes / eff_total) * 100) if total_processed_bytes < eff_total else 100.0
+            pct_label = f"{pct:.1f}%"
+
+            remaining_bytes = max(0, eff_total - total_processed_bytes)
+
+            if remaining_bytes == 0:
+                eta_label = "finishing..."
+            elif elapsed < 2.0 and self.fresh_files < 5:
+                eta_label = "calculating ETA..."
+            else:
+                # Direct mathematical calculation based on disk throughput & cumulative pace
+                if eff_fresh_speed > 1024:
+                    raw_eta = remaining_bytes / eff_fresh_speed
+                elif self.cached_bytes > 0 and self.fresh_bytes == 0:
+                    pace = total_processed_bytes / elapsed
+                    raw_eta = remaining_bytes / max(pace, 1)
+                else:
+                    pace = total_processed_bytes / elapsed
+                    raw_eta = remaining_bytes / max(pace, 1)
+
+                # Exponential smoothing to prevent clock jitter
+                if self.smoothed_eta_sec is None:
+                    self.smoothed_eta_sec = raw_eta
+                else:
+                    self.smoothed_eta_sec = 0.90 * self.smoothed_eta_sec + 0.10 * raw_eta
+
+                finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=self.smoothed_eta_sec)
+                now_dt = datetime.datetime.now()
+
+                # Remaining duration string
+                rem_s = int(self.smoothed_eta_sec)
+                if rem_s < 60:
+                    dur_str = f"{rem_s}s"
+                elif rem_s < 3600:
+                    dur_str = f"{rem_s // 60}m {rem_s % 60:02d}s"
+                else:
+                    dur_str = f"{rem_s // 3600}h {(rem_s % 3600) // 60}m"
+
+                # Completion clock time formatting
+                if finish_dt.date() == now_dt.date():
+                    eta_clock = finish_dt.strftime("%I:%M:%S %p").lstrip("0")
+                elif finish_dt.date() == (now_dt + datetime.timedelta(days=1)).date():
+                    eta_clock = "Tomorrow " + finish_dt.strftime("%I:%M %p").lstrip("0")
+                elif (finish_dt - now_dt).days < 7:
+                    eta_clock = finish_dt.strftime("%a %I:%M %p").lstrip("0")
+                else:
+                    eta_clock = finish_dt.strftime("%b %d %I:%M %p").lstrip("0")
+
+                cols = shutil.get_terminal_size((80, 20)).columns
+                if cols >= 115:
+                    eta_label = f"ETA: {eta_clock} (~{dur_str})"
+                else:
+                    eta_label = f"ETA: {eta_clock}"
+
+        return elapsed_str, speed_str, pct_label, eta_label, total_processed_bytes
+
+def update_scan_progress(scanned_dirs: int, scanned_files: int, skipped_dirs: int, skipped_files: int, current_path: str, tracker: ScanProgressTracker):
+    """Prints a single-line live progress indicator with ETA, percentage, and current speed."""
+    elapsed_str, speed_str, pct_label, eta_label, total_bytes = tracker.get_progress_info()
+    cols = shutil.get_terminal_size((80, 20)).columns
     skip_str = f" ({skipped_dirs:,} cached)" if skipped_dirs > 0 else ""
 
-    if total_target_bytes and total_target_bytes > 0:
-        pct = min(99.9, (scanned_bytes / total_target_bytes) * 100) if scanned_bytes < total_target_bytes else 100.0
-        remaining_bytes = max(0, total_target_bytes - scanned_bytes)
-        eta_sec = remaining_bytes / max(speed_bytes_sec, 1)
+    total_files = scanned_files + skipped_files
+    size_str = format_size(total_bytes)
 
-        now = datetime.datetime.now()
-        finish_dt = now + datetime.timedelta(seconds=eta_sec)
-        if finish_dt.date() == now.date():
-            eta_time_str = finish_dt.strftime("%I:%M:%S %p").lstrip("0")
+    if tracker.total_target_bytes and tracker.total_target_bytes > 0:
+        target_str = format_size(tracker.total_target_bytes)
+        metric_info = f"{size_str}/{target_str} @ {speed_str}"
+        if eta_label:
+            status_tag = f"{elapsed_str} | {eta_label} | {pct_label}"
         else:
-            eta_time_str = finish_dt.strftime("%b %d %I:%M %p").lstrip("0")
-
-        size_info = f"{format_size(scanned_bytes)}/{format_size(total_target_bytes)} @ {speed_str}"
-        base_info = f"⏳ [{elapsed_str} | ETA: {eta_time_str} | {pct:.1f}%] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({size_info}) -> "
+            status_tag = f"{elapsed_str} | {pct_label}"
     else:
-        base_info = f"⏳ [{elapsed_str} | {speed_str}] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({format_size(scanned_bytes)}) -> "
+        metric_info = f"{size_str} @ {speed_str}"
+        status_tag = f"{elapsed_str} | {speed_str}"
 
+    base_info = f"⏳ [{status_tag}] {scanned_dirs:,} dirs{skip_str} | {total_files:,} files ({metric_info}) -> "
     avail_cols = cols - len(base_info) - 2
     if avail_cols > 10:
         if len(current_path) > avail_cols:
@@ -306,15 +435,30 @@ def audit_directory_interactive(db_path: str):
         except ValueError:
             skip_hours = 24.0
 
-    # Query macOS Finder for cached folder size to provide ETA
-    total_target_bytes = get_finder_folder_size(root)
-
     conn = init_database(db_path)
     cursor = conn.cursor()
     scan_time = datetime.datetime.now().isoformat()
 
     host_id = get_or_create_host(cursor)
     hostname = socket.gethostname()
+
+    # Query macOS Finder for cached folder size to provide ETA
+    total_target_bytes = get_finder_folder_size(root)
+    
+    # Fallback to previous scan size from database if Finder did not return a cached size
+    if not total_target_bytes:
+        resolved_root_str = str(root.resolve())
+        cursor.execute("""
+            SELECT SUM(f.size_bytes)
+            FROM files f
+            JOIN directories d ON f.directory_id = d.id
+            WHERE d.host_id = ? AND (d.path = ? OR d.path LIKE ? || '/%')
+        """, (host_id, resolved_root_str, resolved_root_str))
+        db_size_row = cursor.fetchone()
+        if db_size_row and db_size_row[0] and db_size_row[0] > 0:
+            total_target_bytes = db_size_row[0]
+
+    tracker = ScanProgressTracker(total_target_bytes)
 
     # Preload existing directories for host to enable fast O(1) cache lookups
     cursor.execute("""
@@ -351,12 +495,10 @@ def audit_directory_interactive(db_path: str):
     skipped_files = 0
     purged_files = 0
     purged_dirs = 0
-    scanned_bytes = 0
     dir_tags_count = 0
     file_tags_count = 0
     visited_dir_paths = set()
 
-    start_time = time.time()
     last_progress_time = 0.0
     last_commit_time = time.time()
 
@@ -381,11 +523,11 @@ def audit_directory_interactive(db_path: str):
                         if hours_since_scan < skip_hours and dir_mtime_dt <= last_scanned:
                             skipped_dirs += 1
                             skipped_files += cached["file_count"]
-                            scanned_bytes += cached["total_bytes"]
+                            tracker.add_cached(cached["total_bytes"])
                             
                             now = time.time()
                             if now - last_progress_time >= 0.1:
-                                update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs, total_target_bytes)
+                                update_scan_progress(scanned_dirs, scanned_files, skipped_dirs, skipped_files, resolved_path, tracker)
                                 last_progress_time = now
                             continue
 
@@ -438,7 +580,7 @@ def audit_directory_interactive(db_path: str):
                         ext = file_path.suffix.lower()
                         category = get_file_category(ext)
                         file_size = stat.st_size
-                        scanned_bytes += file_size
+                        tracker.add_fresh_file(file_size)
 
                         cursor.execute("""
                             INSERT INTO files (directory_id, name, category, extension, size_bytes, created_at, modified_at, scanned_at)
@@ -500,7 +642,7 @@ def audit_directory_interactive(db_path: str):
                     # Periodic UI update during large directories
                     now = time.time()
                     if now - last_progress_time >= 0.1:
-                        update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs, total_target_bytes)
+                        update_scan_progress(scanned_dirs, scanned_files, skipped_dirs, skipped_files, resolved_path, tracker)
                         last_progress_time = now
 
                     # Periodic commit every 2 seconds
@@ -511,7 +653,7 @@ def audit_directory_interactive(db_path: str):
                 # Progress update after directory completion
                 now = time.time()
                 if now - last_progress_time >= 0.1:
-                    update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs, total_target_bytes)
+                    update_scan_progress(scanned_dirs, scanned_files, skipped_dirs, skipped_files, resolved_path, tracker)
                     last_progress_time = now
 
             except PermissionError:
