@@ -64,15 +64,15 @@ Upon launch, you will be presented with the main menu:
 =============================================
   DRIVE AUDIT & FINDER TAG MANAGER  
 =============================================
-1. Scan local directory (Sync Finder Tags & Clean Deletions)
+1. Scan & index directory (Read-only catalog & tag sync)
 2. View hosts & storage overview
 3. View top-level folder scans report
 4. Generate report of largest files
-5. Prune deleted files & folders (Sync DB with disk)
+5. Prune deleted records from DB (Sync with disk)
 6. List all active tags (Directory & File)
 7. Add manual tag to a directory
 8. Search files by tag (Finder & Manual)
-9. Segregate non-media files from folder (Clean Media Library)
+9. Segregate non-media files from folder (On-demand migration)
 10. Exit
 ```
 
@@ -80,11 +80,11 @@ Upon launch, you will be presented with the main menu:
 
 ## Menu Options & Usage
 
-### 1. Scan Local Directory (Sync Finder Tags & Clean Deletions)
-Scans a target directory path (e.g., `/Users/username/Pictures` or `/Volumes/ExternalDrive`), indexing all files and subdirectories.
+### 1. Scan & Index Directory (Read-only Catalog & Tag Sync)
+Scans a target directory path (e.g., `/Users/username/Pictures` or `/Volumes/ExternalDrive`), indexing all files and subdirectories into SQLite. **Strictly read-only on the filesystem: never moves, alters, or deletes files on disk.**
 - **Pre-Scan Finder Size Query**: Instantly queries macOS Finder via AppleScript for the target folder's total size before scanning starts.
 - **Dynamic Live Progress & ETA**: Displays real-time progress percentage (`%`), estimated local completion time (`ETA: hh:mm:ss AM/PM`), current I/O speed (`MB/s`), and elapsed time.
-- **Automatic Deletion Reconciliation**: Purges deleted files and removed subdirectories from the database.
+- **Database Deletion Reconciliation**: Prunes missing database records when previously indexed files are deleted from disk.
 - **Smart 24-Hour Skip Caching**: Skips scanning files in folders that were already scanned within the last $N$ hours and untouched since.
 - **macOS Finder Tags & EXIF Parsing**: Captures native Finder color/name tags and image camera/GPS metadata.
 - **Updates & Refreshes**: Automatically updates existing records if modified on disk.
