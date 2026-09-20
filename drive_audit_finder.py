@@ -227,16 +227,47 @@ def format_size(bytes_val: int) -> str:
     else:
         return f"{bytes_val / (1024**4):.2f} TB"
 
-def update_scan_progress(scanned_dirs: int, scanned_files: int, scanned_bytes: int, current_path: str, start_time: float, skipped_dirs: int = 0):
-    """Prints a single-line live progress indicator."""
-    elapsed = int(time.time() - start_time)
-    mins, secs = divmod(elapsed, 60)
+def get_finder_folder_size(folder_path: Path) -> int | None:
+    """Queries macOS Finder for the cached folder size in bytes before scanning."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        resolved = str(folder_path.resolve())
+        cmd = [
+            "osascript", "-e",
+            f'tell application "Finder" to get size of (POSIX file "{resolved}" as alias)'
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3.0)
+        if result.returncode == 0 and result.stdout.strip():
+            raw_val = result.stdout.strip()
+            if raw_val and raw_val != "missing value":
+                return int(float(raw_val))
+    except Exception:
+        pass
+    return None
+
+def update_scan_progress(scanned_dirs: int, scanned_files: int, scanned_bytes: int, current_path: str, start_time: float, skipped_dirs: int = 0, total_target_bytes: int | None = None):
+    """Prints a single-line live progress indicator with ETA, percentage, and current speed."""
+    elapsed = max(0.001, time.time() - start_time)
+    mins, secs = divmod(int(elapsed), 60)
     elapsed_str = f"{mins:02d}:{secs:02d}"
-    size_str = format_size(scanned_bytes)
+    speed_bytes_sec = scanned_bytes / elapsed
+    speed_str = f"{format_size(int(speed_bytes_sec))}/s"
     cols = shutil.get_terminal_size((80, 20)).columns
 
     skip_str = f" ({skipped_dirs:,} cached)" if skipped_dirs > 0 else ""
-    base_info = f"⏳ [{elapsed_str}] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({size_str}) -> "
+
+    if total_target_bytes and total_target_bytes > 0:
+        pct = min(99.9, (scanned_bytes / total_target_bytes) * 100) if scanned_bytes < total_target_bytes else 100.0
+        remaining_bytes = max(0, total_target_bytes - scanned_bytes)
+        eta_sec = remaining_bytes / max(speed_bytes_sec, 1)
+        eta_m, eta_s = divmod(int(eta_sec), 60)
+        eta_str = f"{eta_m:02d}:{eta_s:02d}"
+        size_info = f"{format_size(scanned_bytes)}/{format_size(total_target_bytes)} @ {speed_str}"
+        base_info = f"⏳ [{elapsed_str} | ETA {eta_str} | {pct:.1f}%] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({size_info}) -> "
+    else:
+        base_info = f"⏳ [{elapsed_str} | {speed_str}] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({format_size(scanned_bytes)}) -> "
+
     avail_cols = cols - len(base_info) - 2
     if avail_cols > 10:
         if len(current_path) > avail_cols:
@@ -268,6 +299,9 @@ def audit_directory_interactive(db_path: str):
             skip_hours = float(skip_input)
         except ValueError:
             skip_hours = 24.0
+
+    # Query macOS Finder for cached folder size to provide ETA
+    total_target_bytes = get_finder_folder_size(root)
 
     conn = init_database(db_path)
     cursor = conn.cursor()
@@ -301,8 +335,9 @@ def audit_directory_interactive(db_path: str):
             "total_bytes": f_bytes
         }
 
+    size_estimate_msg = f" (Target size: ~{format_size(total_target_bytes)})" if total_target_bytes else ""
     skip_msg = f"(skipping folders scanned < {skip_hours:g}h ago)" if skip_hours > 0 else "(full rescan)"
-    print(f"\nScanning: {root.resolve()} on host [{hostname}] {skip_msg} ... (Press Ctrl+C to stop)")
+    print(f"\nScanning: {root.resolve()} on host [{hostname}]{size_estimate_msg} {skip_msg} ... (Press Ctrl+C to stop)")
 
     scanned_files = 0
     scanned_dirs = 0
@@ -344,7 +379,7 @@ def audit_directory_interactive(db_path: str):
                             
                             now = time.time()
                             if now - last_progress_time >= 0.1:
-                                update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs)
+                                update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs, total_target_bytes)
                                 last_progress_time = now
                             continue
 
@@ -459,7 +494,7 @@ def audit_directory_interactive(db_path: str):
                     # Periodic UI update during large directories
                     now = time.time()
                     if now - last_progress_time >= 0.1:
-                        update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs)
+                        update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs, total_target_bytes)
                         last_progress_time = now
 
                     # Periodic commit every 2 seconds
@@ -470,7 +505,7 @@ def audit_directory_interactive(db_path: str):
                 # Progress update after directory completion
                 now = time.time()
                 if now - last_progress_time >= 0.1:
-                    update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs)
+                    update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs, total_target_bytes)
                     last_progress_time = now
 
             except PermissionError:

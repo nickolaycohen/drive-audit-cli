@@ -81,12 +81,12 @@ Upon launch, you will be presented with the main menu:
 
 ### 1. Scan Local Directory (Sync Finder Tags & Clean Deletions)
 Scans a target directory path (e.g., `/Users/username/Pictures` or `/Volumes/ExternalDrive`), indexing all files and subdirectories.
+- **Pre-Scan Finder Size Query**: Instantly queries macOS Finder via AppleScript for the target folder's total size before scanning starts.
+- **Dynamic Live Progress & ETA**: Displays real-time progress percentage (`%`), estimated time remaining (`ETA: mm:ss`), current I/O speed (`MB/s`), and elapsed time.
 - **Automatic Deletion Reconciliation**: Purges deleted files and removed subdirectories from the database.
-- Live single-line progress indicator with speed throttling.
-- Smart 24-hour skip caching for untouched folders.
-- Automatically extracts macOS Finder tags for directories and individual files.
-- Automatically extracts EXIF metadata for supported image files (`.jpg`, `.jpeg`, `.png`, `.heic`, `.raw`, `.cr2`, `.nef`, etc.).
-- Updates existing records if re-scanned.
+- **Smart 24-Hour Skip Caching**: Skips scanning files in folders that were already scanned within the last $N$ hours and untouched since.
+- **macOS Finder Tags & EXIF Parsing**: Captures native Finder color/name tags and image camera/GPS metadata.
+- **Updates & Refreshes**: Automatically updates existing records if modified on disk.
 
 ### 2. View Hosts & Storage Overview
 Displays a summary table showing all indexed hosts, their operating system, IP address, total file count, and aggregate storage size in gigabytes (GB).
