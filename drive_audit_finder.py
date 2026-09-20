@@ -308,9 +308,12 @@ def audit_directory_interactive(db_path: str):
     scanned_dirs = 0
     skipped_dirs = 0
     skipped_files = 0
+    purged_files = 0
+    purged_dirs = 0
     scanned_bytes = 0
     dir_tags_count = 0
     file_tags_count = 0
+    visited_dir_paths = set()
 
     start_time = time.time()
     last_progress_time = 0.0
@@ -324,6 +327,7 @@ def audit_directory_interactive(db_path: str):
 
             try:
                 resolved_path = str(dir_obj.resolve())
+                visited_dir_paths.add(resolved_path)
                 dir_stat = dir_obj.stat()
                 dir_mtime_dt = datetime.datetime.fromtimestamp(dir_stat.st_mtime)
 
@@ -374,7 +378,15 @@ def audit_directory_interactive(db_path: str):
                     """, (directory_id, tag, scan_time))
                     dir_tags_count += 1
 
-                # 2. Process Files inside Directory
+                # 2. Reconcile deleted files in this directory
+                current_filenames = set(filenames)
+                cursor.execute("SELECT id, name FROM files WHERE directory_id = ?", (directory_id,))
+                db_file_map = {row[1]: row[0] for row in cursor.fetchall()}
+                for del_name in (set(db_file_map.keys()) - current_filenames):
+                    cursor.execute("DELETE FROM files WHERE id = ?", (db_file_map[del_name],))
+                    purged_files += 1
+
+                # 3. Process Files inside Directory
                 for filename in filenames:
                     file_path = dir_obj / filename
                     if not file_path.exists():
@@ -464,6 +476,19 @@ def audit_directory_interactive(db_path: str):
             except PermissionError:
                 continue
 
+        # 4. Reconcile deleted subdirectories under the scanned root
+        resolved_root = str(root.resolve())
+        cursor.execute("""
+            SELECT id, path FROM directories
+            WHERE host_id = ? AND (path = ? OR path LIKE ? || '/%')
+        """, (host_id, resolved_root, resolved_root))
+        for d_id, d_path in cursor.fetchall():
+            if d_path not in visited_dir_paths:
+                cursor.execute("SELECT COUNT(*) FROM files WHERE directory_id = ?", (d_id,))
+                purged_files += cursor.fetchone()[0]
+                cursor.execute("DELETE FROM directories WHERE id = ?", (d_id,))
+                purged_dirs += 1
+
     except KeyboardInterrupt:
         conn.commit()
         conn.close()
@@ -491,7 +516,10 @@ def audit_directory_interactive(db_path: str):
     else:
         print(f"  • Folders indexed: {scanned_dirs:,} ({dir_tags_count:,} Finder tags)")
         print(f"  • Files indexed:   {scanned_files:,} ({file_tags_count:,} Finder tags)")
+    if purged_dirs > 0 or purged_files > 0:
+        print(f"  • Purged deleted:  {purged_dirs:,} folders, {purged_files:,} files removed from database")
     print(f"  • Total storage:   {format_size(scanned_bytes)}")
+
 
 
 def show_hosts_summary(db_path: str):
@@ -911,6 +939,50 @@ def search_files_by_tag(db_path: str):
         print(f"[{host}] [{tag.upper()}] [{category.upper()}] {name} ({size_mb:.2f} MB){cam_info}")
         print(f"  Path: {dir_path}/{name}\n")
 
+def prune_missing_records(db_path: str):
+    """Verifies all indexed directories and files against the filesystem, removing deleted items."""
+    if not os.path.exists(db_path):
+        print("\n[Notice] No database found. Run a scan first.")
+        return
+
+    print("\n--- PRUNE & SYNC DELETED RECORDS ---")
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, path FROM directories")
+    all_dirs = cursor.fetchall()
+
+    print(f"Checking {len(all_dirs):,} directories against filesystem...")
+    del_dirs = 0
+    del_files = 0
+
+    for did, dpath in all_dirs:
+        if not os.path.exists(dpath):
+            cursor.execute("SELECT COUNT(*) FROM files WHERE directory_id = ?", (did,))
+            del_files += cursor.fetchone()[0]
+            cursor.execute("DELETE FROM directories WHERE id = ?", (did,))
+            del_dirs += 1
+
+    # Check remaining files in existing directories
+    cursor.execute("SELECT f.id, f.name, d.path FROM files f JOIN directories d ON f.directory_id = d.id")
+    all_files = cursor.fetchall()
+    print(f"Checking {len(all_files):,} files against filesystem...")
+
+    for fid, fname, dpath in all_files:
+        full_path = os.path.join(dpath, fname)
+        if not os.path.exists(full_path):
+            cursor.execute("DELETE FROM files WHERE id = ?", (fid,))
+            del_files += 1
+
+    conn.commit()
+    conn.close()
+
+    print("\n" + "=" * 65)
+    print(f"[Success] Pruning complete!")
+    print(f"  • Removed missing folders: {del_dirs:,}")
+    print(f"  • Removed deleted files:   {del_files:,}")
+    print("=" * 65)
+
 def main():
     db_file = "drive_audit.db"
 
@@ -918,16 +990,17 @@ def main():
         print("\n" + "=" * 45)
         print("  DRIVE AUDIT & FINDER TAG MANAGER  ")
         print("=" * 45)
-        print("1. Scan local directory (Sync Finder Tags)")
+        print("1. Scan local directory (Sync Finder Tags & Clean Deletions)")
         print("2. View hosts & storage overview")
         print("3. View top-level folder scans report")
         print("4. Generate report of largest files")
-        print("5. List all active tags (Directory & File)")
-        print("6. Add manual tag to a directory")
-        print("7. Search files by tag (Finder & Manual)")
-        print("8. Exit")
+        print("5. Prune deleted files & folders (Sync DB with disk)")
+        print("6. List all active tags (Directory & File)")
+        print("7. Add manual tag to a directory")
+        print("8. Search files by tag (Finder & Manual)")
+        print("9. Exit")
 
-        choice = input("\nSelect option (1-8): ").strip()
+        choice = input("\nSelect option (1-9): ").strip()
 
         if choice == "1":
             audit_directory_interactive(db_file)
@@ -938,12 +1011,14 @@ def main():
         elif choice == "4":
             generate_largest_files_report(db_file)
         elif choice == "5":
-            list_all_tags(db_file)
+            prune_missing_records(db_file)
         elif choice == "6":
-            add_manual_directory_tag(db_file)
+            list_all_tags(db_file)
         elif choice == "7":
-            search_files_by_tag(db_file)
+            add_manual_directory_tag(db_file)
         elif choice == "8":
+            search_files_by_tag(db_file)
+        elif choice == "9":
             print("\nExiting Drive Audit Manager. Goodbye!")
             break
         else:

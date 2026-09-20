@@ -64,22 +64,24 @@ Upon launch, you will be presented with the main menu:
 =============================================
   DRIVE AUDIT & FINDER TAG MANAGER  
 =============================================
-1. Scan local directory (Sync Finder Tags)
+1. Scan local directory (Sync Finder Tags & Clean Deletions)
 2. View hosts & storage overview
 3. View top-level folder scans report
 4. Generate report of largest files
-5. List all active tags (Directory & File)
-6. Add manual tag to a directory
-7. Search files by tag (Finder & Manual)
-8. Exit
+5. Prune deleted files & folders (Sync DB with disk)
+6. List all active tags (Directory & File)
+7. Add manual tag to a directory
+8. Search files by tag (Finder & Manual)
+9. Exit
 ```
 
 ---
 
 ## Menu Options & Usage
 
-### 1. Scan Local Directory (Sync Finder Tags)
+### 1. Scan Local Directory (Sync Finder Tags & Clean Deletions)
 Scans a target directory path (e.g., `/Users/username/Pictures` or `/Volumes/ExternalDrive`), indexing all files and subdirectories.
+- **Automatic Deletion Reconciliation**: Purges deleted files and removed subdirectories from the database.
 - Live single-line progress indicator with speed throttling.
 - Smart 24-hour skip caching for untouched folders.
 - Automatically extracts macOS Finder tags for directories and individual files.
@@ -103,15 +105,18 @@ Displays a formatted ranking of the largest indexed files across all scanned hos
 - Displays formatted size, modified date, created date, hostname, and full path.
 - Optional one-click export to **CSV** (`largest_files_report.csv`) or **Markdown** (`largest_files_report.md`).
 
-### 5. List All Active Tags (Directory & File)
+### 5. Prune Deleted Files & Folders (Sync DB with Disk)
+Instantly validates all indexed directories and files in the database against the local filesystem, immediately purging records for files and folders that no longer exist on disk.
+
+### 6. List All Active Tags (Directory & File)
 Lists all discovered tags grouped by:
 - **Directory Tags**: Displays the tag name, source (`finder` vs `manual`), directory name, path, and host.
 - **File Tags**: Displays direct Finder tags attached to specific files.
 
-### 6. Add Manual Tag to a Directory
+### 7. Add Manual Tag to a Directory
 Allows you to search for directories by keyword and attach custom metadata tags directly to the folder in the database.
 
-### 7. Search Files by Tag (Finder & Manual)
+### 8. Search Files by Tag (Finder & Manual)
 Search for files matching a specific tag query. Matches both:
 - Tags placed directly on the file.
 - Tags inherited from the parent directory.
