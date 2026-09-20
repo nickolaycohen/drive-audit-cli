@@ -189,8 +189,55 @@ def init_database(db_path: str) -> sqlite3.Connection:
         )
     """)
 
+    # 7. App Settings Table (Key-Value Store)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     return conn
+
+def get_app_setting(db_path: str, key: str) -> str | None:
+    """Retrieves a persisted application setting from the database."""
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        cursor.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if row and row[0]:
+            conn.close()
+            return row[0]
+        # Fallback for last_scanned_dir to most recent directory scan if not set
+        if key == "last_scanned_dir":
+            cursor.execute("SELECT path FROM directories ORDER BY scanned_at DESC LIMIT 1")
+            dir_row = cursor.fetchone()
+            conn.close()
+            return dir_row[0] if dir_row else None
+        conn.close()
+        return None
+    except Exception:
+        return None
+
+def set_app_setting(db_path: str, key: str, value: str):
+    """Saves a persisted application setting into the database."""
+    try:
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        cursor.execute("""
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """, (key, value))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 def get_or_create_host(cursor: sqlite3.Cursor) -> int:
     """Detects current desktop host details and returns its database ID."""
@@ -419,12 +466,27 @@ def update_scan_progress(scanned_dirs: int, scanned_files: int, skipped_dirs: in
 def audit_directory_interactive(db_path: str):
     """Scans local directory, extracts Finder tags for folders/files, and stores EXIF."""
     print("\n--- NEW DRIVE / FOLDER AUDIT ---")
-    target_path = input("Enter path to scan (e.g., ./ or /Users/name/Pictures): ").strip().strip('"').strip("'")
+    last_dir = get_app_setting(db_path, "last_scanned_dir")
+
+    if last_dir and os.path.exists(last_dir):
+        prompt_msg = f"Enter path to scan [Default: {last_dir}]: "
+    else:
+        prompt_msg = "Enter path to scan (e.g., ./ or /Users/name/Pictures): "
+
+    target_input = input(prompt_msg).strip().strip('"').strip("'")
+    if not target_input and last_dir and os.path.exists(last_dir):
+        target_path = last_dir
+    else:
+        target_path = target_input
+
     root = Path(target_path)
 
     if not root.exists():
         print(f"\n[Error] Path '{target_path}' does not exist.")
         return
+
+    # Save last scanned path for future suggestion
+    set_app_setting(db_path, "last_scanned_dir", str(root.resolve()))
 
     skip_input = input("Skip folders scanned within last N hours? [Default: 24, enter 0 to force rescan]: ").strip()
     if not skip_input:
@@ -1171,10 +1233,21 @@ def prune_missing_records(db_path: str):
 def migrate_non_media_interactive(db_path: str):
     """Interactively segregates non-media files from a media directory to a NonMediaFiles destination while preserving folder structure."""
     print("\n--- SEGREGATE NON-MEDIA FILES ---")
-    source_input = input("Enter source media folder (e.g., /Volumes/LaCie/Storage/Priority 4/Pictures): ").strip().strip('"').strip("'")
-    source_root = Path(source_input)
+    last_dir = get_app_setting(db_path, "last_scanned_dir")
+    if last_dir and os.path.exists(last_dir):
+        prompt_msg = f"Enter source media folder [Default: {last_dir}]: "
+    else:
+        prompt_msg = "Enter source media folder (e.g., /Volumes/LaCie/Storage/Priority 4/Pictures): "
+
+    source_input = input(prompt_msg).strip().strip('"').strip("'")
+    if not source_input and last_dir and os.path.exists(last_dir):
+        source_path = last_dir
+    else:
+        source_path = source_input
+
+    source_root = Path(source_path)
     if not source_root.exists() or not source_root.is_dir():
-        print(f"\n[Error] Directory '{source_input}' does not exist.")
+        print(f"\n[Error] Directory '{source_path}' does not exist.")
         return
 
     default_dest = source_root.parent / "NonMediaFiles"
