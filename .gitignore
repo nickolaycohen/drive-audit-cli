@@ -1,8 +1,12 @@
 # SQLite database & journals
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 
 # Python bytecode & cache
 __pycache__/
