@@ -1,4 +1,7 @@
 import os
+import sys
+import time
+import shutil
 import sqlite3
 import datetime
 import socket
@@ -81,11 +84,18 @@ def extract_photo_exif(file_path: Path) -> dict:
         exif_data["exif_error"] = str(e)
     return exif_data
 
+def get_db_connection(db_path: str) -> sqlite3.Connection:
+    """Returns a SQLite connection configured with WAL mode, busy timeout, and foreign keys."""
+    conn = sqlite3.connect(db_path, timeout=60.0)
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 60000;")
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
 def init_database(db_path: str) -> sqlite3.Connection:
     """Creates schema supporting hosts, directories, directory_tags, files, file_tags, and media_metadata."""
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     cursor = conn.cursor()
-    cursor.execute("PRAGMA foreign_keys = ON;")
 
     # 1. Hosts Table
     cursor.execute("""
@@ -201,6 +211,41 @@ def get_or_create_host(cursor: sqlite3.Cursor) -> int:
     cursor.execute("SELECT id FROM hosts WHERE hostname = ?", (hostname,))
     return cursor.fetchone()[0]
 
+def format_size(bytes_val: int) -> str:
+    """Formats bytes into a readable string (KB, MB, GB, TB)."""
+    if bytes_val < 1024:
+        return f"{bytes_val} B"
+    elif bytes_val < 1024**2:
+        return f"{bytes_val / 1024:.1f} KB"
+    elif bytes_val < 1024**3:
+        return f"{bytes_val / (1024**2):.1f} MB"
+    elif bytes_val < 1024**4:
+        return f"{bytes_val / (1024**3):.2f} GB"
+    else:
+        return f"{bytes_val / (1024**4):.2f} TB"
+
+def update_scan_progress(scanned_dirs: int, scanned_files: int, scanned_bytes: int, current_path: str, start_time: float):
+    """Prints a single-line live progress indicator."""
+    elapsed = int(time.time() - start_time)
+    mins, secs = divmod(elapsed, 60)
+    elapsed_str = f"{mins:02d}:{secs:02d}"
+    size_str = format_size(scanned_bytes)
+    cols = shutil.get_terminal_size((80, 20)).columns
+
+    base_info = f"⏳ [{elapsed_str}] {scanned_dirs:,} dirs | {scanned_files:,} files ({size_str}) -> "
+    avail_cols = cols - len(base_info) - 2
+    if avail_cols > 10:
+        if len(current_path) > avail_cols:
+            display_path = "..." + current_path[-(avail_cols - 3):]
+        else:
+            display_path = current_path
+    else:
+        display_path = ""
+
+    status = f"{base_info}{display_path}"
+    sys.stdout.write(f"\r\033[K{status}")
+    sys.stdout.flush()
+
 def audit_directory_interactive(db_path: str):
     """Scans local directory, extracts Finder tags for folders/files, and stores EXIF."""
     print("\n--- NEW DRIVE / FOLDER AUDIT ---")
@@ -218,122 +263,170 @@ def audit_directory_interactive(db_path: str):
     host_id = get_or_create_host(cursor)
     hostname = socket.gethostname()
 
-    print(f"\nScanning: {root.resolve()} on host [{hostname}] ...")
+    print(f"\nScanning: {root.resolve()} on host [{hostname}] ... (Press Ctrl+C to stop anytime)")
     scanned_files = 0
     scanned_dirs = 0
+    scanned_bytes = 0
     dir_tags_count = 0
     file_tags_count = 0
 
-    for dirpath, _, filenames in os.walk(root):
-        dir_obj = Path(dirpath)
-        if not dir_obj.exists():
-            continue
+    start_time = time.time()
+    last_progress_time = 0.0
+    last_commit_time = time.time()
 
-        try:
-            # 1. Upsert Directory record
-            dir_stat = dir_obj.stat()
-            cursor.execute("""
-                INSERT INTO directories (host_id, path, name, created_at, modified_at, scanned_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(host_id, path) DO UPDATE SET
-                    modified_at=excluded.modified_at,
-                    scanned_at=excluded.scanned_at
-            """, (
-                host_id,
-                str(dir_obj.resolve()),
-                dir_obj.name or str(dir_obj.resolve()),
-                datetime.datetime.fromtimestamp(dir_stat.st_ctime).isoformat(),
-                datetime.datetime.fromtimestamp(dir_stat.st_mtime).isoformat(),
-                scan_time
-            ))
+    try:
+        for dirpath, _, filenames in os.walk(root):
+            dir_obj = Path(dirpath)
+            if not dir_obj.exists():
+                continue
 
-            cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, str(dir_obj.resolve())))
-            directory_id = cursor.fetchone()[0]
-            scanned_dirs += 1
-
-            # Extract Directory Finder Tags
-            finder_dir_tags = get_finder_tags(dir_obj)
-            for tag in finder_dir_tags:
+            try:
+                # 1. Upsert Directory record
+                dir_stat = dir_obj.stat()
                 cursor.execute("""
-                    INSERT INTO directory_tags (directory_id, tag_name, source, created_at)
-                    VALUES (?, ?, 'finder', ?)
-                    ON CONFLICT(directory_id, tag_name) DO NOTHING
-                """, (directory_id, tag, scan_time))
-                dir_tags_count += 1
+                    INSERT INTO directories (host_id, path, name, created_at, modified_at, scanned_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(host_id, path) DO UPDATE SET
+                        modified_at=excluded.modified_at,
+                        scanned_at=excluded.scanned_at
+                """, (
+                    host_id,
+                    str(dir_obj.resolve()),
+                    dir_obj.name or str(dir_obj.resolve()),
+                    datetime.datetime.fromtimestamp(dir_stat.st_ctime).isoformat(),
+                    datetime.datetime.fromtimestamp(dir_stat.st_mtime).isoformat(),
+                    scan_time
+                ))
 
-            # 2. Process Files inside Directory
-            for filename in filenames:
-                file_path = dir_obj / filename
-                if not file_path.exists():
-                    continue
+                cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, str(dir_obj.resolve())))
+                directory_id = cursor.fetchone()[0]
+                scanned_dirs += 1
 
-                try:
-                    stat = file_path.stat()
-                    ext = file_path.suffix.lower()
-                    category = get_file_category(ext)
-
+                # Extract Directory Finder Tags
+                finder_dir_tags = get_finder_tags(dir_obj)
+                for tag in finder_dir_tags:
                     cursor.execute("""
-                        INSERT INTO files (directory_id, name, category, extension, size_bytes, created_at, modified_at, scanned_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(directory_id, name) DO UPDATE SET
-                            size_bytes=excluded.size_bytes,
-                            modified_at=excluded.modified_at,
-                            scanned_at=excluded.scanned_at
-                    """, (
-                        directory_id,
-                        filename,
-                        category,
-                        ext,
-                        stat.st_size,
-                        datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                        datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                        scan_time
-                    ))
+                        INSERT INTO directory_tags (directory_id, tag_name, source, created_at)
+                        VALUES (?, ?, 'finder', ?)
+                        ON CONFLICT(directory_id, tag_name) DO NOTHING
+                    """, (directory_id, tag, scan_time))
+                    dir_tags_count += 1
 
-                    cursor.execute("SELECT id FROM files WHERE directory_id = ? AND name = ?", (directory_id, filename))
-                    file_id = cursor.fetchone()[0]
-                    scanned_files += 1
+                # 2. Process Files inside Directory
+                for filename in filenames:
+                    file_path = dir_obj / filename
+                    if not file_path.exists():
+                        continue
 
-                    # Extract File Finder Tags
-                    finder_file_tags = get_finder_tags(file_path)
-                    for tag in finder_file_tags:
+                    try:
+                        stat = file_path.stat()
+                        ext = file_path.suffix.lower()
+                        category = get_file_category(ext)
+                        file_size = stat.st_size
+                        scanned_bytes += file_size
+
                         cursor.execute("""
-                            INSERT INTO file_tags (file_id, tag_name, created_at)
-                            VALUES (?, ?, ?)
-                            ON CONFLICT(file_id, tag_name) DO NOTHING
-                        """, (file_id, tag, scan_time))
-                        file_tags_count += 1
+                            INSERT INTO files (directory_id, name, category, extension, size_bytes, created_at, modified_at, scanned_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(directory_id, name) DO UPDATE SET
+                                size_bytes=excluded.size_bytes,
+                                modified_at=excluded.modified_at,
+                                scanned_at=excluded.scanned_at
+                        """, (
+                            directory_id,
+                            filename,
+                            category,
+                            ext,
+                            file_size,
+                            datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                            datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                            scan_time
+                        ))
 
-                    # Extract Photo EXIF Metadata
-                    if category == "image":
-                        exif = extract_photo_exif(file_path)
-                        if exif:
+                        cursor.execute("SELECT id FROM files WHERE directory_id = ? AND name = ?", (directory_id, filename))
+                        file_id = cursor.fetchone()[0]
+                        scanned_files += 1
+
+                        # Extract File Finder Tags
+                        finder_file_tags = get_finder_tags(file_path)
+                        for tag in finder_file_tags:
                             cursor.execute("""
-                                INSERT INTO media_metadata (
-                                    file_id, camera_make, camera_model, date_taken, width, height,
-                                    gps_latitude, gps_longitude, f_number, exposure_time, iso
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
-                                file_id,
-                                exif.get("camera_make"),
-                                exif.get("camera_model"),
-                                exif.get("date_taken"),
-                                exif.get("width"),
-                                exif.get("height"),
-                                exif.get("gps_latitude"),
-                                exif.get("gps_longitude"),
-                                exif.get("f_number"),
-                                exif.get("exposure_time"),
-                                exif.get("iso")
-                            ))
-                except PermissionError:
-                    continue
-        except PermissionError:
-            continue
+                                INSERT INTO file_tags (file_id, tag_name, created_at)
+                                VALUES (?, ?, ?)
+                                ON CONFLICT(file_id, tag_name) DO NOTHING
+                            """, (file_id, tag, scan_time))
+                            file_tags_count += 1
+
+                        # Extract Photo EXIF Metadata
+                        if category == "image":
+                            exif = extract_photo_exif(file_path)
+                            if exif:
+                                cursor.execute("""
+                                    INSERT INTO media_metadata (
+                                        file_id, camera_make, camera_model, date_taken, width, height,
+                                        gps_latitude, gps_longitude, f_number, exposure_time, iso
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    file_id,
+                                    exif.get("camera_make"),
+                                    exif.get("camera_model"),
+                                    exif.get("date_taken"),
+                                    exif.get("width"),
+                                    exif.get("height"),
+                                    exif.get("gps_latitude"),
+                                    exif.get("gps_longitude"),
+                                    exif.get("f_number"),
+                                    exif.get("exposure_time"),
+                                    exif.get("iso")
+                                ))
+                    except PermissionError:
+                        continue
+
+                    # Periodic UI update during large directories
+                    now = time.time()
+                    if now - last_progress_time >= 0.1:
+                        update_scan_progress(scanned_dirs, scanned_files, scanned_bytes, str(dir_obj), start_time)
+                        last_progress_time = now
+
+                    # Periodic commit every 2 seconds
+                    if now - last_commit_time >= 2.0:
+                        conn.commit()
+                        last_commit_time = now
+
+                # Progress update after directory completion
+                now = time.time()
+                if now - last_progress_time >= 0.1:
+                    update_scan_progress(scanned_dirs, scanned_files, scanned_bytes, str(dir_obj), start_time)
+                    last_progress_time = now
+
+            except PermissionError:
+                continue
+
+    except KeyboardInterrupt:
+        conn.commit()
+        conn.close()
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        print(f"\n[Scan Interrupted] Stopped by user.")
+        print(f"  • Saved so far: {scanned_dirs:,} folders, {scanned_files:,} files ({format_size(scanned_bytes)}).")
+        return
 
     conn.commit()
     conn.close()
-    print(f"\n[Success] Audit complete! Indexed {scanned_dirs} folders ({dir_tags_count} folder Finder tags) and {scanned_files} files ({file_tags_count} file Finder tags) for host '{hostname}'.")
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+
+    elapsed = time.time() - start_time
+    mins, secs = divmod(int(elapsed), 60)
+    time_str = f"{mins}m {secs}s" if mins > 0 else f"{elapsed:.1f}s"
+
+    print(f"\n[Success] Audit complete in {time_str}!")
+    print(f"  • Host:            {hostname}")
+    print(f"  • Root scanned:    {root.resolve()}")
+    print(f"  • Folders indexed: {scanned_dirs:,} ({dir_tags_count:,} Finder tags)")
+    print(f"  • Files indexed:   {scanned_files:,} ({file_tags_count:,} Finder tags)")
+    print(f"  • Total storage:   {format_size(scanned_bytes)}")
+
 
 def show_hosts_summary(db_path: str):
     """Displays all indexed hosts and their total storage metrics."""
@@ -341,7 +434,7 @@ def show_hosts_summary(db_path: str):
         print("\n[Notice] No database found. Run a scan first.")
         return
 
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -372,7 +465,7 @@ def add_manual_directory_tag(db_path: str):
         return
 
     search_term = input("\nEnter folder name or path keyword: ").strip()
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -427,7 +520,7 @@ def list_all_tags(db_path: str):
         print("\n[Notice] No database found. Run a scan first.")
         return
 
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     cursor = conn.cursor()
 
     print("\n" + "=" * 65)
@@ -477,7 +570,7 @@ def search_files_by_tag(db_path: str):
 
     tag_query = input("\nEnter tag name to search (Finder or Manual): ").strip().lower()
 
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection(db_path)
     cursor = conn.cursor()
 
     cursor.execute("""
