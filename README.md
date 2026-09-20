@@ -66,11 +66,12 @@ Upon launch, you will be presented with the main menu:
 =============================================
 1. Scan local directory (Sync Finder Tags)
 2. View hosts & storage overview
-3. Generate report of largest files
-4. List all active tags (Directory & File)
-5. Add manual tag to a directory
-6. Search files by tag (Finder & Manual)
-7. Exit
+3. View top-level folder scans report
+4. Generate report of largest files
+5. List all active tags (Directory & File)
+6. Add manual tag to a directory
+7. Search files by tag (Finder & Manual)
+8. Exit
 ```
 
 ---
@@ -88,22 +89,29 @@ Scans a target directory path (e.g., `/Users/username/Pictures` or `/Volumes/Ext
 ### 2. View Hosts & Storage Overview
 Displays a summary table showing all indexed hosts, their operating system, IP address, total file count, and aggregate storage size in gigabytes (GB).
 
-### 3. Generate Report of Largest Files
+### 3. View Top-Level Folder Scans Report
+Provides an overarching summary of each primary root folder scanned:
+- Total subdirectories, total files, and cumulative storage per root scan.
+- Detailed file category breakdown (image, video, document, archive, code, other).
+- Top direct subfolders with individual subtree storage and file counts.
+- Optional one-click export to **CSV** (`top_level_scans_report.csv`) or **Markdown** (`top_level_scans_report.md`).
+
+### 4. Generate Report of Largest Files
 Displays a formatted ranking of the largest indexed files across all scanned hosts:
 - Configurable result limit (e.g. top 25, 50, 100).
 - Optional category filter (`video`, `image`, `document`, `archive`, `code`, `other`).
 - Displays formatted size, modified date, created date, hostname, and full path.
 - Optional one-click export to **CSV** (`largest_files_report.csv`) or **Markdown** (`largest_files_report.md`).
 
-### 4. List All Active Tags (Directory & File)
+### 5. List All Active Tags (Directory & File)
 Lists all discovered tags grouped by:
 - **Directory Tags**: Displays the tag name, source (`finder` vs `manual`), directory name, path, and host.
 - **File Tags**: Displays direct Finder tags attached to specific files.
 
-### 5. Add Manual Tag to a Directory
+### 6. Add Manual Tag to a Directory
 Allows you to search for directories by keyword and attach custom metadata tags directly to the folder in the database.
 
-### 6. Search Files by Tag (Finder & Manual)
+### 7. Search Files by Tag (Finder & Manual)
 Search for files matching a specific tag query. Matches both:
 - Tags placed directly on the file.
 - Tags inherited from the parent directory.

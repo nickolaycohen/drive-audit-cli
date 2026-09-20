@@ -524,6 +524,147 @@ def show_hosts_summary(db_path: str):
         print(f"{host:<20} | {os_name or 'N/A':<10} | {ip or 'N/A':<15} | {count or 0:<8} | {gb:.2f} GB")
     print("=" * 75)
 
+def generate_top_level_scans_report(db_path: str):
+    """Generates a detailed breakdown report for each top-level scanned root folder."""
+    if not os.path.exists(db_path):
+        print("\n[Notice] No database found. Run a scan first.")
+        return
+
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+
+    # Identify top-level roots (directories with no parent directory recorded for that host)
+    query_roots = """
+        SELECT d.id, d.path, d.name, d.scanned_at, h.hostname, h.id
+        FROM directories d
+        JOIN hosts h ON d.host_id = h.id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM directories parent
+            WHERE parent.host_id = d.host_id
+              AND parent.id != d.id
+              AND d.path LIKE parent.path || '/%'
+        )
+        ORDER BY d.path;
+    """
+    cursor.execute(query_roots)
+    roots = cursor.fetchall()
+
+    if not roots:
+        print("\nNo scanned folders found in database.")
+        conn.close()
+        return
+
+    print("\n" + "=" * 90)
+    print(f"TOP-LEVEL SCANNED FOLDERS REPORT ({len(roots)} root scans found)")
+    print("=" * 90)
+
+    report_data = []
+
+    for idx, (rid, rpath, rname, rscanned, rhost, hid) in enumerate(roots, 1):
+        # 1. Total statistics for this root tree
+        cursor.execute("""
+            SELECT 
+                COUNT(DISTINCT child.id) as total_dirs,
+                COUNT(f.id) as total_files,
+                COALESCE(SUM(f.size_bytes), 0) as total_bytes
+            FROM directories child
+            LEFT JOIN files f ON f.directory_id = child.id
+            WHERE child.host_id = ?
+              AND (child.path = ? OR child.path LIKE ? || '/%')
+        """, (hid, rpath, rpath))
+        tree_dirs, tree_files, tree_bytes = cursor.fetchone()
+
+        # 2. Category breakdown
+        cursor.execute("""
+            SELECT f.category, COUNT(f.id), COALESCE(SUM(f.size_bytes), 0)
+            FROM directories child
+            JOIN files f ON f.directory_id = child.id
+            WHERE child.host_id = ?
+              AND (child.path = ? OR child.path LIKE ? || '/%')
+            GROUP BY f.category
+            ORDER BY SUM(f.size_bytes) DESC
+        """, (hid, rpath, rpath))
+        categories = cursor.fetchall()
+        cat_str_list = [f"{cat}: {cnt:,} ({format_size(sz)})" for cat, cnt, sz in categories]
+        cat_summary = " | ".join(cat_str_list) if cat_str_list else "None"
+
+        # 3. Direct immediate subfolders
+        cursor.execute("""
+            SELECT d.name,
+                   (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.host_id = d.host_id AND (sub.path = d.path OR sub.path LIKE d.path || '/%')) as sub_files,
+                   (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.host_id = d.host_id AND (sub.path = d.path OR sub.path LIKE d.path || '/%')) as sub_bytes
+            FROM directories d
+            WHERE d.host_id = ?
+              AND d.path LIKE ? || '/%'
+              AND d.path NOT LIKE ? || '/%/%'
+            ORDER BY sub_bytes DESC
+            LIMIT 5
+        """, (hid, rpath, rpath))
+        top_subdirs = cursor.fetchall()
+
+        scan_time_str = rscanned.replace("T", " ")[:19] if rscanned else "N/A"
+        size_str = format_size(tree_bytes)
+
+        print(f"[{idx}] {rpath}")
+        print(f"    • Host:            {rhost}")
+        print(f"    • Last Scanned:    {scan_time_str}")
+        print(f"    • Subdirectories:  {tree_dirs:,} folders")
+        print(f"    • Total Files:     {tree_files:,} files")
+        print(f"    • Total Storage:   {size_str}")
+        print(f"    • Category Types:  {cat_summary}")
+
+        if top_subdirs:
+            print("    • Top Direct Subfolders:")
+            for sname, sfiles, sbytes in top_subdirs:
+                print(f"        - {sname}: {format_size(sbytes)} ({sfiles:,} files)")
+        print()
+
+        report_data.append({
+            "rank": idx,
+            "path": rpath,
+            "name": rname,
+            "host": rhost,
+            "scanned_at": scan_time_str,
+            "total_dirs": tree_dirs,
+            "total_files": tree_files,
+            "total_bytes": tree_bytes,
+            "total_size_str": size_str,
+            "categories": cat_summary,
+            "top_subdirs": "; ".join([f"{sn} ({format_size(sb)}, {sf} files)" for sn, sf, sb in top_subdirs])
+        })
+
+    print("=" * 90)
+    conn.close()
+
+    # Optional export to CSV or Markdown
+    export_choice = input("Export report to file? (c = CSV, m = Markdown, n = No) [Default: n]: ").strip().lower()
+    if export_choice == "c":
+        filename = "top_level_scans_report.csv"
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Rank", "Root Path", "Folder Name", "Host", "Last Scanned At", "Total Folders", "Total Files", "Total Bytes", "Formatted Size", "Category Breakdown", "Top Subfolders"])
+                for item in report_data:
+                    writer.writerow([item["rank"], item["path"], item["name"], item["host"], item["scanned_at"], item["total_dirs"], item["total_files"], item["total_bytes"], item["total_size_str"], item["categories"], item["top_subdirs"]])
+            print(f"[Success] Report exported to: {os.path.abspath(filename)}")
+        except Exception as e:
+            print(f"[Error] Failed to export CSV: {e}")
+
+    elif export_choice == "m":
+        filename = "top_level_scans_report.md"
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"# Top-Level Scanned Folders Report\n\n")
+                f.write(f"**Generated**: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n")
+                f.write("| # | Root Path | Host | Total Size | Files | Folders | Last Scanned | Categories |\n")
+                f.write("|---|---|---|---|---|---|---|---|\n")
+                for item in report_data:
+                    f.write(f"| {item['rank']} | `{item['path']}` | {item['host']} | **{item['total_size_str']}** | {item['total_files']:,} | {item['total_dirs']:,} | {item['scanned_at']} | {item['categories']} |\n")
+            print(f"[Success] Report exported to: {os.path.abspath(filename)}")
+        except Exception as e:
+            print(f"[Error] Failed to export Markdown: {e}")
+
+
 def generate_largest_files_report(db_path: str):
     """Generates a detailed report of the largest indexed files, with optional category filter and file export."""
     if not os.path.exists(db_path):
@@ -779,27 +920,30 @@ def main():
         print("=" * 45)
         print("1. Scan local directory (Sync Finder Tags)")
         print("2. View hosts & storage overview")
-        print("3. Generate report of largest files")
-        print("4. List all active tags (Directory & File)")
-        print("5. Add manual tag to a directory")
-        print("6. Search files by tag (Finder & Manual)")
-        print("7. Exit")
+        print("3. View top-level folder scans report")
+        print("4. Generate report of largest files")
+        print("5. List all active tags (Directory & File)")
+        print("6. Add manual tag to a directory")
+        print("7. Search files by tag (Finder & Manual)")
+        print("8. Exit")
 
-        choice = input("\nSelect option (1-7): ").strip()
+        choice = input("\nSelect option (1-8): ").strip()
 
         if choice == "1":
             audit_directory_interactive(db_file)
         elif choice == "2":
             show_hosts_summary(db_file)
         elif choice == "3":
-            generate_largest_files_report(db_file)
+            generate_top_level_scans_report(db_file)
         elif choice == "4":
-            list_all_tags(db_file)
+            generate_largest_files_report(db_file)
         elif choice == "5":
-            add_manual_directory_tag(db_file)
+            list_all_tags(db_file)
         elif choice == "6":
-            search_files_by_tag(db_file)
+            add_manual_directory_tag(db_file)
         elif choice == "7":
+            search_files_by_tag(db_file)
+        elif choice == "8":
             print("\nExiting Drive Audit Manager. Goodbye!")
             break
         else:
