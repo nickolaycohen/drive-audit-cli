@@ -224,7 +224,7 @@ def format_size(bytes_val: int) -> str:
     else:
         return f"{bytes_val / (1024**4):.2f} TB"
 
-def update_scan_progress(scanned_dirs: int, scanned_files: int, scanned_bytes: int, current_path: str, start_time: float):
+def update_scan_progress(scanned_dirs: int, scanned_files: int, scanned_bytes: int, current_path: str, start_time: float, skipped_dirs: int = 0):
     """Prints a single-line live progress indicator."""
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
@@ -232,7 +232,8 @@ def update_scan_progress(scanned_dirs: int, scanned_files: int, scanned_bytes: i
     size_str = format_size(scanned_bytes)
     cols = shutil.get_terminal_size((80, 20)).columns
 
-    base_info = f"⏳ [{elapsed_str}] {scanned_dirs:,} dirs | {scanned_files:,} files ({size_str}) -> "
+    skip_str = f" ({skipped_dirs:,} cached)" if skipped_dirs > 0 else ""
+    base_info = f"⏳ [{elapsed_str}] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({size_str}) -> "
     avail_cols = cols - len(base_info) - 2
     if avail_cols > 10:
         if len(current_path) > avail_cols:
@@ -256,6 +257,15 @@ def audit_directory_interactive(db_path: str):
         print(f"\n[Error] Path '{target_path}' does not exist.")
         return
 
+    skip_input = input("Skip folders scanned within last N hours? [Default: 24, enter 0 to force rescan]: ").strip()
+    if not skip_input:
+        skip_hours = 24.0
+    else:
+        try:
+            skip_hours = float(skip_input)
+        except ValueError:
+            skip_hours = 24.0
+
     conn = init_database(db_path)
     cursor = conn.cursor()
     scan_time = datetime.datetime.now().isoformat()
@@ -263,9 +273,38 @@ def audit_directory_interactive(db_path: str):
     host_id = get_or_create_host(cursor)
     hostname = socket.gethostname()
 
-    print(f"\nScanning: {root.resolve()} on host [{hostname}] ... (Press Ctrl+C to stop anytime)")
+    # Preload existing directories for host to enable fast O(1) cache lookups
+    cursor.execute("""
+        SELECT d.id, d.path, d.scanned_at, d.modified_at, COUNT(f.id), COALESCE(SUM(f.size_bytes), 0)
+        FROM directories d
+        LEFT JOIN files f ON d.id = f.directory_id
+        WHERE d.host_id = ?
+        GROUP BY d.id
+    """, (host_id,))
+
+    existing_dirs = {}
+    for row in cursor.fetchall():
+        dir_id, d_path, scanned_at_str, mod_at_str, f_count, f_bytes = row
+        scanned_dt = None
+        if scanned_at_str:
+            try:
+                scanned_dt = datetime.datetime.fromisoformat(scanned_at_str)
+            except Exception:
+                pass
+        existing_dirs[d_path] = {
+            "id": dir_id,
+            "scanned_at": scanned_dt,
+            "file_count": f_count,
+            "total_bytes": f_bytes
+        }
+
+    skip_msg = f"(skipping folders scanned < {skip_hours:g}h ago)" if skip_hours > 0 else "(full rescan)"
+    print(f"\nScanning: {root.resolve()} on host [{hostname}] {skip_msg} ... (Press Ctrl+C to stop)")
+
     scanned_files = 0
     scanned_dirs = 0
+    skipped_dirs = 0
+    skipped_files = 0
     scanned_bytes = 0
     dir_tags_count = 0
     file_tags_count = 0
@@ -281,8 +320,28 @@ def audit_directory_interactive(db_path: str):
                 continue
 
             try:
-                # 1. Upsert Directory record
+                resolved_path = str(dir_obj.resolve())
                 dir_stat = dir_obj.stat()
+                dir_mtime_dt = datetime.datetime.fromtimestamp(dir_stat.st_mtime)
+
+                # Smart Cache Check: skip folder if scanned < skip_hours ago and untouched since
+                if skip_hours > 0 and resolved_path in existing_dirs:
+                    cached = existing_dirs[resolved_path]
+                    last_scanned = cached["scanned_at"]
+                    if last_scanned:
+                        hours_since_scan = (datetime.datetime.now() - last_scanned).total_seconds() / 3600.0
+                        if hours_since_scan < skip_hours and dir_mtime_dt <= last_scanned:
+                            skipped_dirs += 1
+                            skipped_files += cached["file_count"]
+                            scanned_bytes += cached["total_bytes"]
+                            
+                            now = time.time()
+                            if now - last_progress_time >= 0.1:
+                                update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs)
+                                last_progress_time = now
+                            continue
+
+                # 1. Upsert Directory record
                 cursor.execute("""
                     INSERT INTO directories (host_id, path, name, created_at, modified_at, scanned_at)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -291,14 +350,14 @@ def audit_directory_interactive(db_path: str):
                         scanned_at=excluded.scanned_at
                 """, (
                     host_id,
-                    str(dir_obj.resolve()),
-                    dir_obj.name or str(dir_obj.resolve()),
+                    resolved_path,
+                    dir_obj.name or resolved_path,
                     datetime.datetime.fromtimestamp(dir_stat.st_ctime).isoformat(),
                     datetime.datetime.fromtimestamp(dir_stat.st_mtime).isoformat(),
                     scan_time
                 ))
 
-                cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, str(dir_obj.resolve())))
+                cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, resolved_path))
                 directory_id = cursor.fetchone()[0]
                 scanned_dirs += 1
 
@@ -385,7 +444,7 @@ def audit_directory_interactive(db_path: str):
                     # Periodic UI update during large directories
                     now = time.time()
                     if now - last_progress_time >= 0.1:
-                        update_scan_progress(scanned_dirs, scanned_files, scanned_bytes, str(dir_obj), start_time)
+                        update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs)
                         last_progress_time = now
 
                     # Periodic commit every 2 seconds
@@ -396,7 +455,7 @@ def audit_directory_interactive(db_path: str):
                 # Progress update after directory completion
                 now = time.time()
                 if now - last_progress_time >= 0.1:
-                    update_scan_progress(scanned_dirs, scanned_files, scanned_bytes, str(dir_obj), start_time)
+                    update_scan_progress(scanned_dirs, scanned_files + skipped_files, scanned_bytes, resolved_path, start_time, skipped_dirs)
                     last_progress_time = now
 
             except PermissionError:
@@ -408,7 +467,7 @@ def audit_directory_interactive(db_path: str):
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
         print(f"\n[Scan Interrupted] Stopped by user.")
-        print(f"  • Saved so far: {scanned_dirs:,} folders, {scanned_files:,} files ({format_size(scanned_bytes)}).")
+        print(f"  • Processed: {scanned_dirs:,} folders ({skipped_dirs:,} cached), {scanned_files + skipped_files:,} files ({format_size(scanned_bytes)}).")
         return
 
     conn.commit()
@@ -423,8 +482,12 @@ def audit_directory_interactive(db_path: str):
     print(f"\n[Success] Audit complete in {time_str}!")
     print(f"  • Host:            {hostname}")
     print(f"  • Root scanned:    {root.resolve()}")
-    print(f"  • Folders indexed: {scanned_dirs:,} ({dir_tags_count:,} Finder tags)")
-    print(f"  • Files indexed:   {scanned_files:,} ({file_tags_count:,} Finder tags)")
+    if skipped_dirs > 0:
+        print(f"  • Folders indexed: {scanned_dirs:,} scanned ({skipped_dirs:,} skipped — scanned < {skip_hours:g}h ago)")
+        print(f"  • Files indexed:   {scanned_files:,} scanned ({skipped_files:,} verified from cache)")
+    else:
+        print(f"  • Folders indexed: {scanned_dirs:,} ({dir_tags_count:,} Finder tags)")
+        print(f"  • Files indexed:   {scanned_files:,} ({file_tags_count:,} Finder tags)")
     print(f"  • Total storage:   {format_size(scanned_bytes)}")
 
 

@@ -12,7 +12,9 @@ A fast, lightweight CLI utility for auditing local drives, cataloging files, ind
 - **Photo EXIF Metadata Parsing**: Automatically parses EXIF data from images (camera make/model, date taken, resolution, GPS coordinates, ISO, f-stop, exposure time).
 - **File Categorization**: Automatically categorizes files into `image`, `video`, `audio`, `document`, `archive`, `code`, and `other`.
 - **Search & Reporting**: Search files across direct tags and inherited folder tags, view storage breakdowns per host, and list all active tags.
-- **Relational SQLite Database**: Structured schema with foreign keys and cascade rules for clean data integrity and easy custom querying.
+- **Live Progress & Smart Caching**: Real-time terminal progress indicators and automatic skip-caching for folders scanned within a configurable window (default: 24h) if unchanged on disk.
+- **Interruption Resilience**: Periodic batch commits and graceful `Ctrl+C` interrupt handling ensure zero data loss during long scans.
+- **Relational SQLite Database**: Structured schema with WAL mode, foreign keys, and cascade rules for clean data integrity and easy custom querying.
 
 ---
 
