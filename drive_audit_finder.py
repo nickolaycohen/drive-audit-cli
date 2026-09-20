@@ -677,8 +677,9 @@ def audit_directory_interactive(db_path: str):
         conn.close()
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
+        total_bytes = tracker.cached_bytes + tracker.fresh_bytes
         print(f"\n[Scan Interrupted] Stopped by user.")
-        print(f"  • Processed: {scanned_dirs:,} folders ({skipped_dirs:,} cached), {scanned_files + skipped_files:,} files ({format_size(scanned_bytes)}).")
+        print(f"  • Processed: {scanned_dirs:,} folders ({skipped_dirs:,} cached), {scanned_files + skipped_files:,} files ({format_size(total_bytes)}).")
         return
 
     conn.commit()
@@ -686,9 +687,10 @@ def audit_directory_interactive(db_path: str):
     sys.stdout.write("\r\033[K")
     sys.stdout.flush()
 
-    elapsed = time.time() - start_time
+    elapsed = time.time() - tracker.start_time
     mins, secs = divmod(int(elapsed), 60)
     time_str = f"{mins}m {secs}s" if mins > 0 else f"{elapsed:.1f}s"
+    total_bytes = tracker.cached_bytes + tracker.fresh_bytes
 
     print(f"\n[Success] Audit complete in {time_str}!")
     print(f"  • Host:            {hostname}")
@@ -701,7 +703,7 @@ def audit_directory_interactive(db_path: str):
         print(f"  • Files indexed:   {scanned_files:,} ({file_tags_count:,} Finder tags)")
     if purged_dirs > 0 or purged_files > 0:
         print(f"  • Purged deleted:  {purged_dirs:,} folders, {purged_files:,} files removed from database")
-    print(f"  • Total storage:   {format_size(scanned_bytes)}")
+    print(f"  • Total storage:   {format_size(total_bytes)}")
 
 
 
