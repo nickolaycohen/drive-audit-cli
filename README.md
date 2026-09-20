@@ -72,7 +72,8 @@ Upon launch, you will be presented with the main menu:
 6. List all active tags (Directory & File)
 7. Add manual tag to a directory
 8. Search files by tag (Finder & Manual)
-9. Exit
+9. Segregate non-media files from folder (Clean Media Library)
+10. Exit
 ```
 
 ---
@@ -82,7 +83,7 @@ Upon launch, you will be presented with the main menu:
 ### 1. Scan Local Directory (Sync Finder Tags & Clean Deletions)
 Scans a target directory path (e.g., `/Users/username/Pictures` or `/Volumes/ExternalDrive`), indexing all files and subdirectories.
 - **Pre-Scan Finder Size Query**: Instantly queries macOS Finder via AppleScript for the target folder's total size before scanning starts.
-- **Dynamic Live Progress & ETA**: Displays real-time progress percentage (`%`), estimated time remaining (`ETA: mm:ss`), current I/O speed (`MB/s`), and elapsed time.
+- **Dynamic Live Progress & ETA**: Displays real-time progress percentage (`%`), estimated local completion time (`ETA: hh:mm:ss AM/PM`), current I/O speed (`MB/s`), and elapsed time.
 - **Automatic Deletion Reconciliation**: Purges deleted files and removed subdirectories from the database.
 - **Smart 24-Hour Skip Caching**: Skips scanning files in folders that were already scanned within the last $N$ hours and untouched since.
 - **macOS Finder Tags & EXIF Parsing**: Captures native Finder color/name tags and image camera/GPS metadata.
@@ -121,6 +122,14 @@ Search for files matching a specific tag query. Matches both:
 - Tags placed directly on the file.
 - Tags inherited from the parent directory.
 - Displays file category, file size in MB, full path, and camera model (if EXIF exists).
+
+### 9. Segregate Non-Media Files from Folder (Clean Media Library)
+Audits a source photo/video library folder and cleans it by:
+- Preserving all photos and videos in the source directory.
+- Relocating non-media files (documents, executables, archives, design `.psd` files, scripts) to a destination folder (e.g., `NonMediaFiles`), mirroring the relative folder hierarchy.
+- Optionally purging legacy Windows and Picasa thumbnail caches (`Thumbs.db`, `.picasa.ini`, `*.pal`, `*.pmp`, `.tmp`).
+- Pruning empty directories left in the source media directory.
+- Offering immediate database sync/reconciliation.
 
 ---
 

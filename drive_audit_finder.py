@@ -1168,6 +1168,138 @@ def prune_missing_records(db_path: str):
     print(f"  • Removed deleted files:   {del_files:,}")
     print("=" * 65)
 
+def migrate_non_media_interactive(db_path: str):
+    """Interactively segregates non-media files from a media directory to a NonMediaFiles destination while preserving folder structure."""
+    print("\n--- SEGREGATE NON-MEDIA FILES ---")
+    source_input = input("Enter source media folder (e.g., /Volumes/LaCie/Storage/Priority 4/Pictures): ").strip().strip('"').strip("'")
+    source_root = Path(source_input)
+    if not source_root.exists() or not source_root.is_dir():
+        print(f"\n[Error] Directory '{source_input}' does not exist.")
+        return
+
+    default_dest = source_root.parent / "NonMediaFiles"
+    dest_input = input(f"Enter target destination folder [Default: {default_dest}]: ").strip().strip('"').strip("'")
+    dest_root = Path(dest_input) if dest_input else default_dest
+
+    purge_junk = input("Purge legacy thumbnail/metadata caches (Thumbs.db, .picasa.ini, .pal, .pmp, etc.)? [Y/n]: ").strip().lower()
+    do_purge = purge_junk != 'n'
+
+    MEDIA_EXTS = {
+        '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.heic', '.raw', '.cr2', '.nef',
+        '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.mpg', '.mpeg', '.vob', '.mts', '.m2ts'
+    }
+
+    DELETE_EXTS = {'.pal', '.pmp', '.tmp', '.bak'}
+
+    def is_junk_cache(f_name, ext_lower):
+        fn_lower = f_name.lower()
+        if fn_lower in ('thumbs.db', '.picasa.ini', 'picasa.ini', '.ds_store', '._.ds_store', 'desktop.ini') or fn_lower.startswith('desktop (') or f_name.startswith('._'):
+            return True
+        if ext_lower in DELETE_EXTS:
+            return True
+        if ext_lower == '.db' and any(k in fn_lower for k in ('thumb', 'picasa', 'preview', 'album', 'facetemplate')):
+            return True
+        return False
+
+    print(f"\nScanning '{source_root}' to analyze file distribution...")
+    to_keep_media = []
+    to_delete = []
+    to_move = []
+
+    for root, dirs, files in os.walk(source_root):
+        for f in files:
+            fp = Path(root) / f
+            try:
+                sz = fp.stat().st_size
+                ext_lower = fp.suffix.lower()
+                rel = fp.relative_to(source_root)
+                if ext_lower in MEDIA_EXTS:
+                    to_keep_media.append((fp, sz))
+                elif do_purge and is_junk_cache(f, ext_lower):
+                    to_delete.append((fp, sz, f))
+                else:
+                    to_move.append((fp, sz, rel, dest_root / rel))
+            except Exception:
+                pass
+
+    print("\n" + "=" * 65)
+    print("MIGRATION PREVIEW")
+    print("=" * 65)
+    print(f"  • Media files to KEEP in source:       {len(to_keep_media):,} files ({format_size(sum(x[1] for x in to_keep_media))})")
+    if do_purge:
+        print(f"  • Junk/Cache files to DELETE:          {len(to_delete):,} files ({format_size(sum(x[1] for x in to_delete))})")
+    print(f"  • Non-media files to MOVE:             {len(to_move):,} files ({format_size(sum(x[1] for x in to_move))})")
+    print(f"  • Destination:                         {dest_root}")
+    print("=" * 65)
+
+    if not to_move and not to_delete:
+        print("\n[Notice] No non-media files or junk caches found to process.")
+        return
+
+    confirm = input("\nProceed with migration? [y/N]: ").strip().lower()
+    if confirm != 'y':
+        print("\n[Cancelled] Migration aborted by user.")
+        return
+
+    dest_root.mkdir(parents=True, exist_ok=True)
+    deleted_count = 0
+    deleted_bytes = 0
+    moved_count = 0
+    moved_bytes = 0
+    errors = []
+
+    print("\nExecuting migration...")
+
+    # 1. Delete caches
+    for fp, sz, f in to_delete:
+        try:
+            fp.unlink()
+            deleted_count += 1
+            deleted_bytes += sz
+        except Exception as e:
+            errors.append(f"Delete failed: {fp} ({e})")
+
+    # 2. Move non-media
+    for fp, sz, rel, dest_fp in to_move:
+        try:
+            dest_fp.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(fp), str(dest_fp))
+            moved_count += 1
+            moved_bytes += sz
+        except Exception as e:
+            errors.append(f"Move failed: {fp} -> {dest_fp} ({e})")
+
+    # 3. Prune empty folders in source
+    pruned_dirs = 0
+    for root, dirs, files in os.walk(source_root, topdown=False):
+        rp = Path(root)
+        if rp != source_root:
+            try:
+                if not any(rp.iterdir()):
+                    rp.rmdir()
+                    pruned_dirs += 1
+            except Exception:
+                pass
+
+    print("\n" + "=" * 65)
+    print("[Success] Non-Media Migration Complete!")
+    print(f"  • Media files preserved:               {len(to_keep_media):,} ({format_size(sum(x[1] for x in to_keep_media))})")
+    if do_purge:
+        print(f"  • Junk/Cache files deleted:            {deleted_count:,} ({format_size(deleted_bytes)})")
+    print(f"  • Non-media files moved:               {moved_count:,} ({format_size(moved_bytes)})")
+    print(f"  • Empty folders pruned from source:    {pruned_dirs:,}")
+    if errors:
+        print(f"  • Errors encountered:                  {len(errors)}")
+        for err in errors[:5]:
+            print(f"    - {err}")
+    print("=" * 65)
+
+    # Option to auto-sync DB
+    if os.path.exists(db_path):
+        sync_db = input("\nReconcile database (prune deleted records & update DB)? [Y/n]: ").strip().lower()
+        if sync_db != 'n':
+            prune_missing_records(db_path)
+
 def main():
     db_file = "drive_audit.db"
 
@@ -1183,9 +1315,10 @@ def main():
         print("6. List all active tags (Directory & File)")
         print("7. Add manual tag to a directory")
         print("8. Search files by tag (Finder & Manual)")
-        print("9. Exit")
+        print("9. Segregate non-media files from folder (Clean Media Library)")
+        print("10. Exit")
 
-        choice = input("\nSelect option (1-9): ").strip()
+        choice = input("\nSelect option (1-10): ").strip()
 
         if choice == "1":
             audit_directory_interactive(db_file)
@@ -1204,6 +1337,8 @@ def main():
         elif choice == "8":
             search_files_by_tag(db_file)
         elif choice == "9":
+            migrate_non_media_interactive(db_file)
+        elif choice == "10":
             print("\nExiting Drive Audit Manager. Goodbye!")
             break
         else:
