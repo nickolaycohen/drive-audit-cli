@@ -9,9 +9,11 @@ import socket
 import platform
 import plistlib
 import subprocess
+import logging
 from pathlib import Path
 try:
     import exifread
+    logging.getLogger('exifread').setLevel(logging.ERROR)
 except ImportError:
     exifread = None
 
