@@ -261,10 +261,16 @@ def update_scan_progress(scanned_dirs: int, scanned_files: int, scanned_bytes: i
         pct = min(99.9, (scanned_bytes / total_target_bytes) * 100) if scanned_bytes < total_target_bytes else 100.0
         remaining_bytes = max(0, total_target_bytes - scanned_bytes)
         eta_sec = remaining_bytes / max(speed_bytes_sec, 1)
-        eta_m, eta_s = divmod(int(eta_sec), 60)
-        eta_str = f"{eta_m:02d}:{eta_s:02d}"
+
+        now = datetime.datetime.now()
+        finish_dt = now + datetime.timedelta(seconds=eta_sec)
+        if finish_dt.date() == now.date():
+            eta_time_str = finish_dt.strftime("%I:%M:%S %p").lstrip("0")
+        else:
+            eta_time_str = finish_dt.strftime("%b %d %I:%M %p").lstrip("0")
+
         size_info = f"{format_size(scanned_bytes)}/{format_size(total_target_bytes)} @ {speed_str}"
-        base_info = f"⏳ [{elapsed_str} | ETA {eta_str} | {pct:.1f}%] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({size_info}) -> "
+        base_info = f"⏳ [{elapsed_str} | ETA: {eta_time_str} | {pct:.1f}%] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({size_info}) -> "
     else:
         base_info = f"⏳ [{elapsed_str} | {speed_str}] {scanned_dirs:,} dirs{skip_str} | {scanned_files:,} files ({format_size(scanned_bytes)}) -> "
 
