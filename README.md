@@ -114,8 +114,12 @@ Lists all discovered tags grouped by:
 - **Directory Tags**: Displays the tag name, source (`finder` vs `manual`), directory name, path, and host.
 - **File Tags**: Displays direct Finder tags attached to specific files.
 
-### 7. Add Manual Tag to a Directory
-Allows you to search for directories by keyword and attach custom metadata tags directly to the folder in the database.
+### 7. Tag & Sync Folders (Priority Tiers, Finder Colors & DB)
+Provides a comprehensive tagging suite with two-way Finder $\leftrightarrow$ SQLite synchronization:
+- **Auto-Tag Storage Tree by Priority & Category**: Recursively applies Priority tier tags with macOS Finder colors (🔴 Priority 1 = Red, 🔵 Priority 2 = Blue, 🟣 Priority 3 = Purple, 🟡 Priority 4 = Yellow) and Category tags across storage directory trees.
+- **Manual Folder Tagging**: Attach custom tags and pick Finder colors (Gray, Green, Purple, Blue, Yellow, Red, Orange) with immediate disk and DB sync.
+- **Remove / Clear Folder Tags**: Strip Finder extended attributes and DB tags cleanly.
+- **Re-Sync Finder Tags from Disk to DB**: Re-reads all Finder tags from filesystem attributes to refresh database records.
 
 ### 8. Search Files by Tag (Finder & Manual)
 Search for files matching a specific tag query. Matches both:
@@ -123,7 +127,7 @@ Search for files matching a specific tag query. Matches both:
 - Tags inherited from the parent directory.
 - Displays file category, file size in MB, full path, and camera model (if EXIF exists).
 
-### 9. Segregate Non-Media Files from Folder (Clean Media Library)
+### 9. Segregate Non-Media Files from Folder (On-demand Migration)
 Audits a source photo/video library folder and cleans it by:
 - Preserving all photos and videos in the source directory.
 - Relocating non-media files (documents, executables, archives, design `.psd` files, scripts) to a destination folder (e.g., `NonMediaFiles`), mirroring the relative folder hierarchy.

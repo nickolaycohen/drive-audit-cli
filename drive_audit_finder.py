@@ -36,28 +36,140 @@ def get_file_category(extension: str) -> str:
             return category
     return "other"
 
+# C-level Extended Attributes for macOS Finder Tagging
+if platform.system() == "Darwin":
+    try:
+        import ctypes
+        _libc = ctypes.cdll.LoadLibrary('libc.dylib')
+        _setxattr = _libc.setxattr
+        _setxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        _setxattr.restype = ctypes.c_int
+
+        _getxattr = _libc.getxattr
+        _getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        _getxattr.restype = ctypes.c_ssize_t
+
+        _removexattr = _libc.removexattr
+        _removexattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+        _removexattr.restype = ctypes.c_int
+    except Exception:
+        _libc = None
+else:
+    _libc = None
+
+FINDER_COLOR_MAP = {
+    0: "None",
+    1: "Gray",
+    2: "Green",
+    3: "Purple",
+    4: "Blue",
+    5: "Yellow",
+    6: "Red",
+    7: "Orange",
+}
+
+PRIORITY_TIER_CONFIG = {
+    "priority 1": {"tag": "Priority 1", "color": 6, "color_name": "Red"},
+    "priority 2": {"tag": "Priority 2", "color": 4, "color_name": "Blue"},
+    "priority 3": {"tag": "Priority 3", "color": 3, "color_name": "Purple"},
+    "priority 4": {"tag": "Priority 4", "color": 5, "color_name": "Yellow"},
+}
+
+def set_finder_tags(file_or_dir_path: Path, tag_entries: list) -> bool:
+    """Writes macOS Finder tags to extended attributes with optional color codes."""
+    if platform.system() != "Darwin":
+        return False
+    try:
+        raw_entries = []
+        for entry in tag_entries:
+            if isinstance(entry, tuple):
+                name, color_idx = entry
+                raw_entries.append(f"{name}\n{color_idx}")
+            else:
+                raw_entries.append(entry if "\n" in entry else f"{entry}\n0")
+
+        raw_plist = plistlib.dumps(raw_entries, fmt=plistlib.FMT_BINARY)
+        resolved_bytes = str(file_or_dir_path.resolve()).encode('utf-8')
+        if _libc:
+            ret = _setxattr(resolved_bytes, b'com.apple.metadata:_kMDItemUserTags', raw_plist, len(raw_plist), 0, 0)
+            return ret == 0
+        else:
+            cmd = ["xattr", "-w", "-x", "com.apple.metadata:_kMDItemUserTags", raw_plist.hex(), str(file_or_dir_path.resolve())]
+            res = subprocess.run(cmd, capture_output=True)
+            return res.returncode == 0
+    except Exception:
+        return False
+
+def remove_finder_tags(file_or_dir_path: Path) -> bool:
+    """Removes macOS Finder tags from extended attributes."""
+    if platform.system() != "Darwin":
+        return False
+    try:
+        resolved_bytes = str(file_or_dir_path.resolve()).encode('utf-8')
+        if _libc:
+            ret = _removexattr(resolved_bytes, b'com.apple.metadata:_kMDItemUserTags', 0)
+            return ret == 0
+        else:
+            cmd = ["xattr", "-d", "com.apple.metadata:_kMDItemUserTags", str(file_or_dir_path.resolve())]
+            res = subprocess.run(cmd, capture_output=True)
+            return res.returncode == 0
+    except Exception:
+        return False
+
 def get_finder_tags(file_or_dir_path: Path) -> list:
     """Extracts macOS Finder tags from extended attributes (com.apple.metadata:_kMDItemUserTags)."""
     tags = []
     if platform.system() != "Darwin":
-        return tags  # Finder tags are macOS-specific
+        return tags
 
     try:
+        resolved_bytes = str(file_or_dir_path.resolve()).encode('utf-8')
+        if _libc:
+            buf_size = _getxattr(resolved_bytes, b'com.apple.metadata:_kMDItemUserTags', None, 0, 0, 0)
+            if buf_size > 0:
+                buf = ctypes.create_string_buffer(buf_size)
+                _getxattr(resolved_bytes, b'com.apple.metadata:_kMDItemUserTags', buf, buf_size, 0, 0)
+                plist_data = plistlib.loads(buf.raw)
+                for tag_entry in plist_data:
+                    tag_name = tag_entry.split('\n')[0].strip().lower()
+                    if tag_name:
+                        tags.append(tag_name)
+                return tags
+
         cmd = ["xattr", "-p", "com.apple.metadata:_kMDItemUserTags", str(file_or_dir_path.resolve())]
         result = subprocess.run(cmd, capture_output=True)
-
         if result.returncode == 0 and result.stdout:
             hex_str = result.stdout.decode('utf-8').replace(" ", "").replace("\n", "")
             raw_data = bytes.fromhex(hex_str)
             plist_data = plistlib.loads(raw_data)
-            
             for tag_entry in plist_data:
-                # Finder tags can be "TagName\nColorIndex" or plain "TagName"
                 tag_name = tag_entry.split('\n')[0].strip().lower()
                 if tag_name:
                     tags.append(tag_name)
     except Exception:
-        pass  # Gracefully ignore permission or missing attribute errors
+        pass
+
+    return tags
+
+def derive_folder_tags(folder_path: Path) -> list:
+    """Derives Priority Tier tag (with Finder color) and Category tag based on directory path."""
+    tags = []
+    path_parts = folder_path.resolve().parts
+
+    tier_found = None
+    for part in path_parts:
+        part_clean = part.strip().lower()
+        if part_clean in PRIORITY_TIER_CONFIG:
+            tier_info = PRIORITY_TIER_CONFIG[part_clean]
+            tags.append((tier_info["tag"], tier_info["color"]))
+            tier_found = part
+            break
+
+    if tier_found and tier_found in path_parts:
+        tier_idx = path_parts.index(tier_found)
+        if len(path_parts) > tier_idx + 1:
+            category_name = path_parts[tier_idx + 1]
+            tags.append((category_name, 0))
 
     return tags
 
@@ -1039,61 +1151,286 @@ def generate_largest_files_report(db_path: str):
             print(f"[Error] Failed to export Markdown: {e}")
 
 
-def add_manual_directory_tag(db_path: str):
-    """Manually tag a directory via CLI interface."""
-    if not os.path.exists(db_path):
-        print("\n[Notice] No database found. Run a scan first.")
+def auto_tag_priority_tree_interactive(db_path: str):
+    """Recursively derives and applies Priority Tier (with colors) and Category tags across a folder tree."""
+    print("\n--- AUTO-TAG STORAGE TREE (PRIORITY & CATEGORY) ---")
+    last_dir = get_app_setting(db_path, "last_scanned_dir")
+    default_root = last_dir if (last_dir and os.path.exists(last_dir)) else "/Volumes/LaCie/Storage"
+
+    target_input = input(f"Enter target root folder [Default: {default_root}]: ").strip().strip('"').strip("'")
+    target_path = target_input if target_input else default_root
+    root = Path(target_path)
+
+    if not root.exists() or not root.is_dir():
+        print(f"\n[Error] Directory '{target_path}' does not exist.")
         return
 
-    search_term = input("\nEnter folder name or path keyword: ").strip()
-    conn = get_db_connection(db_path)
-    cursor = conn.cursor()
+    print("\nSelect Tagging Scope:")
+    print("  1. Recursive (All subfolders inherit Priority Tier & Category tags) [Recommended]")
+    print("  2. Top 2 levels only (Priority tier folder & direct category folders)")
+    scope_choice = input("Choice [1/2, default: 1]: ").strip()
+    recursive = scope_choice != "2"
 
-    cursor.execute("""
-        SELECT d.id, d.name, d.path, h.hostname 
-        FROM directories d
-        JOIN hosts h ON d.host_id = h.id
-        WHERE d.name LIKE ? OR d.path LIKE ?
-        LIMIT 10
-    """, (f"%{search_term}%", f"%{search_term}%"))
+    print(f"\nAnalyzing '{root}'...")
+    folders_to_tag = []
 
-    dirs = cursor.fetchall()
+    if recursive:
+        for dirpath, dirs, files in os.walk(root):
+            dp = Path(dirpath)
+            tags = derive_folder_tags(dp)
+            if tags:
+                folders_to_tag.append((dp, tags))
+    else:
+        tags_root = derive_folder_tags(root)
+        if tags_root:
+            folders_to_tag.append((root, tags_root))
+        for item in root.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                tags = derive_folder_tags(item)
+                if tags:
+                    folders_to_tag.append((item, tags))
+                for sub in item.iterdir():
+                    if sub.is_dir() and not sub.name.startswith('.'):
+                        sub_tags = derive_folder_tags(sub)
+                        if sub_tags:
+                            folders_to_tag.append((sub, sub_tags))
 
-    if not dirs:
-        print("\nNo matching directories found.")
+    if not folders_to_tag:
+        print("\n[Notice] No priority tiers or categories detected in the specified path.")
+        return
+
+    print("\n" + "=" * 75)
+    print(f"TAGGING PREVIEW ({len(folders_to_tag):,} folders to be tagged)")
+    print("=" * 75)
+    for folder, tags in folders_to_tag[:12]:
+        tag_str = ", ".join([f"[{name} ({FINDER_COLOR_MAP.get(c, 'None')})]" if c > 0 else f"[{name}]" for name, c in tags])
+        print(f"  • {folder} -> {tag_str}")
+    if len(folders_to_tag) > 12:
+        print(f"  ... and {len(folders_to_tag) - 12:,} more folders")
+    print("=" * 75)
+
+    confirm = input("\nApply tags to macOS Finder and SQLite database? [y/N]: ").strip().lower()
+    if confirm != 'y':
+        print("\n[Cancelled] Auto-tagging aborted.")
+        return
+
+    print("\nApplying tags to filesystem and syncing database...")
+    conn = get_db_connection(db_path) if os.path.exists(db_path) else None
+    cursor = conn.cursor() if conn else None
+    scan_time = datetime.datetime.now().isoformat()
+    host_id = get_or_create_host(cursor) if cursor else None
+
+    tagged_count = 0
+    errors = 0
+
+    for folder, tags in folders_to_tag:
+        success = set_finder_tags(folder, tags)
+        if success:
+            tagged_count += 1
+        else:
+            errors += 1
+
+        if cursor and host_id:
+            resolved_p = str(folder.resolve())
+            cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, resolved_p))
+            row = cursor.fetchone()
+            if row:
+                d_id = row[0]
+                for tag_name, _ in tags:
+                    cursor.execute("""
+                        INSERT INTO directory_tags (directory_id, tag_name, source, created_at)
+                        VALUES (?, ?, 'finder', ?)
+                        ON CONFLICT(directory_id, tag_name) DO NOTHING
+                    """, (d_id, tag_name.lower(), scan_time))
+
+    if conn:
+        conn.commit()
         conn.close()
-        return
 
-    print("\nMatching Directories:")
-    for idx, (dir_id, name, path, host) in enumerate(dirs, 1):
-        print(f"{idx}. [{host}] {name} -> {path} (ID: {dir_id})")
+    print("\n" + "=" * 65)
+    print(f"[Success] Tagged {tagged_count:,} folders in macOS Finder and SQLite!")
+    if errors > 0:
+        print(f"  • Non-fatal permission/filesystem skips: {errors}")
+    print("=" * 65)
 
-    choice = input("\nSelect directory number to tag (or 'c' to cancel): ").strip()
-    if not choice.isdigit() or int(choice) < 1 or int(choice) > len(dirs):
+def manual_tag_directory_interactive(db_path: str):
+    """Tags a specific directory on disk with custom text and Finder color, syncing to DB."""
+    print("\n--- MANUAL FOLDER TAGGING ---")
+    folder_input = input("Enter directory path to tag (or enter keyword to search DB): ").strip().strip('"').strip("'")
+    if not folder_input:
         print("Cancelled.")
-        conn.close()
         return
 
-    selected_dir_id = dirs[int(choice) - 1][0]
-    selected_dir_name = dirs[int(choice) - 1][1]
+    target_dir = Path(folder_input)
+    if not target_dir.exists() or not target_dir.is_dir():
+        # Search DB
+        if not os.path.exists(db_path):
+            print(f"\n[Error] Path '{folder_input}' not found.")
+            return
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, path FROM directories WHERE name LIKE ? OR path LIKE ? LIMIT 10", (f"%{folder_input}%", f"%{folder_input}%"))
+        matches = cursor.fetchall()
+        conn.close()
+        if not matches:
+            print(f"\n[Error] Directory '{folder_input}' not found on disk or in database.")
+            return
+        print("\nMatching Directories:")
+        for idx, (did, name, path) in enumerate(matches, 1):
+            print(f"  {idx}. {name} -> {path}")
+        sel = input("Select number (or 'c' to cancel): ").strip()
+        if not sel.isdigit() or int(sel) < 1 or int(sel) > len(matches):
+            print("Cancelled.")
+            return
+        target_dir = Path(matches[int(sel)-1][2])
 
-    tag_name = input(f"Enter manual tag for '{selected_dir_name}': ").strip().lower()
+    tag_name = input(f"\nEnter tag name for '{target_dir.name}': ").strip()
     if not tag_name:
         print("Tag name cannot be empty.")
-        conn.close()
         return
 
-    try:
-        cursor.execute("""
-            INSERT INTO directory_tags (directory_id, tag_name, source, created_at)
-            VALUES (?, ?, 'manual', ?)
-        """, (selected_dir_id, tag_name, datetime.datetime.now().isoformat()))
-        conn.commit()
-        print(f"\n[Success] Manual tag '{tag_name}' attached to '{selected_dir_name}'.")
-    except sqlite3.IntegrityError:
-        print(f"\n[Notice] Tag '{tag_name}' is already attached to this folder.")
+    print("\nSelect Finder Color:")
+    for code, color_name in FINDER_COLOR_MAP.items():
+        print(f"  {code}: {color_name}")
+    color_input = input("Enter color number (0-7, default: 0): ").strip()
+    color_code = int(color_input) if color_input.isdigit() and 0 <= int(color_input) <= 7 else 0
 
+    # Write Finder tag
+    existing_tags = get_finder_tags(target_dir)
+    updated_tags = [(tag_name, color_code)] + [(t, 0) for t in existing_tags if t != tag_name.lower()]
+    set_finder_tags(target_dir, updated_tags)
+
+    # Sync to DB
+    if os.path.exists(db_path):
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+        host_id = get_or_create_host(cursor)
+        scan_time = datetime.datetime.now().isoformat()
+        resolved_p = str(target_dir.resolve())
+        cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, resolved_p))
+        row = cursor.fetchone()
+        if row:
+            cursor.execute("""
+                INSERT INTO directory_tags (directory_id, tag_name, source, created_at)
+                VALUES (?, ?, 'manual', ?)
+                ON CONFLICT(directory_id, tag_name) DO NOTHING
+            """, (row[0], tag_name.lower(), scan_time))
+            conn.commit()
+        conn.close()
+
+    print(f"\n[Success] Tag '[{tag_name} ({FINDER_COLOR_MAP[color_code]})]' applied to '{target_dir}' in Finder and DB.")
+
+def clear_tags_directory_interactive(db_path: str):
+    """Removes Finder tags from a directory on disk and cleans DB records."""
+    print("\n--- REMOVE / CLEAR FOLDER TAGS ---")
+    folder_input = input("Enter directory path to clear tags from: ").strip().strip('"').strip("'")
+    target_dir = Path(folder_input)
+    if not target_dir.exists() or not target_dir.is_dir():
+        print(f"\n[Error] Directory '{folder_input}' does not exist.")
+        return
+
+    recursive = input("Clear tags recursively for all subfolders too? [y/N]: ").strip().lower() == 'y'
+    confirm = input(f"Are you sure you want to remove tags from '{target_dir}'? [y/N]: ").strip().lower()
+    if confirm != 'y':
+        print("Cancelled.")
+        return
+
+    cleared = 0
+    dirs_to_clear = [target_dir]
+    if recursive:
+        for root, dirs, files in os.walk(target_dir):
+            dirs_to_clear.append(Path(root))
+
+    conn = get_db_connection(db_path) if os.path.exists(db_path) else None
+    cursor = conn.cursor() if conn else None
+    host_id = get_or_create_host(cursor) if cursor else None
+
+    for d in set(dirs_to_clear):
+        if remove_finder_tags(d):
+            cleared += 1
+        if cursor and host_id:
+            resolved_p = str(d.resolve())
+            cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, resolved_p))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute("DELETE FROM directory_tags WHERE directory_id = ?", (row[0],))
+
+    if conn:
+        conn.commit()
+        conn.close()
+
+    print(f"\n[Success] Tags cleared from {cleared:,} directories on disk and in database.")
+
+def resync_finder_tags_interactive(db_path: str):
+    """Re-reads Finder tags from extended attributes on disk and synchronizes SQLite database."""
+    print("\n--- RE-SYNC FINDER TAGS FROM DISK TO DB ---")
+    last_dir = get_app_setting(db_path, "last_scanned_dir")
+    default_root = last_dir if (last_dir and os.path.exists(last_dir)) else "/Volumes/LaCie/Storage"
+    target_input = input(f"Enter root folder to scan for Finder tags [Default: {default_root}]: ").strip().strip('"').strip("'")
+    target_path = target_input if target_input else default_root
+    root = Path(target_path)
+
+    if not root.exists() or not root.is_dir():
+        print(f"\n[Error] Directory '{target_path}' does not exist.")
+        return
+
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+    host_id = get_or_create_host(cursor)
+    scan_time = datetime.datetime.now().isoformat()
+
+    synced_dirs = 0
+    synced_tags = 0
+
+    print(f"\nReading Finder tags across '{root}'...")
+    for dirpath, dirs, files in os.walk(root):
+        dp = Path(dirpath)
+        tags = get_finder_tags(dp)
+        if tags:
+            resolved_p = str(dp.resolve())
+            cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, resolved_p))
+            row = cursor.fetchone()
+            if row:
+                d_id = row[0]
+                synced_dirs += 1
+                for tag in tags:
+                    cursor.execute("""
+                        INSERT INTO directory_tags (directory_id, tag_name, source, created_at)
+                        VALUES (?, ?, 'finder', ?)
+                        ON CONFLICT(directory_id, tag_name) DO NOTHING
+                    """, (d_id, tag, scan_time))
+                    synced_tags += 1
+
+    conn.commit()
     conn.close()
+    print(f"\n[Success] Re-synced {synced_tags:,} tags across {synced_dirs:,} directories into SQLite database.")
+
+def tag_manager_interactive(db_path: str):
+    """Submenu for auto-tagging, manual tagging, tag clearing, and Finder-to-DB sync."""
+    while True:
+        print("\n" + "=" * 55)
+        print("  FOLDER TAGGING & FINDER SYNC MANAGER  ")
+        print("=" * 55)
+        print("1. Auto-tag Storage tree by Priority & Category (Finder Colors + DB Sync)")
+        print("2. Manually tag a directory (Custom text & Finder color)")
+        print("3. Remove / clear tags from a directory")
+        print("4. Re-sync Finder tags from disk into SQLite Database")
+        print("5. Return to main menu")
+
+        choice = input("\nSelect option (1-5): ").strip()
+
+        if choice == "1":
+            auto_tag_priority_tree_interactive(db_path)
+        elif choice == "2":
+            manual_tag_directory_interactive(db_path)
+        elif choice == "3":
+            clear_tags_directory_interactive(db_path)
+        elif choice == "4":
+            resync_finder_tags_interactive(db_path)
+        elif choice == "5":
+            break
+        else:
+            print("\n[Error] Invalid option.")
 
 def list_all_tags(db_path: str):
     """Lists all detected Finder tags and manual tags across folders and files."""
@@ -1386,7 +1723,7 @@ def main():
         print("4. Generate report of largest files")
         print("5. Prune deleted records from DB (Sync with disk)")
         print("6. List all active tags (Directory & File)")
-        print("7. Add manual tag to a directory")
+        print("7. Tag & sync folders (Priority Tiers, Finder Colors & DB)")
         print("8. Search files by tag (Finder & Manual)")
         print("9. Segregate non-media files from folder (On-demand migration)")
         print("10. Exit")
@@ -1406,7 +1743,7 @@ def main():
         elif choice == "6":
             list_all_tags(db_file)
         elif choice == "7":
-            add_manual_directory_tag(db_file)
+            tag_manager_interactive(db_file)
         elif choice == "8":
             search_files_by_tag(db_file)
         elif choice == "9":
