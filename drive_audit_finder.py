@@ -10,7 +10,7 @@ import platform
 import plistlib
 import subprocess
 import logging
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 try:
     import exifread
@@ -309,6 +309,11 @@ def init_database(db_path: str) -> sqlite3.Connection:
         )
     """)
 
+    # 8. Performance Indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_name_size ON files(name, size_bytes);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_directories_path ON directories(path);")
+
     conn.commit()
     return conn
 
@@ -353,12 +358,20 @@ def set_app_setting(db_path: str, key: str, value: str):
 
 def get_or_create_host(cursor: sqlite3.Cursor) -> int:
     """Detects current desktop host details and returns its database ID."""
-    hostname = socket.gethostname()
+    if platform.system() == "Darwin":
+        try:
+            local_name = subprocess.check_output(["scutil", "--get", "LocalHostName"], timeout=2).decode().strip()
+            hostname = f"{local_name}.local" if local_name else socket.gethostname()
+        except Exception:
+            hostname = socket.gethostname()
+    else:
+        hostname = socket.gethostname()
+
     os_name = platform.system()
     scan_time = datetime.datetime.now().isoformat()
 
     try:
-        ip_address = socket.gethostbyname(hostname)
+        ip_address = socket.gethostbyname(socket.gethostname())
     except Exception:
         ip_address = "127.0.0.1"
 
@@ -1710,6 +1723,423 @@ def migrate_non_media_interactive(db_path: str):
         if sync_db != 'n':
             prune_missing_records(db_path)
 
+def detect_and_resolve_duplicates_interactive(db_path: str):
+    """Interactively detects duplicate files, identifies keeper copies inside the Storage repository, and allows safe cleanup of redundant copies."""
+    if not os.path.exists(db_path):
+        print("\n[Notice] No database found. Run a scan first.")
+        return
+
+    print("\n" + "=" * 70)
+    print("  INTERACTIVE DUPLICATE DETECTION & RESOLVER  ")
+    print("=" * 70)
+
+    # 1. Storage repository root (to preserve)
+    last_dir = get_app_setting(db_path, "last_scanned_dir")
+    default_storage = "/Volumes/LaCie/Storage"
+    if not os.path.exists(default_storage) and last_dir:
+        default_storage = last_dir
+
+    storage_input = input(f"Enter primary Storage repository path to PRESERVE [Default: {default_storage}]: ").strip().strip('"').strip("'")
+    storage_root = storage_input if storage_input else default_storage
+    storage_root = str(Path(storage_root).resolve())
+
+    # 2. Number of duplicate groups to inspect
+    limit_input = input("How many top duplicate groups to inspect? (e.g., 50, 100, or 'all') [Default: 50]: ").strip().lower()
+    if limit_input == "all":
+        limit = None
+    else:
+        try:
+            limit = int(limit_input) if limit_input else 50
+        except ValueError:
+            limit = 50
+
+    # 3. Category filter
+    cat_input = input("Filter by category (video/image/audio/document/archive/code/other, or Enter for all): ").strip().lower()
+
+    # 4. Cleanup Scope
+    print("\nCleanup Scope:")
+    print("  1. Clean OUTSIDE Storage only (Safest: preserves Storage copies, deletes copies in staging/restore paths)")
+    print("  2. Full Deduplication (Preserves 1 best copy in Storage, deletes redundant copies both inside & outside)")
+    scope_choice = input("Select scope (1 or 2) [Default: 1]: ").strip()
+    scope = 2 if scope_choice == "2" else 1
+
+    # 5. Interactive vs Batch Mode
+    print("\nExecution Mode:")
+    print("  [B]atch review (Preview all candidates, confirm, and execute all at once) [Default]")
+    print("  [S]tep-by-step (Review and confirm each duplicate group individually)")
+    mode_choice = input("Select mode (b/s) [Default: b]: ").strip().lower()
+    step_mode = mode_choice == "s"
+
+    print("\nQuerying duplicate files from database...")
+
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+
+    # Build query
+    cat_filter = ""
+    params = []
+    if cat_input and (cat_input in EXTENSION_MAP or cat_input == "other"):
+        cat_filter = "AND category = ?"
+        params.append(cat_input)
+
+    limit_clause = f"LIMIT {limit}" if limit else ""
+
+    query = f"""
+        WITH top_duplicates AS (
+            SELECT name, size_bytes
+            FROM files
+            WHERE size_bytes > 0 {cat_filter}
+            GROUP BY name, size_bytes
+            HAVING COUNT(*) > 1
+            ORDER BY size_bytes DESC
+            {limit_clause}
+        )
+        SELECT 
+            f.id AS file_id,
+            f.name,
+            f.category,
+            f.size_bytes,
+            f.modified_at,
+            d.path,
+            h.hostname,
+            COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') AS folder_tags,
+            COALESCE(GROUP_CONCAT(DISTINCT ft.tag_name), '-') AS file_tags
+        FROM top_duplicates td
+        JOIN files f ON f.name = td.name AND f.size_bytes = td.size_bytes
+        JOIN directories d ON f.directory_id = d.id
+        JOIN hosts h ON d.host_id = h.id
+        LEFT JOIN directory_tags dt ON d.id = dt.directory_id
+        LEFT JOIN file_tags ft ON f.id = ft.file_id
+        GROUP BY f.id
+        ORDER BY f.size_bytes DESC, f.name, d.path;
+    """
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        print("\n[Notice] No duplicate files found matching the criteria.")
+        return
+
+    # Group by (name, size_bytes)
+    groups = defaultdict(list)
+    for r in rows:
+        fid, name, cat, sz, mtime, dpath, host, dtags, ftags = r
+        full_p = f"{dpath}/{name}"
+        groups[(name, sz, cat)].append({
+            "file_id": fid,
+            "name": name,
+            "category": cat,
+            "size_bytes": sz,
+            "modified_at": mtime,
+            "dir_path": dpath,
+            "full_path": full_p,
+            "host": host,
+            "folder_tags": dtags,
+            "file_tags": ftags
+        })
+
+    def get_tier_rank(path_str: str) -> int:
+        p_lower = path_str.lower()
+        if "priority 1" in p_lower:
+            return 1
+        elif "priority 2" in p_lower:
+            return 2
+        elif "priority 3" in p_lower:
+            return 3
+        elif "priority 4" in p_lower:
+            return 4
+        return 5
+
+    # Process resolution plan for each group
+    resolution_plan = []
+    total_reclaimable_bytes = 0
+    total_deletions_count = 0
+
+    for (name, sz, cat), copies in groups.items():
+        storage_copies = [c for c in copies if c["full_path"].startswith(storage_root)]
+        outside_copies = [c for c in copies if not c["full_path"].startswith(storage_root)]
+
+        if storage_copies:
+            # Sort storage copies by tier rank, then shortest path
+            storage_copies.sort(key=lambda c: (get_tier_rank(c["full_path"]), len(c["full_path"])))
+            keeper = storage_copies[0]
+            
+            if scope == 1:
+                # Scope 1: Only delete outside copies
+                to_delete = outside_copies
+            else:
+                # Scope 2: Full deduplication
+                to_delete = [c for c in copies if c["file_id"] != keeper["file_id"]]
+        else:
+            # No copies in storage
+            if scope == 1:
+                # In Scope 1, skip groups with 0 copies in Storage to avoid data loss
+                keeper = copies[0]
+                to_delete = []
+            else:
+                copies.sort(key=lambda c: (len(c["full_path"])))
+                keeper = copies[0]
+                to_delete = copies[1:]
+
+        if to_delete:
+            group_reclaimable = sum(c["size_bytes"] for c in to_delete)
+            total_reclaimable_bytes += group_reclaimable
+            total_deletions_count += len(to_delete)
+
+        resolution_plan.append({
+            "name": name,
+            "size_bytes": sz,
+            "category": cat,
+            "copies": copies,
+            "keeper": keeper,
+            "to_delete": to_delete
+        })
+
+    # Summary
+    groups_with_deletions = [g for g in resolution_plan if g["to_delete"]]
+    print("\n" + "=" * 80)
+    print("DUPLICATE RESOLUTION PREVIEW")
+    print("=" * 80)
+    print(f"  • Total Duplicate Groups Analyzed:    {len(resolution_plan):,}")
+    print(f"  • Groups with Actionable Deletions:   {len(groups_with_deletions):,}")
+    print(f"  • Redundant Files to Delete:          {total_deletions_count:,}")
+    print(f"  • Total Reclaimable Disk Space:       {format_size(total_reclaimable_bytes)}")
+    print(f"  • Preserved Storage Root:             {storage_root}")
+    print("=" * 80)
+
+    if not groups_with_deletions:
+        print("\n[Notice] No redundant copies found outside the Storage root to delete.")
+        return
+
+    # Execution logic
+    deleted_fids = []
+    actual_deleted_bytes = 0
+    actual_deleted_files = 0
+    errors = []
+
+    def execute_group_deletion(group: dict) -> bool:
+        nonlocal actual_deleted_bytes, actual_deleted_files
+        keeper = group["keeper"]
+        keeper_path = Path(keeper["full_path"])
+
+        # 1. PHYSICAL DISK SAFETY VERIFICATION: Keeper must exist and match size!
+        if not keeper_path.exists() or not keeper_path.is_file():
+            errors.append(f"SAFETY ABORT: Keeper file missing on disk: {keeper['full_path']}")
+            print(f"  [Error] Keeper file missing on disk! Skipping deletion for group '{group['name']}'.")
+            return False
+
+        try:
+            if keeper_path.stat().st_size != keeper["size_bytes"]:
+                errors.append(f"SAFETY ABORT: Keeper size mismatch on disk: {keeper['full_path']}")
+                print(f"  [Error] Keeper file size mismatch! Skipping deletion for group '{group['name']}'.")
+                return False
+        except Exception as e:
+            errors.append(f"SAFETY ABORT: Stat failed on keeper: {e}")
+            return False
+
+        # 2. Delete redundant copies
+        for del_item in group["to_delete"]:
+            del_path = Path(del_item["full_path"])
+            try:
+                if del_path.exists() and del_path.is_file():
+                    del_path.unlink()
+                    actual_deleted_files += 1
+                    actual_deleted_bytes += del_item["size_bytes"]
+                    deleted_fids.append(del_item["file_id"])
+                    print(f"  ✓ Deleted: {del_item['full_path']}")
+                elif not del_path.exists():
+                    # Already missing on disk, still record fid to purge DB
+                    deleted_fids.append(del_item["file_id"])
+                    print(f"  - Record pruned (file already absent on disk): {del_item['full_path']}")
+            except Exception as e:
+                errors.append(f"Delete failed on {del_item['full_path']}: {e}")
+                print(f"  ✗ Failed to delete {del_item['full_path']}: {e}")
+
+        # Real-time database sync for step mode
+        if deleted_fids:
+            try:
+                conn_sync = get_db_connection(db_path)
+                cursor_sync = conn_sync.cursor()
+                cursor_sync.executemany("DELETE FROM files WHERE id = ?", [(fid,) for fid in deleted_fids])
+                conn_sync.commit()
+                conn_sync.close()
+                deleted_fids.clear()
+            except Exception:
+                pass
+
+        return True
+
+    if step_mode:
+        # Step-by-Step Review: stream candidates continuously until 'q'
+        print("\nEntering step-by-step duplicate resolution...")
+        print("Tip: Press [Enter] or 'a' to accept & delete, 's' to skip, 'q' to quit & prune.\n")
+
+        processed_idx = 0
+        current_groups = groups_with_deletions
+        stop_requested = False
+
+        while current_groups and not stop_requested:
+            for group in current_groups:
+                processed_idx += 1
+                sz_str = format_size(group["size_bytes"])
+                reclaim_str = format_size(sum(c["size_bytes"] for c in group["to_delete"]))
+                print(f"\n[Candidate #{processed_idx}] Duplicate Group: {group['name']} ({sz_str}, {group['category'].upper()}) -> Reclaimable: {reclaim_str}")
+                print(f"  [KEEP]:   {group['keeper']['full_path']} (Tags: {group['keeper']['folder_tags']})")
+                for d in group["to_delete"]:
+                    loc_type = "OUTSIDE Storage" if not d["full_path"].startswith(storage_root) else "Internal Duplicate"
+                    print(f"  [DELETE] ({loc_type}): {d['full_path']} (Tags: {d['folder_tags']})")
+
+                prompt = input("Action: [A]ccept & delete / [S]kip / [Q]uit & prune [Default: a]: ").strip().lower()
+                if prompt == 'q':
+                    stop_requested = True
+                    print("\n[Stopped] Step-by-step review terminated by user.")
+                    break
+                elif prompt == 's':
+                    print("  Skipped.")
+                    continue
+                else:
+                    execute_group_deletion(group)
+
+            if not stop_requested:
+                # Check if more duplicate candidates exist in the database
+                conn_check = get_db_connection(db_path)
+                cursor_check = conn_check.cursor()
+                check_query = f"""
+                    WITH next_duplicates AS (
+                        SELECT name, size_bytes
+                        FROM files
+                        WHERE size_bytes > 0 {cat_filter}
+                        GROUP BY name, size_bytes
+                        HAVING COUNT(*) > 1
+                        ORDER BY size_bytes DESC
+                        LIMIT 50
+                    )
+                    SELECT 
+                        f.id AS file_id,
+                        f.name,
+                        f.category,
+                        f.size_bytes,
+                        f.modified_at,
+                        d.path,
+                        h.hostname,
+                        COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') AS folder_tags,
+                        COALESCE(GROUP_CONCAT(DISTINCT ft.tag_name), '-') AS file_tags
+                    FROM next_duplicates td
+                    JOIN files f ON f.name = td.name AND f.size_bytes = td.size_bytes
+                    JOIN directories d ON f.directory_id = d.id
+                    JOIN hosts h ON d.host_id = h.id
+                    LEFT JOIN directory_tags dt ON d.id = dt.directory_id
+                    LEFT JOIN file_tags ft ON f.id = ft.file_id
+                    GROUP BY f.id
+                    ORDER BY f.size_bytes DESC, f.name, d.path;
+                """
+                cursor_check.execute(check_query, params)
+                next_rows = cursor_check.fetchall()
+                conn_check.close()
+
+                next_groups_dict = defaultdict(list)
+                for r in next_rows:
+                    fid, name, cat, sz, mtime, dpath, host, dtags, ftags = r
+                    next_groups_dict[(name, sz, cat)].append({
+                        "file_id": fid,
+                        "name": name,
+                        "category": cat,
+                        "size_bytes": sz,
+                        "modified_at": mtime,
+                        "dir_path": dpath,
+                        "full_path": f"{dpath}/{name}",
+                        "host": host,
+                        "folder_tags": dtags,
+                        "file_tags": ftags
+                    })
+
+                next_actionable = []
+                for (name, sz, cat), copies in next_groups_dict.items():
+                    s_copies = [c for c in copies if c["full_path"].startswith(storage_root)]
+                    o_copies = [c for c in copies if not c["full_path"].startswith(storage_root)]
+                    if s_copies:
+                        s_copies.sort(key=lambda c: (get_tier_rank(c["full_path"]), len(c["full_path"])))
+                        k = s_copies[0]
+                        td = o_copies if scope == 1 else [c for c in copies if c["file_id"] != k["file_id"]]
+                    else:
+                        if scope == 1:
+                            continue
+                        copies.sort(key=lambda c: (len(c["full_path"])))
+                        k = copies[0]
+                        td = copies[1:]
+                    if td:
+                        next_actionable.append({"name": name, "size_bytes": sz, "category": cat, "copies": copies, "keeper": k, "to_delete": td})
+
+                if next_actionable:
+                    cont = input(f"\nReviewed {processed_idx} candidates. Load next batch of {len(next_actionable)} duplicate groups? [Y/n/q] [Default: y]: ").strip().lower()
+                    if cont in ('n', 'q'):
+                        stop_requested = True
+                        break
+                    current_groups = next_actionable
+                else:
+                    print("\n[Complete] All duplicate candidate groups have been reviewed.")
+                    break
+
+    else:
+        # Batch Review: show top candidate groups
+        print("\nTop Actionable Duplicate Groups:")
+        for idx, group in enumerate(groups_with_deletions[:15], 1):
+            sz_str = format_size(group["size_bytes"])
+            reclaim_str = format_size(sum(c["size_bytes"] for c in group["to_delete"]))
+            print(f"  {idx:>2}. {group['name']:<35} ({sz_str}) -> Reclaim: {reclaim_str} ({len(group['to_delete'])} copies)")
+            print(f"      [KEEP]:   {group['keeper']['full_path']}")
+            for d in group["to_delete"][:2]:
+                print(f"      [DELETE]: {d['full_path']}")
+            if len(group["to_delete"]) > 2:
+                print(f"      [DELETE]: ... (+{len(group['to_delete']) - 2} more copies)")
+
+        if len(groups_with_deletions) > 15:
+            print(f"  ... and {len(groups_with_deletions) - 15} more duplicate groups.")
+
+        confirm = input(f"\nProceed with deleting {total_deletions_count:,} duplicate files ({format_size(total_reclaimable_bytes)})? [y/N]: ").strip().lower()
+        if confirm != 'y':
+            print("\n[Cancelled] Duplicate cleanup aborted by user.")
+            return
+
+        print("\nExecuting batch duplicate deletion...")
+        for group in groups_with_deletions:
+            execute_group_deletion(group)
+
+    # 3. Synchronize any remaining database records
+    if deleted_fids:
+        print(f"\nUpdating database (purging {len(deleted_fids):,} deleted records)...")
+        try:
+            conn = get_db_connection(db_path)
+            cursor = conn.cursor()
+            chunk_size = 500
+            for i in range(0, len(deleted_fids), chunk_size):
+                chunk = deleted_fids[i:i + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                cursor.execute(f"DELETE FROM files WHERE id IN ({placeholders})", chunk)
+            conn.commit()
+            conn.close()
+            print("[Success] Database records synchronized.")
+        except Exception as e:
+            print(f"[Warning] Failed to update database: {e}")
+
+    print("\n" + "=" * 80)
+    print("DUPLICATE CLEANUP SUMMARY")
+    print("=" * 80)
+    print(f"  • Files Deleted:                      {actual_deleted_files:,}")
+    print(f"  • Storage Space Reclaimed:            {format_size(actual_deleted_bytes)}")
+    if errors:
+        print(f"  • Errors / Aborts:                    {len(errors)}")
+        for err in errors[:5]:
+            print(f"    - {err}")
+    print("=" * 80)
+
+    # Automatically prompt to prune empty folders
+    prune_dirs = input("\nPrune empty folders left behind? [Y/n]: ").strip().lower()
+    if prune_dirs != 'n':
+        prune_missing_records(db_path)
+
 def main():
     db_file = "drive_audit.db"
 
@@ -1726,9 +2156,10 @@ def main():
         print("7. Tag & sync folders (Priority Tiers, Finder Colors & DB)")
         print("8. Search files by tag (Finder & Manual)")
         print("9. Segregate non-media files from folder (On-demand migration)")
-        print("10. Exit")
+        print("10. Detect & clean duplicate files (Interactive duplicate resolver)")
+        print("11. Exit")
 
-        choice = input("\nSelect option (1-10): ").strip()
+        choice = input("\nSelect option (1-11): ").strip()
 
         if choice == "1":
             audit_directory_interactive(db_file)
@@ -1749,6 +2180,8 @@ def main():
         elif choice == "9":
             migrate_non_media_interactive(db_file)
         elif choice == "10":
+            detect_and_resolve_duplicates_interactive(db_file)
+        elif choice == "11":
             print("\nExiting Drive Audit Manager. Goodbye!")
             break
         else:

@@ -70,10 +70,11 @@ Upon launch, you will be presented with the main menu:
 4. Generate report of largest files
 5. Prune deleted records from DB (Sync with disk)
 6. List all active tags (Directory & File)
-7. Add manual tag to a directory
+7. Tag & sync folders (Priority Tiers, Finder Colors & DB)
 8. Search files by tag (Finder & Manual)
 9. Segregate non-media files from folder (On-demand migration)
-10. Exit
+10. Detect & clean duplicate files (Interactive duplicate resolver)
+11. Exit
 ```
 
 ---
@@ -134,6 +135,16 @@ Audits a source photo/video library folder and cleans it by:
 - Optionally purging legacy Windows and Picasa thumbnail caches (`Thumbs.db`, `.picasa.ini`, `*.pal`, `*.pmp`, `.tmp`).
 - Pruning empty directories left in the source media directory.
 - Offering immediate database sync/reconciliation.
+
+### 10. Detect & Clean Duplicate Files (Interactive Duplicate Resolver)
+Scans indexed files across all folders to find exact duplicates (`name` and byte size match):
+- **Storage Location Keeper Rule**: Identifies copies inside your designated primary Storage repository (e.g., `/Volumes/LaCie/Storage`) and guarantees that **1 copy in Storage is preserved as the keeper (`[KEEP]`)**, giving priority to higher Priority tiers (`Priority 1` > `Priority 2` > `Priority 3` > `Priority 4`).
+- **Flexible Cleanup Scope**:
+  - *Scope 1 (Outside Storage Only)*: Deletes only duplicate copies residing in staging, backup restore, or scratch folders (e.g., `/Volumes/LaCie/iDrive-Cleanup/...`), keeping all Storage repository copies untouched.
+  - *Scope 2 (Full Deduplication)*: Keeps exactly 1 best copy in Storage and deletes all redundant copies (both external and internal).
+- **Physical Disk Safety Verification**: Double-checks disk existence and exact byte sizes of the keeper file before unlinking any duplicate.
+- **Interactive Review Modes**: Choose between *Batch Review* (preview table + one-click confirmation) or *Step-by-Step* (inspect and confirm group by group).
+- **Automated Database Sync**: Instantly removes deleted file IDs from SQLite and offers to prune empty directories.
 
 ---
 
