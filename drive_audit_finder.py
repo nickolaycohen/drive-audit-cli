@@ -1008,6 +1008,8 @@ def show_hosts_summary(db_path: str):
     # Check Drive Benchmarks in Database vs Mounted Drives
     try:
         import benchmark_drives
+        import importlib
+        importlib.reload(benchmark_drives)
         mounted_vols = set(benchmark_drives.discover_candidate_volumes())
         saved_benchmarks = benchmark_drives.get_saved_benchmarks(db_path)
         saved_vol_map = {b["mount_point"]: b for b in saved_benchmarks}

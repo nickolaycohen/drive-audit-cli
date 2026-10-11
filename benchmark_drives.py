@@ -255,7 +255,7 @@ def benchmark_volume(mount_point: str, test_size_bytes: int) -> Dict[str, any]:
 
 def find_readable_sample_file(mount_point: str, min_size_bytes: int = 1024 * 1024, max_depth: int = 4) -> Optional[str]:
     """Finds an existing readable file on a volume to benchmark read throughput without modifying files."""
-    def _search(curr_dir: str, depth: int) -> Optional[str]:
+    def _search(curr_dir: str, depth: int, min_size: int) -> Optional[str]:
         if depth > max_depth:
             return None
         try:
@@ -264,10 +264,13 @@ def find_readable_sample_file(mount_point: str, min_size_bytes: int = 1024 * 102
                     continue
                 try:
                     if entry.is_file(follow_symlinks=False):
-                        if entry.stat().st_size >= min_size_bytes:
+                        if entry.stat().st_size >= min_size:
+                            # Verify that the current process has permission to read the file
+                            test_fd = os.open(entry.path, os.O_RDONLY)
+                            os.close(test_fd)
                             return entry.path
                     elif entry.is_dir(follow_symlinks=False):
-                        res = _search(entry.path, depth + 1)
+                        res = _search(entry.path, depth + 1, min_size)
                         if res:
                             return res
                 except (PermissionError, OSError):
@@ -276,7 +279,12 @@ def find_readable_sample_file(mount_point: str, min_size_bytes: int = 1024 * 102
             pass
         return None
 
-    return _search(mount_point, 0)
+    # 1. Search for larger files (>= 1 MB) for optimal sequential throughput measurement
+    sample = _search(mount_point, 0, min_size_bytes)
+    if sample:
+        return sample
+    # 2. Fall back to any readable file (>= 1 KB, e.g. backup_manifest.plist) if snapshots are restricted
+    return _search(mount_point, 0, 1024)
 
 
 def discover_candidate_volumes() -> List[str]:
@@ -342,11 +350,16 @@ def print_table(results: List[Dict[str, any]]):
 
 
 def get_default_db_path() -> Optional[str]:
-    """Finds drive_audit.db in current working directory or standard storage locations."""
+    """Finds drive_audit.db in standard storage locations, matching drive_audit_finder priority."""
+    env_p = os.environ.get("DRIVE_AUDIT_DB")
+    if env_p and os.path.exists(env_p):
+        return os.path.abspath(env_p)
+    ext_pro = "/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db"
+    if os.path.exists(ext_pro):
+        return os.path.abspath(ext_pro)
     candidates = [
         "drive_audit.db",
         os.path.expanduser("~/dev/drive-audit-cli/drive_audit.db"),
-        "/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db",
     ]
     for c in candidates:
         if os.path.exists(c):
