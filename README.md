@@ -312,21 +312,26 @@ Inspects mapped storage locations across Priority tiers (`Priority 1` through `P
 - **Untagged Warnings**: Immediately highlights folders missing required Priority or category tags (`⚪ Untagged ⚠️`).
 - **Sequential Curation Wizard ('w')**:
   - Steps through each mapped location and Level-1 category across Priority 1 $\rightarrow$ 4 sequentially.
-  - Rapidly inspects Level-2 subfolders (e.g. `Priority 1/Data/13-Data.Money`, `Priority 1/Data/DB Backup`), profiling file counts, size, date spans, sample filenames, and file type distributions (.mny, .qdf, .sql, .pdf, .jpg, etc.).
+  - Rapidly inspects Level-2 subfolders (e.g. `Priority 1/Data/13-Data.Money`, `Priority 1/Data/DB Backup`), profiling file counts, size, date spans, sample filenames, and file type distributions.
+  - **File Type Identification Engine**: Maps discovered file extensions against the persistent SQLite `file_extensions` catalog (99+ formats across Financial, Tax, Code, DBs, Media, RAW Photos, etc.) with human-readable descriptions (e.g., `141 .lrd (MS Money Lock / Report Definition), 121 .mbf (MS Money Backup Archive), 32 .mny (MS Money DB), 26 .ofx (Open Financial Exchange Data)`).
+  - **Application Association (`app_needed`)**: Automatically detects the primary software and macOS-compatible alternative required to open files (e.g. `Microsoft Money (Mac: MoneyDance / Banktivity / Parallels Windows)` or `Intuit Quicken (Mac: Quicken for Mac / Banktivity)`), permanently attaching it to the folder in SQLite.
+  - **Category Verification & Mismatch Warning**: Cross-references detected file types against the parent Priority Tier and Category folder (e.g., flags video files inside Priority 1 / Data or source code in Priority 4 / Media Depot with `⚠️ Category Mismatch: 100% Video in 'Priority 1 / Data'! Recommended: Priority 4 (Media Staging & Photos)`).
   - Generates intelligent, context-aware description suggestions.
   - Prompts for human review & approval:
-    - `[a]` **Approve**: Applies parent Priority Finder color tag + category tags, saves description, and marks `is_verified = 1` in SQLite.
-    - `[e]` **Edit**: Customize description before applying tags and marking verified.
-    - `[m]` **Move**: Relocate folder to another Priority tier, mapped location, or parent category.
+    - `[a]` **Approve**: Applies parent Priority Finder color tag + category tags, persists description and required application (`app_needed`), and marks `is_verified = 1` in SQLite.
+    - `[e]` **Edit**: Customize description and/or required application before applying tags and marking verified.
+    - `[m]` **Move**: Relocate folder to another Priority tier, mapped location, or parent category (preserving required app metadata).
     - `[s]` **Skip**: Leave untagged and unverified.
     - `[q]` **Quit**: Safely exits with all verified progress persisted.
+- **File Extensions Catalog ('ext')**:
+  - View the complete seeded database catalog of file extensions, categories, descriptions, primary applications, and macOS alternatives.
 - **Reset Subfolder Tags & Verification ('reset-tags')**:
   - Safely preserves tags, colors, and descriptions on all active Priority location roots and their Level-1 folders.
   - Strips Finder tags on disk and DB tags in SQLite from all subfolders beneath Level-1 (Level 2+).
   - Resets `is_verified = 0` on subfolders so they can be curated and verified one-by-one.
 - **Interactive Folder Inspection & Editing**:
   - **Apply Standard Tags**: Instantly assigns the parent tier's Finder color and folder category tag.
-  - **Folder Descriptions**: Add or edit custom folder notes and context stored in SQLite.
+  - **Folder Descriptions & Required App**: Add or edit custom folder notes and required software stored in SQLite.
   - **Custom Tags & Color Picker**: Assign custom tag names and choose any of the 7 macOS Finder colors.
   - **Move / Reassign Priority Tier**: Safely relocates a folder to a different Priority tier or location, updates its Finder color tag, and synchronizes all descendant paths in SQLite.
   - **Launch Folder Wizard**: Run the Curation Wizard directly scoped to that folder's direct children.

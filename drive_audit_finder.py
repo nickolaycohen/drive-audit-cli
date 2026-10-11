@@ -21,13 +21,130 @@ except ImportError:
 
 # Extension mappings for classification
 EXTENSION_MAP = {
-    "image": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".heic", ".raw", ".cr2", ".nef"},
+    "image": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".heic", ".raw", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".psd", ".svg"},
     "video": {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".3gp"},
     "audio": {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma"},
-    "document": {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".txt", ".csv", ".rtf"},
-    "archive": {".zip", ".tar", ".gz", ".7z", ".rar", ".bz2"},
-    "code": {".py", ".js", ".html", ".css", ".cpp", ".c", ".java", ".json", ".xml", ".sh", ".sql"}
+    "document": {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".txt", ".csv", ".tsv", ".rtf", ".pages", ".numbers", ".key", ".epub", ".mobi"},
+    "archive": {".zip", ".tar", ".gz", ".7z", ".rar", ".bz2", ".bak"},
+    "code": {".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".cpp", ".c", ".h", ".hpp", ".java", ".json", ".xml", ".sh", ".sql", ".yaml", ".yml"},
+    "financial": {".mny", ".mbf", ".lrd", ".ofx", ".qfx", ".qdf", ".qel", ".qsd", ".qph", ".qbw", ".qbb", ".tax", ".tax2018", ".tax2019", ".tax2020", ".tax2021", ".tax2022", ".tax2023", ".tax2024", ".tax2025", ".ptx"}
 }
+
+# Comprehensive File Extension Catalog with Category, Description and Default/macOS Applications
+DEFAULT_FILE_EXTENSIONS = [
+    # Financial & Accounting (Critical proprietary formats)
+    (".mny", "Financial Data", "Microsoft Money Account Database", "Microsoft Money", "MoneyDance / Banktivity / Parallels Windows", 1),
+    (".mbf", "Financial Data", "Microsoft Money Backup Archive", "Microsoft Money", "MoneyDance / Parallels Windows", 1),
+    (".lrd", "Financial Data", "Microsoft Money Lock / Report Definition", "Microsoft Money", "Microsoft Money", 1),
+    (".ofx", "Financial Data", "Open Financial Exchange Transaction Data", "Financial / Banking Software", "Banktivity / MoneyDance / Excel", 1),
+    (".qfx", "Financial Data", "Quicken Financial Exchange Data", "Quicken", "Quicken for Mac / Banktivity", 1),
+    (".qdf", "Financial Data", "Quicken Financial Database", "Quicken", "Quicken for Mac / Parallels Windows", 1),
+    (".qel", "Financial Data", "Quicken Electronic Payee List", "Quicken", "Quicken for Mac", 1),
+    (".qsd", "Financial Data", "Quicken Security Data", "Quicken", "Quicken for Mac", 1),
+    (".qph", "Financial Data", "Quicken Price History", "Quicken", "Quicken for Mac", 1),
+    (".qbw", "Financial Data", "QuickBooks Working Company File", "QuickBooks", "QuickBooks for Mac", 1),
+    (".qbb", "Financial Data", "QuickBooks Company Backup", "QuickBooks", "QuickBooks for Mac", 1),
+    (".tax", "Tax Records", "TurboTax Return Archive", "TurboTax", "TurboTax for Mac", 1),
+    (".tax2018", "Tax Records", "TurboTax 2018 Return", "TurboTax", "TurboTax for Mac", 1),
+    (".tax2019", "Tax Records", "TurboTax 2019 Return", "TurboTax", "TurboTax for Mac", 1),
+    (".tax2020", "Tax Records", "TurboTax 2020 Return", "TurboTax", "TurboTax for Mac", 1),
+    (".tax2021", "Tax Records", "TurboTax 2021 Return", "TurboTax", "TurboTax for Mac", 1),
+    (".tax2022", "Tax Records", "TurboTax 2022 Return", "TurboTax", "TurboTax for Mac", 1),
+    (".tax2023", "Tax Records", "TurboTax 2023 Return", "TurboTax", "TurboTax for Mac", 1),
+    (".tax2024", "Tax Records", "TurboTax 2024 Return", "TurboTax", "TurboTax for Mac", 1),
+    (".tax2025", "Tax Records", "TurboTax 2025 Return", "TurboTax", "TurboTax for Mac", 1),
+    (".ptx", "Tax Records", "Tax Preparation Data", "TaxSlayer / Tax Software", "Tax Software", 1),
+
+    # Databases & Systems
+    (".sql", "Database", "SQL Database Script / Dump", "MySQL / PostgreSQL / SQLite", "TablePlus / DBeaver / Terminal", 1),
+    (".sqlite", "Database", "SQLite Database", "SQLite", "DB Browser for SQLite / TablePlus", 1),
+    (".sqlite3", "Database", "SQLite 3 Database", "SQLite", "DB Browser for SQLite / TablePlus", 1),
+    (".db", "Database", "Database File", "Database Engine", "DB Browser / TablePlus", 1),
+    (".mdb", "Database", "Microsoft Access Database", "Microsoft Access", "MDB Viewer / Parallels Windows", 1),
+    (".accdb", "Database", "Microsoft Access 2007+ Database", "Microsoft Access", "MDB Viewer / Parallels Windows", 1),
+    (".bak", "Backup Archive", "Database / System Backup Archive", "Backup Utility", "Terminal / Archive Utility", 1),
+
+    # Documents & Spreadsheets
+    (".pdf", "Document", "Portable Document Format", "PDF Reader", "Preview / Adobe Acrobat", 0),
+    (".docx", "Document", "Microsoft Word Document", "Microsoft Word", "Microsoft Word / Pages", 0),
+    (".doc", "Document", "Legacy Microsoft Word Document", "Microsoft Word", "Microsoft Word / Pages", 0),
+    (".xlsx", "Spreadsheet", "Microsoft Excel Spreadsheet", "Microsoft Excel", "Microsoft Excel / Numbers", 0),
+    (".xls", "Spreadsheet", "Legacy Microsoft Excel Spreadsheet", "Microsoft Excel", "Microsoft Excel / Numbers", 0),
+    (".csv", "Spreadsheet / Data", "Comma-Separated Values Data", "Spreadsheet / Editor", "Numbers / Excel / VS Code", 0),
+    (".tsv", "Spreadsheet / Data", "Tab-Separated Values Data", "Spreadsheet / Editor", "Numbers / Excel / VS Code", 0),
+    (".pptx", "Presentation", "Microsoft PowerPoint Presentation", "Microsoft PowerPoint", "Microsoft PowerPoint / Keynote", 0),
+    (".ppt", "Presentation", "Legacy Microsoft PowerPoint Presentation", "Microsoft PowerPoint", "Microsoft PowerPoint / Keynote", 0),
+    (".txt", "Document", "Plain Text Document", "Text Editor", "TextEdit / VS Code", 0),
+    (".rtf", "Document", "Rich Text Format Document", "Rich Text Editor", "TextEdit / Pages", 0),
+    (".pages", "Document", "Apple Pages Document", "Apple Pages", "Pages", 0),
+    (".numbers", "Spreadsheet", "Apple Numbers Spreadsheet", "Apple Numbers", "Numbers", 0),
+    (".key", "Presentation", "Apple Keynote Presentation", "Apple Keynote", "Keynote", 0),
+
+    # Photography & Creative
+    (".psd", "Creative / Design", "Adobe Photoshop Document", "Adobe Photoshop", "Adobe Photoshop / Pixelmator Pro", 0),
+    (".psb", "Creative / Design", "Adobe Photoshop Large Document", "Adobe Photoshop", "Adobe Photoshop", 0),
+    (".ai", "Creative / Design", "Adobe Illustrator Vector Artwork", "Adobe Illustrator", "Adobe Illustrator / Affinity Designer", 0),
+    (".indd", "Creative / Design", "Adobe InDesign Layout Document", "Adobe InDesign", "Adobe InDesign", 0),
+    (".cr2", "RAW Photography", "Canon RAW Digital Image", "Canon DPP / Adobe RAW", "Lightroom / Apple Photos", 0),
+    (".cr3", "RAW Photography", "Canon RAW 3 Digital Image", "Canon DPP / Adobe RAW", "Lightroom / Apple Photos", 0),
+    (".nef", "RAW Photography", "Nikon RAW Digital Image", "Nikon NX Studio / Adobe RAW", "Lightroom / Apple Photos", 0),
+    (".arw", "RAW Photography", "Sony Alpha RAW Image", "Sony Imaging Edge / Adobe RAW", "Lightroom / Apple Photos", 0),
+    (".dng", "RAW Photography", "Adobe Digital Negative RAW", "Adobe Lightroom / Camera RAW", "Lightroom / Apple Photos / Preview", 0),
+    (".heic", "Photography", "High Efficiency Image Container", "Apple Photos / Preview", "Apple Photos / Preview", 0),
+    (".jpg", "Photography", "JPEG Raster Image", "Image Viewer", "Preview / Apple Photos", 0),
+    (".jpeg", "Photography", "JPEG Raster Image", "Image Viewer", "Preview / Apple Photos", 0),
+    (".png", "Photography / Graphic", "Portable Network Graphic", "Image Viewer", "Preview / Apple Photos", 0),
+    (".tiff", "Photography", "Tagged Image File Format", "Image Viewer", "Preview / Apple Photos", 0),
+    (".tif", "Photography", "Tagged Image File Format", "Image Viewer", "Preview / Apple Photos", 0),
+    (".bmp", "Photography", "Bitmap Image", "Image Viewer", "Preview", 0),
+    (".gif", "Photography / Animation", "Graphics Interchange Format", "Web Browser / Preview", "Preview / Safari", 0),
+    (".svg", "Vector Graphic", "Scalable Vector Graphics", "Web Browser / Vector Editor", "Safari / Illustrator", 0),
+
+    # Video & Audio
+    (".mov", "Video", "Apple QuickTime Digital Movie", "QuickTime Player", "QuickTime Player / Final Cut Pro / IINA", 0),
+    (".mp4", "Video", "MPEG-4 Digital Video", "Video Player", "QuickTime Player / IINA / VLC", 0),
+    (".m4v", "Video", "Apple iTunes Video", "Video Player", "Apple TV / QuickTime Player", 0),
+    (".mkv", "Video", "Matroska Multimedia Container", "VLC / IINA", "IINA / VLC", 0),
+    (".avi", "Video", "Audio Video Interleave", "Video Player", "IINA / VLC", 0),
+    (".wmv", "Video", "Windows Media Video", "Windows Media Player", "IINA / VLC", 0),
+    (".mp3", "Audio", "MPEG Audio Layer III", "Audio Player", "Apple Music / QuickTime", 0),
+    (".wav", "Audio", "Waveform Audio File", "Audio Player", "QuickTime / Audacity", 0),
+    (".flac", "Audio", "Free Lossless Audio Codec", "Audio Player", "IINA / VLC / Audacity", 0),
+    (".m4a", "Audio", "Apple Lossless / AAC Audio", "Audio Player", "Apple Music / QuickTime", 0),
+    (".aac", "Audio", "Advanced Audio Coding", "Audio Player", "Apple Music", 0),
+
+    # Developer & Code
+    (".py", "Source Code", "Python Source Code", "Python Interpreter / IDE", "VS Code / PyCharm / Terminal", 0),
+    (".js", "Source Code", "JavaScript Source Code", "Node.js / Web Browser", "VS Code", 0),
+    (".ts", "Source Code", "TypeScript Source Code", "TypeScript / Node.js", "VS Code", 0),
+    (".jsx", "Source Code", "React JSX Component", "Node.js / React", "VS Code", 0),
+    (".tsx", "Source Code", "React TypeScript Component", "Node.js / React", "VS Code", 0),
+    (".html", "Web Assets", "HyperText Markup Language", "Web Browser", "Safari / Chrome / VS Code", 0),
+    (".css", "Web Assets", "Cascading Style Sheets", "Web Browser", "VS Code / Safari", 0),
+    (".c", "Source Code", "C Source Code", "C Compiler", "Xcode / VS Code / clang", 0),
+    (".cpp", "Source Code", "C++ Source Code", "C++ Compiler", "Xcode / VS Code / clang++", 0),
+    (".h", "Source Code", "C/C++ Header File", "C/C++ Compiler", "Xcode / VS Code", 0),
+    (".hpp", "Source Code", "C++ Header File", "C++ Compiler", "Xcode / VS Code", 0),
+    (".sh", "Shell Script", "Unix Shell Script", "Unix Shell", "Terminal / zsh / bash", 0),
+    (".zsh", "Shell Script", "Z Shell Script", "Zsh Shell", "Terminal / zsh", 0),
+    (".json", "Config / Data", "JavaScript Object Notation Data", "Code / Data Editor", "VS Code", 0),
+    (".yaml", "Config / Data", "YAML Configuration File", "Code Editor", "VS Code", 0),
+    (".yml", "Config / Data", "YAML Configuration File", "Code Editor", "VS Code", 0),
+    (".xml", "Config / Data", "Extensible Markup Language", "Code Editor", "VS Code", 0),
+
+    # E-Books, Typography & Archives
+    (".epub", "E-Book", "Electronic Publication E-Book", "E-Book Reader", "Apple Books / Calibre", 0),
+    (".mobi", "E-Book", "Mobipocket / Kindle E-Book", "Kindle App / Calibre", "Calibre / Kindle for Mac", 0),
+    (".azw", "E-Book", "Amazon Kindle E-Book", "Kindle App / Calibre", "Calibre / Kindle for Mac", 0),
+    (".azw3", "E-Book", "Amazon Kindle Format 8", "Kindle App / Calibre", "Calibre / Kindle for Mac", 0),
+    (".otf", "Typography", "OpenType Font File", "Font Book", "Font Book", 0),
+    (".ttf", "Typography", "TrueType Font File", "Font Book", "Font Book", 0),
+    (".zip", "Archive", "ZIP Compressed Archive", "Archive Utility", "Archive Utility / Keka", 0),
+    (".tar", "Archive", "Tape Archive File", "Archive Utility", "Terminal tar / Keka", 0),
+    (".gz", "Archive", "Gzip Compressed Archive", "Archive Utility", "Terminal gzip / Keka", 0),
+    (".rar", "Archive", "RAR Compressed Archive", "Unrar Utility", "The Unarchiver / Keka", 0),
+    (".7z", "Archive", "7-Zip Compressed Archive", "7-Zip Utility", "Keka / The Unarchiver", 0),
+]
 
 def get_file_category(extension: str) -> str:
     """Categorizes a file based on its extension."""
@@ -302,6 +419,8 @@ def init_database(db_path: str) -> sqlite3.Connection:
         cursor.execute("ALTER TABLE directories ADD COLUMN is_verified INTEGER DEFAULT 0")
     if "verified_at" not in col_names:
         cursor.execute("ALTER TABLE directories ADD COLUMN verified_at TEXT")
+    if "app_needed" not in col_names:
+        cursor.execute("ALTER TABLE directories ADD COLUMN app_needed TEXT")
 
     # 3. Directory Tags Table (Supports both Finder and Manual sources)
     cursor.execute("""
@@ -386,13 +505,34 @@ def init_database(db_path: str) -> sqlite3.Connection:
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_priority_locations_tier ON priority_locations(priority_tier);")
 
-    # 9. Performance Indexes
+    # 9. File Extensions Catalog Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS file_extensions (
+            extension TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            description TEXT NOT NULL,
+            primary_app TEXT NOT NULL,
+            mac_app TEXT,
+            is_critical_format INTEGER DEFAULT 0
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_extensions_cat ON file_extensions(category);")
+    _seed_file_extensions(cursor)
+
+    # 10. Performance Indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_name_size ON files(name, size_bytes);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_directories_path ON directories(path);")
 
     conn.commit()
     return conn
+
+def _seed_file_extensions(cursor):
+    """Populates default file extension dictionary into SQLite if not already present."""
+    cursor.executemany("""
+        INSERT OR IGNORE INTO file_extensions (extension, category, description, primary_app, mac_app, is_critical_format)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, DEFAULT_FILE_EXTENSIONS)
 
 def get_app_setting(db_path: str, key: str) -> str | None:
     """Retrieves a persisted application setting from the database."""
@@ -1422,7 +1562,7 @@ def generate_curation_verification_report(db_path: str):
             print("\n⏳ Fetching approved / verified folders... Please wait...")
             cursor.execute("""
                 WITH approved_dirs AS (
-                    SELECT id, path, name, verified_at, description
+                    SELECT id, path, name, verified_at, description, app_needed
                     FROM directories
                     WHERE is_verified = 1
                 )
@@ -1432,6 +1572,7 @@ def generate_curation_verification_report(db_path: str):
                     ad.path,
                     ad.verified_at,
                     ad.description,
+                    ad.app_needed,
                     -- Direct files in this approved folder
                     (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_files,
                     (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_bytes,
@@ -1469,7 +1610,7 @@ def generate_curation_verification_report(db_path: str):
             print("=" * 106)
             print(f"{'#':<4} {'Folder Name':<24} {'Status':<22} {'Approved Size':<16} {'Verified Date':<20} {'Tags'}")
             print("-" * 106)
-            for idx, (did, dname, dpath, v_at, ddesc, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags) in enumerate(v_rows, 1):
+            for idx, (did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags) in enumerate(v_rows, 1):
                 app_f = df_cnt + vs_cnt
                 app_b = df_b + vs_b
                 v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
@@ -1480,6 +1621,8 @@ def generate_curation_verification_report(db_path: str):
                 stat_str = f"{app_f:,} files ({format_size(app_b)})"
                 print(f"{idx:<4} {dname:<24} {status_badge:<22} {stat_str:<16} {v_date_str:<20} {dtags}")
                 print(f"     📍 Path: {dpath}")
+                if dapp:
+                    print(f"     ↳ 💻 App Needed: {dapp}")
                 if pend_cnt > 0:
                     print(f"     ↳ ⏳ Pending Subfolders: {pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})")
                 if ddesc:
@@ -1493,7 +1636,7 @@ def generate_curation_verification_report(db_path: str):
                 if f_drill.isdigit():
                     f_idx = int(f_drill) - 1
                     if 0 <= f_idx < len(v_rows):
-                        did, dname, dpath, v_at, ddesc, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = v_rows[f_idx]
+                        did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = v_rows[f_idx]
                         app_f = df_cnt + vs_cnt
                         app_b = df_b + vs_b
                         v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
@@ -1532,6 +1675,8 @@ def generate_curation_verification_report(db_path: str):
                         else:
                             print(f"  • Status:            ⚠️ Partially Curated ({pend_cnt} unverified subfolders pending triage)")
                         print(f"  • Approved Storage:  {format_size(app_b)} across {app_f:,} files ({df_cnt:,} direct files, {vs_cnt:,} verified subfolder files)")
+                        if dapp:
+                            print(f"  • Required App:      {dapp}")
                         if pend_cnt > 0:
                             print(f"  • Pending Subtree:   {format_size(pend_b)} across {pend_f:,} files in {pend_cnt} unverified subfolders")
                         print(f"  • Folder Tags:       {dtags}")
@@ -1768,7 +1913,7 @@ def generate_curation_verification_report(db_path: str):
                 fname = "curation_status_report.md"
                 cursor.execute("""
                     WITH approved_dirs AS (
-                        SELECT id, name, path, is_verified, verified_at, description
+                        SELECT id, name, path, is_verified, verified_at, description, app_needed
                         FROM directories
                         WHERE is_verified = 1
                     )
@@ -1778,6 +1923,7 @@ def generate_curation_verification_report(db_path: str):
                         ad.path,
                         ad.verified_at,
                         ad.description,
+                        ad.app_needed,
                         (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_files,
                         (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_bytes,
                         (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id 
@@ -1821,11 +1967,12 @@ def generate_curation_verification_report(db_path: str):
                     f.write(f"- **Approved Storage**: {format_size(verified_bytes)} across {verified_files:,} files\n")
                     f.write(f"- **Pending Storage**: {format_size(unverified_bytes)} across {unverified_files:,} files\n\n")
                     f.write("## 1. Approved / Verified Folders (`is_verified = 1`)\n\n")
-                    f.write("| # | Folder Name | Status | Approved Files | Approved Size | Pending Subfolders | Verified Date | Description | Path |\n")
-                    f.write("|---|---|---|---|---|---|---|---|---|\n")
-                    for i, (_, dn, dp, va, dd, df_c, df_b, vs_c, vs_b, pend_cnt, pend_f, pend_b) in enumerate(ver_list, 1):
+                    f.write("| # | Folder Name | Status | Approved Files | Approved Size | Required App | Pending Subfolders | Verified Date | Description | Path |\n")
+                    f.write("|---|---|---|---|---|---|---|---|---|---|\n")
+                    for i, (_, dn, dp, va, dd, dapp, df_c, df_b, vs_c, vs_b, pend_cnt, pend_f, pend_b) in enumerate(ver_list, 1):
                         v_str = va.replace("T", " ")[:19] if va else "N/A"
                         desc_str = dd.replace("|", "/") if dd else "-"
+                        app_str = dapp if dapp else "-"
                         app_f = df_c + vs_c
                         app_b = df_b + vs_b
                         if pend_cnt == 0:
@@ -1834,7 +1981,7 @@ def generate_curation_verification_report(db_path: str):
                         else:
                             status_str = "⚠️ Partially Curated"
                             pend_str = f"{pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})"
-                        f.write(f"| {i} | `{dn}` | {status_str} | {app_f:,} | {format_size(app_b)} | {pend_str} | {v_str} | {desc_str} | `{dp}` |\n")
+                        f.write(f"| {i} | `{dn}` | {status_str} | {app_f:,} | {format_size(app_b)} | {app_str} | {pend_str} | {v_str} | {desc_str} | `{dp}` |\n")
 
                     f.write(f"\n## 2. Approved Files Inventory ({len(v_files_all):,} files)\n\n")
                     f.write("| # | Folder | File Name | Category | Size | Modified Date | Path |\n")
@@ -1857,7 +2004,7 @@ def generate_curation_verification_report(db_path: str):
                 fname = "curation_status_report.csv"
                 cursor.execute("""
                     WITH approved_dirs AS (
-                        SELECT id, name, path, is_verified, verified_at, description
+                        SELECT id, name, path, is_verified, verified_at, description, app_needed
                         FROM directories
                         WHERE is_verified = 1
                     )
@@ -1867,6 +2014,7 @@ def generate_curation_verification_report(db_path: str):
                         ad.path,
                         ad.verified_at,
                         ad.description,
+                        ad.app_needed,
                         (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_files,
                         (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_bytes,
                         (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id 
@@ -1895,14 +2043,14 @@ def generate_curation_verification_report(db_path: str):
 
                 with open(fname, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["ID", "Status", "Folder Name", "Path", "Approved Files", "Approved Size Bytes", "Approved Size Formatted", "Pending Subfolders Count", "Pending Subfolder Files", "Pending Subfolder Size Formatted", "Verified At", "Description"])
-                    for did, dname, dpath, vat, ddesc, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b in ver_rows:
+                    writer.writerow(["ID", "Status", "Folder Name", "Path", "Approved Files", "Approved Size Bytes", "Approved Size Formatted", "Required App", "Pending Subfolders Count", "Pending Subfolder Files", "Pending Subfolder Size Formatted", "Verified At", "Description"])
+                    for did, dname, dpath, vat, ddesc, dapp, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b in ver_rows:
                         status_str = "Fully Verified" if p_cnt == 0 else "Partially Curated"
                         app_f = df_c + vs_c
                         app_b = df_b + vs_b
-                        writer.writerow([did, status_str, dname, dpath, app_f, app_b, format_size(app_b), p_cnt, p_f, format_size(p_b), vat or "", ddesc or ""])
+                        writer.writerow([did, status_str, dname, dpath, app_f, app_b, format_size(app_b), dapp or "", p_cnt, p_f, format_size(p_b), vat or "", ddesc or ""])
                     for did, dname, dpath, sub_cnt, sub_b in unver_rows:
-                        writer.writerow([did, "Pending / Unapproved", dname, dpath, 0, 0, "0 B", 0, sub_cnt, format_size(sub_b), "", ""])
+                        writer.writerow([did, "Pending / Unapproved", dname, dpath, 0, 0, "0 B", "", 0, sub_cnt, format_size(sub_b), "", ""])
                 print(f"\n[Success] Full CSV report exported to: {os.path.abspath(fname)}")
                 input("\nPress Enter to continue...")
 
@@ -2243,8 +2391,8 @@ DEFAULT_LEVEL1_DESCRIPTIONS = {
     ("priority 4", "tobeimportedtombp personal photolibrary"): "Staged photo batches pending import into macOS Photos library",
 }
 
-def _set_directory_description_in_db(dir_path: Path, description: str | None, db_path: str, is_verified: bool = False):
-    """Sets or updates description and verification columns for a directory in SQLite database."""
+def _set_directory_description_in_db(dir_path: Path, description: str | None, db_path: str, is_verified: bool = False, app_needed: str | None = None):
+    """Sets or updates description, verification and app_needed columns for a directory in SQLite database."""
     if not os.path.exists(db_path):
         return
     try:
@@ -2256,26 +2404,31 @@ def _set_directory_description_in_db(dir_path: Path, description: str | None, db
         verified_val = 1 if is_verified else 0
         verified_at_val = scan_time if is_verified else None
 
-        cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, res_p))
+        cursor.execute("SELECT id, app_needed FROM directories WHERE host_id = ? AND path = ?", (host_id, res_p))
         row = cursor.fetchone()
         if not row:
             d_stat = dir_path.stat()
             cursor.execute("""
-                INSERT INTO directories (host_id, path, name, created_at, modified_at, scanned_at, description, is_verified, verified_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO directories (host_id, path, name, created_at, modified_at, scanned_at, description, is_verified, verified_at, app_needed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (host_id, res_p, dir_path.name,
                   datetime.datetime.fromtimestamp(d_stat.st_ctime).isoformat(),
                   datetime.datetime.fromtimestamp(d_stat.st_mtime).isoformat(),
-                  scan_time, description, verified_val, verified_at_val))
+                  scan_time, description, verified_val, verified_at_val, app_needed))
         else:
+            final_app = app_needed if app_needed is not None else row[1]
             if is_verified:
                 cursor.execute("""
                     UPDATE directories 
-                    SET description = ?, is_verified = ?, verified_at = ?
+                    SET description = ?, is_verified = ?, verified_at = ?, app_needed = ?
                     WHERE id = ?
-                """, (description, verified_val, verified_at_val, row[0]))
+                """, (description, verified_val, verified_at_val, final_app, row[0]))
             else:
-                cursor.execute("UPDATE directories SET description = ? WHERE id = ?", (description, row[0]))
+                cursor.execute("""
+                    UPDATE directories 
+                    SET description = ?, app_needed = COALESCE(?, app_needed)
+                    WHERE id = ?
+                """, (description, app_needed, row[0]))
         conn.commit()
         conn.close()
     except Exception:
@@ -2333,8 +2486,155 @@ def analyze_folder_content(folder_path: Path, max_depth: int = 3) -> dict:
         "subfolder_count": len(subfolders)
     }
 
-def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name: str, stats: dict) -> str:
-    """Intelligently suggests a concise human-readable description for a folder based on its name and contents."""
+def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_name: str, tier_name: str) -> dict:
+    """
+    Performs file type identification, maps found extensions to their categories and required applications,
+    and checks if the files belong to the expected category/priority tier.
+    """
+    if not ext_counts:
+        return {
+            "file_types_formatted": "None",
+            "app_needed": "None",
+            "primary_category": "Empty",
+            "category_percent": 0.0,
+            "is_match": True,
+            "category_match_msg": "⚪ Empty folder (0 files)",
+            "suggested_move_tier": None
+        }
+
+    db_ext_map = {}
+    try:
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+        ext_list = [e for e in ext_counts.keys() if e != '(no ext)']
+        if ext_list:
+            placeholders = ",".join("?" for _ in ext_list)
+            cursor.execute(f"""
+                SELECT extension, category, description, primary_app, mac_app, is_critical_format
+                FROM file_extensions
+                WHERE extension IN ({placeholders})
+            """, ext_list)
+            for row in cursor.fetchall():
+                db_ext_map[row[0].lower()] = {
+                    "category": row[1],
+                    "description": row[2],
+                    "primary_app": row[3],
+                    "mac_app": row[4],
+                    "critical": bool(row[5])
+                }
+        conn.close()
+    except Exception:
+        pass
+
+    for ext in ext_counts.keys():
+        if ext == '(no ext)':
+            continue
+        ext_lower = ext.lower()
+        if ext_lower not in db_ext_map:
+            cat = get_file_category(ext_lower).title()
+            db_ext_map[ext_lower] = {
+                "category": cat,
+                "description": f"{ext_lower.upper().lstrip('.')} File",
+                "primary_app": f"{ext_lower.upper().lstrip('.')} Viewer",
+                "mac_app": None,
+                "critical": False
+            }
+
+    # Format top extensions with descriptions
+    ext_summary_parts = []
+    top_exts = ext_counts.most_common(5) if hasattr(ext_counts, 'most_common') else sorted(ext_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    for ext, cnt in top_exts:
+        if ext == '(no ext)':
+            ext_summary_parts.append(f"{cnt} (no ext)")
+        else:
+            info = db_ext_map.get(ext.lower(), {})
+            desc = info.get("description", ext)
+            desc = desc.replace("Microsoft Money", "MS Money").replace("Account Database", "DB").replace("Transaction Data", "Data")
+            ext_summary_parts.append(f"{cnt} {ext} ({desc})")
+    file_types_formatted = ", ".join(ext_summary_parts) if ext_summary_parts else "None"
+
+    # Identify primary app needed
+    app_weights = Counter()
+    app_mac_map = {}
+    for ext, cnt in ext_counts.items():
+        if ext != '(no ext)':
+            info = db_ext_map.get(ext.lower())
+            if info:
+                p_app = info["primary_app"]
+                m_app = info["mac_app"]
+                app_weights[p_app] += cnt
+                if m_app:
+                    app_mac_map[p_app] = m_app
+
+    detected_app = "General Viewer"
+    if app_weights:
+        top_app, _ = app_weights.most_common(1)[0]
+        mac_alt = app_mac_map.get(top_app)
+        detected_app = f"{top_app} (Mac: {mac_alt})" if mac_alt else top_app
+
+    # Category analysis and verification
+    cat_weights = Counter()
+    total_non_empty = sum(cnt for ext, cnt in ext_counts.items() if ext != '(no ext)')
+    for ext, cnt in ext_counts.items():
+        if ext != '(no ext)':
+            info = db_ext_map.get(ext.lower())
+            cat_name = info["category"] if info else "Other"
+            cat_weights[cat_name] += cnt
+
+    top_cat = "Other"
+    top_pct = 0.0
+    if cat_weights and total_non_empty > 0:
+        top_cat, top_cnt = cat_weights.most_common(1)[0]
+        top_pct = (top_cnt / total_non_empty) * 100.0
+
+    t_lower = tier_name.lower()
+    l1_lower = l1_name.lower()
+
+    is_match = True
+    match_msg = f"✓ {top_pct:.0f}% {top_cat} (Consistent with {tier_name} / {l1_name})"
+    suggested_move = None
+
+    # Check Tier 1 Mismatches:
+    if "priority 1" in t_lower:
+        if top_cat in ["Video", "RAW Photography"] and top_pct >= 50:
+            is_match = False
+            suggested_move = "Priority 4 (Media Staging & Photos)"
+            match_msg = f"⚠️ Category Mismatch: {top_pct:.0f}% {top_cat} in '{tier_name} / {l1_name}'! Recommended: {suggested_move}"
+        elif top_cat in ["Source Code"] and top_pct >= 50:
+            is_match = False
+            suggested_move = "Priority 2 (DEV & Systems)"
+            match_msg = f"⚠️ Category Mismatch: {top_pct:.0f}% Source Code in '{tier_name} / {l1_name}'! Recommended: {suggested_move}"
+
+    # Check Tier 4 Mismatches:
+    elif "priority 4" in t_lower:
+        if top_cat in ["Financial Data", "Database", "Tax Records"] and top_pct >= 50:
+            is_match = False
+            suggested_move = "Priority 1 (Active & Critical Data)"
+            match_msg = f"⚠️ Category Mismatch: {top_pct:.0f}% {top_cat} in Media tier! Recommended: {suggested_move}"
+        elif top_cat in ["Source Code"] and top_pct >= 50:
+            is_match = False
+            suggested_move = "Priority 2 (DEV & Systems)"
+            match_msg = f"⚠️ Category Mismatch: {top_pct:.0f}% Source Code in Media tier! Recommended: {suggested_move}"
+
+    # Check Tier 2 Mismatches:
+    elif "priority 2" in t_lower:
+        if top_cat in ["Video", "RAW Photography"] and top_pct >= 50:
+            is_match = False
+            suggested_move = "Priority 4 (Media Staging & Photos)"
+            match_msg = f"⚠️ Category Mismatch: {top_pct:.0f}% {top_cat} in DEV tier! Recommended: {suggested_move}"
+
+    return {
+        "file_types_formatted": file_types_formatted,
+        "app_needed": detected_app,
+        "primary_category": top_cat,
+        "category_percent": top_pct,
+        "is_match": is_match,
+        "category_match_msg": match_msg,
+        "suggested_move_tier": suggested_move
+    }
+
+def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name: str, stats: dict, ft_info: dict | None = None) -> str:
+    """Intelligently suggests a concise human-readable description for a folder based on its name, contents, and detected applications."""
     name_lower = folder_name.lower()
     total_files = stats.get("total_files", 0)
     ext_counts = stats.get("ext_counts", Counter())
@@ -2349,6 +2649,24 @@ def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name:
 
     top_exts = [e for e, _ in ext_counts.most_common(3) if e != '(no ext)']
     ext_label = f"[{', '.join(top_exts)}]" if top_exts else ""
+
+    if ft_info:
+        top_cat = ft_info.get("primary_category")
+        app = ft_info.get("app_needed", "")
+        if "Microsoft Money" in app or top_cat == "Financial Data":
+            if "money" in name_lower or ".mny" in ext_counts or ".mbf" in ext_counts:
+                return f"Microsoft Money financial database & backup archives (.mny, .mbf{year_str})"
+            return f"Financial account databases & transaction records{year_str}"
+        if "Quicken" in app:
+            return f"Quicken personal financial accounts & tax records (.qdf{year_str})"
+        if "TurboTax" in app or top_cat == "Tax Records":
+            return f"Historical tax returns & IRS filing records{year_str}"
+        if top_cat == "Database":
+            return f"Database SQL dumps & backup snapshots (.sql{year_str})"
+        if "Photoshop" in app:
+            return f"Adobe Photoshop design project files & creative assets (.psd{year_str})"
+        if "Lightroom" in app or top_cat == "RAW Photography":
+            return f"RAW digital photo archives & camera master shoots{year_str}"
 
     # Specific name & signature heuristics
     if "money" in name_lower or ".mny" in ext_counts or ".mbf" in ext_counts:
@@ -2748,29 +3066,33 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
             res_p = str(sub_dir.resolve())
             is_verified = 0
             existing_desc = None
+            existing_app = None
 
             if conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT is_verified, description FROM directories WHERE path = ?", (res_p,))
+                cursor.execute("SELECT is_verified, description, app_needed FROM directories WHERE path = ?", (res_p,))
                 row = cursor.fetchone()
                 if row:
                     is_verified = row[0] or 0
                     existing_desc = row[1]
+                    existing_app = row[2]
 
             if unverified_only and is_verified == 1:
                 desc_label = f" — \"{existing_desc}\"" if existing_desc else ""
                 print(f"  [{s_idx}/{len(l2_subdirs)}] ✓ Verified: {sub_dir.name}{desc_label} (Skipping)")
                 continue
 
-            # Analyze content
+            # Analyze content & identify file types / required applications
             stats = analyze_folder_content(sub_dir)
-            suggested_desc = existing_desc if existing_desc else suggest_folder_description(sub_dir.name, l1_dir.name, tier_name, stats)
+            ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], l1_dir.name, tier_name)
+            detected_app = existing_app if existing_app else ft_info.get("app_needed")
+            suggested_desc = existing_desc if existing_desc else suggest_folder_description(sub_dir.name, l1_dir.name, tier_name, stats, ft_info)
 
             # Format stats
             size_str = format_size(stats["total_bytes"])
             files_count = stats["total_files"]
             date_range = f"{stats['earliest_date']} → {stats['latest_date']}" if stats["earliest_date"] else "Unknown dates"
-            top_exts = ", ".join([f"{count} {ext}" for ext, count in stats["ext_counts"].most_common(4)]) if stats["ext_counts"] else "None"
+            top_exts = ft_info["file_types_formatted"]
             samples = ", ".join(stats["sample_files"][:3]) if stats["sample_files"] else "None"
 
             verified_badge = "✓ Verified" if is_verified == 1 else "⚪ Unverified (Untagged)"
@@ -2779,18 +3101,20 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 print("\n" + "-" * 80)
                 print(f"  {tier_emoji} [{tier_name}] ▸ 📍 {loc_label} ▸ {l1_dir.name}  |  Folder {s_idx}/{len(l2_subdirs)}: '{sub_dir.name}'")
                 print("-" * 80)
-                print(f"  • Location:     {loc_label} ({loc_path})")
-                print(f"  • Full Path:    {sub_dir}")
-                print(f"  • Status:       {verified_badge}")
-                print(f"  • Storage:      {size_str} across {files_count:,} files ({stats['subfolder_count']} subfolders)")
-                print(f"  • Date Range:   {date_range}")
-                print(f"  • File Types:   {top_exts}")
-                print(f"  • Sample Files: {samples}")
+                print(f"  • Location:       {loc_label} ({loc_path})")
+                print(f"  • Full Path:      {sub_dir}")
+                print(f"  • Status:         {verified_badge}")
+                print(f"  • Storage:        {size_str} across {files_count:,} files ({stats['subfolder_count']} subfolders)")
+                print(f"  • Date Range:     {date_range}")
+                print(f"  • File Types:     {top_exts}")
+                print(f"  • App Needed:     {detected_app}")
+                print(f"  • Category Check: {ft_info['category_match_msg']}")
+                print(f"  • Sample Files:   {samples}")
                 print(f"\n  💡 Suggested Description:")
                 print(f"     \"{suggested_desc}\"")
                 print("\n  Actions:")
-                print("    [a] Approve suggested description & apply tags (Mark Verified ✓)")
-                print("    [e] Edit description, apply tags & verify")
+                print(f"    [a] Approve description & attach app ('{detected_app}') (Mark Verified ✓)")
+                print("    [e] Edit description or required app, apply tags & verify")
                 print("    [m] Move / Reassign to another Priority tier or parent folder")
                 print("    [s] Skip for now (remain unverified)")
                 print("    [q] Quit wizard and return to menu")
@@ -2803,19 +3127,24 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
                     set_finder_tags(sub_dir, tags)
                     _sync_directory_tags_to_db(sub_dir, tags, db_path)
-                    _set_directory_description_in_db(sub_dir, suggested_desc, db_path, is_verified=True)
-                    print(f"\n[Success] ✓ Approved & verified '{sub_dir.name}'. Tags & description saved.")
+                    _set_directory_description_in_db(sub_dir, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
+                    print(f"\n[Success] ✓ Approved & verified '{sub_dir.name}'. Tags, description & app '{detected_app}' saved.")
                     total_curated += 1
                     break
                 elif action == 'e':
                     print(f"\nCurrent suggestion: {suggested_desc}")
                     custom_desc = input("Enter custom description (or press Enter to keep suggestion): ").strip()
                     final_desc = custom_desc if custom_desc else suggested_desc
+
+                    print(f"\nCurrent app needed: {detected_app}")
+                    custom_app = input(f"Enter required app (or press Enter to keep '{detected_app}'): ").strip()
+                    final_app = custom_app if custom_app else detected_app
+
                     tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
                     set_finder_tags(sub_dir, tags)
                     _sync_directory_tags_to_db(sub_dir, tags, db_path)
-                    _set_directory_description_in_db(sub_dir, final_desc, db_path, is_verified=True)
-                    print(f"\n[Success] ✓ Custom description approved & verified for '{sub_dir.name}'.")
+                    _set_directory_description_in_db(sub_dir, final_desc, db_path, is_verified=True, app_needed=final_app)
+                    print(f"\n[Success] ✓ Custom description & app '{final_app}' approved & verified for '{sub_dir.name}'.")
                     total_curated += 1
                     break
                 elif action == 'm':
@@ -2867,7 +3196,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         new_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_l1_dest.name, 0), (sub_dir.name, 0)]
                         set_finder_tags(target_dest_path, new_tags)
                         _sync_directory_tags_to_db(target_dest_path, new_tags, db_path)
-                        _set_directory_description_in_db(target_dest_path, suggested_desc, db_path, is_verified=True)
+                        _set_directory_description_in_db(target_dest_path, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
                         print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' under {target_loc['label']} / {target_l1_dest.name}.")
                         total_curated += 1
                         break
@@ -2913,6 +3242,8 @@ def _inspect_and_edit_single_folder(item: dict, storage_root: Path, db_path: str
         print(f"  • Parent Tier:  {item['parent_tier']} ({item['tier_color_name']})")
         desc_val = item.get("description")
         print(f"  • Description:  {desc_val if desc_val else 'None (stored in SQLite DB)'}")
+        app_val = item.get("app_needed")
+        print(f"  • App Needed:   {app_val if app_val else 'None'}")
         
         if item["size_bytes"] is not None and item["file_count"] is not None:
             print(f"  • DB Storage:   {format_size(item['size_bytes'])} across {item['file_count']:,} indexed files")
@@ -2934,7 +3265,7 @@ def _inspect_and_edit_single_folder(item: dict, storage_root: Path, db_path: str
 
         print("\nActions:")
         print("  1. Apply standard Priority tags (Priority tier with color + folder name tag)")
-        print("  2. Add / Edit folder description (Stored in SQLite database)")
+        print("  2. Add / Edit folder description & required application (Stored in SQLite)")
         print("  3. Custom tag & Finder color (Add/edit custom tag and pick color)")
         print("  4. Move / Reassign to a different Priority Tier (e.g., Priority 2 -> Priority 3)")
         print("  5. Propagate current tags to all subfolders in this subtree")
@@ -2957,16 +3288,17 @@ def _inspect_and_edit_single_folder(item: dict, storage_root: Path, db_path: str
             cur_desc = item.get("description") or ""
             print(f"\nCurrent description: {cur_desc if cur_desc else '(empty)'}")
             new_desc = input("Enter new folder description (or press Enter to keep current): ").strip()
-            if new_desc:
-                _set_directory_description_in_db(folder_path, new_desc, db_path)
-                item["description"] = new_desc
-                print(f"\n[Success] Folder description saved to SQLite.")
-            elif new_desc == "" and cur_desc:
-                clear_desc = input("Clear existing description? [y/N]: ").strip().lower()
-                if clear_desc == 'y':
-                    _set_directory_description_in_db(folder_path, None, db_path)
-                    item["description"] = None
-                    print(f"\n[Success] Folder description cleared.")
+            final_desc = new_desc if new_desc else (None if new_desc == "" and not cur_desc else cur_desc)
+
+            cur_app = item.get("app_needed") or ""
+            print(f"Current app needed:  {cur_app if cur_app else '(empty)'}")
+            new_app = input("Enter required application (or press Enter to keep current): ").strip()
+            final_app = new_app if new_app else (None if new_app == "" and not cur_app else cur_app)
+
+            _set_directory_description_in_db(folder_path, final_desc, db_path, app_needed=final_app)
+            item["description"] = final_desc
+            item["app_needed"] = final_app
+            print(f"\n[Success] Folder description and required app saved to SQLite.")
         elif sub_choice == "3":
             tag_name = input(f"Enter custom tag name [Default: {item['name']}]: ").strip()
             tag_name = tag_name if tag_name else item["name"]
@@ -3430,6 +3762,37 @@ def audit_idrive_backup_interactive(db_path: str, target_tiers: list | str | Non
         else:
             print("[Error] Invalid choice.")
 
+def view_file_extensions_catalog(db_path: str):
+    """Displays the registered file extensions catalog with categories and required applications."""
+    if not os.path.exists(db_path):
+        print("\n[Notice] No database found.")
+        return
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT extension, category, description, primary_app, mac_app, is_critical_format
+        FROM file_extensions
+        ORDER BY category, extension
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    print("\n" + "=" * 98)
+    print(f"FILE EXTENSIONS & APPLICATIONS CATALOG ({len(rows)} registered file types)")
+    print("=" * 98)
+    print(f"{'Extension':<12} {'Category':<20} {'Description':<32} {'Required App (Primary / Mac)'}")
+    print("-" * 98)
+    curr_cat = None
+    for ext, cat, desc, p_app, m_app, is_crit in rows:
+        if cat != curr_cat:
+            curr_cat = cat
+            print(f"\n📂 [{curr_cat.upper()}]")
+        app_disp = f"{p_app} (Mac: {m_app})" if m_app else p_app
+        crit_tag = " ⚠️ [Critical]" if is_crit else ""
+        print(f"  {ext:<10} {cat:<20} {desc:<32} {app_disp}{crit_tag}")
+    print("=" * 98)
+    input("\nPress Enter to continue...")
+
 def tag_review_priority_folders_interactive(db_path: str):
     """Interactive review and editing of level-1 folders across all mapped Priority locations."""
     print("\n" + "=" * 70)
@@ -3489,6 +3852,7 @@ def tag_review_priority_folders_interactive(db_path: str):
                     size_bytes = None
                     db_tags = []
                     folder_desc = None
+                    folder_app = None
                     if cursor:
                         res_p = str(s_dir.resolve())
                         cursor.execute("""
@@ -3509,11 +3873,13 @@ def tag_review_priority_folders_interactive(db_path: str):
                         """, (res_p,))
                         db_tags = [r[0] for r in cursor.fetchall()]
 
-                        cursor.execute("SELECT description FROM directories WHERE path = ?", (res_p,))
+                        cursor.execute("SELECT description, app_needed FROM directories WHERE path = ?", (res_p,))
                         d_row = cursor.fetchone()
-                        if d_row and d_row[0]:
-                            folder_desc = d_row[0]
-                        else:
+                        if d_row:
+                            if d_row[0]:
+                                folder_desc = d_row[0]
+                            folder_app = d_row[1]
+                        if not folder_desc:
                             def_l1_desc = DEFAULT_LEVEL1_DESCRIPTIONS.get((tier_clean, s_dir.name.lower()))
                             if def_l1_desc:
                                 _set_directory_description_in_db(s_dir, def_l1_desc, db_path)
@@ -3532,7 +3898,8 @@ def tag_review_priority_folders_interactive(db_path: str):
                         "file_count": file_count,
                         "size_bytes": size_bytes,
                         "db_tags": db_tags,
-                        "description": folder_desc
+                        "description": folder_desc,
+                        "app_needed": folder_app
                     })
 
         if conn:
@@ -3598,6 +3965,8 @@ def tag_review_priority_folders_interactive(db_path: str):
             print(f"{idx:<4} {item['parent_tier']:<14} {item['name']:<32} {size_str:<18} {tag_display}")
             if item.get("description"):
                 print(f"     ↳ 📝 {item['description']}")
+            if item.get("app_needed"):
+                print(f"     ↳ 💻 App Needed: {item['app_needed']}")
 
         print("-" * 98)
         print(f"Total Folders: {len(level1_items)}")
@@ -3607,6 +3976,7 @@ def tag_review_priority_folders_interactive(db_path: str):
         print("  • 'loc' - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)")
         print("  • 'idrive' - Audit iDrive backup inclusion (Check Priority 1 & 2 folders in iDrive)")
         print("  • 'w' - Launch Sequential Curation Wizard (Triage subfolders across locations)")
+        print("  • 'ext' - View File Extensions & Required Applications Catalog (Database library)")
         print("  • 'p1'-'p4' - Edit description of a top-level Priority tier (Priority 1-4)")
         print("  • 'a' - Auto-tag untagged folders with parent Priority & category")
         print("  • 'reset-tags' - Reset subfolder tags & verification (Preserve level-1, clear level-2+ tags)")
@@ -3621,6 +3991,9 @@ def tag_review_priority_folders_interactive(db_path: str):
             continue
         elif action_choice in ['v', 'status']:
             generate_curation_verification_report(db_path)
+            continue
+        elif action_choice == 'ext':
+            view_file_extensions_catalog(db_path)
             continue
         elif action_choice == 'idrive':
             audit_idrive_backup_interactive(db_path, ["priority 1", "priority 2"])
