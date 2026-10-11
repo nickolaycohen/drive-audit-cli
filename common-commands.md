@@ -215,8 +215,12 @@ git push origin main
 ### Python & Runtime Execution
 
 ```bash
-# Run the main interactive storage orchestrator
+# Run the main interactive storage orchestrator via shortcut launcher
+./run.sh
+
+# Or invoke directly via Python
 python3 drive_audit_finder.py
+
 
 # Run with custom SQLite database path override
 DRIVE_AUDIT_DB="/path/to/drive_audit.db" python3 drive_audit_finder.py
