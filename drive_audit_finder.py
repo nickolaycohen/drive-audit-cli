@@ -1433,6 +1433,7 @@ def generate_curation_verification_report(db_path: str):
 
         elif rep_choice == "1":
             # List Approved Folders with Subtree Totals & drilldown
+            print("\n⏳ Fetching approved / verified folders... Please wait...")
             cursor.execute("""
                 SELECT 
                     d.id,
@@ -1547,7 +1548,12 @@ def generate_curation_verification_report(db_path: str):
 
         elif rep_choice == "2":
             # List All Approved Files (including files inside subdirectories of approved folders)
+            print("\n⏳ Fetching approved files across verified folder trees... Please wait...")
+            t_start = time.time()
             cursor.execute("""
+                WITH approved_dirs AS (
+                    SELECT id, path FROM directories WHERE is_verified = 1
+                )
                 SELECT 
                     d.name as folder_name,
                     d.path as folder_path,
@@ -1557,15 +1563,16 @@ def generate_curation_verification_report(db_path: str):
                     f.size_bytes,
                     f.modified_at,
                     COALESCE(GROUP_CONCAT(DISTINCT ft.tag_name), '-') as file_tags
-                FROM files f
-                JOIN directories d ON f.directory_id = d.id
+                FROM approved_dirs ad
+                JOIN directories d ON (d.id = ad.id OR d.path LIKE ad.path || '/%')
+                JOIN files f ON f.directory_id = d.id
                 LEFT JOIN file_tags ft ON ft.file_id = f.id
-                WHERE d.is_verified = 1
-                   OR EXISTS (SELECT 1 FROM directories p WHERE p.is_verified = 1 AND d.path LIKE p.path || '/%')
                 GROUP BY f.id
                 ORDER BY d.path, f.name
             """)
             all_v_files = cursor.fetchall()
+            t_elapsed = time.time() - t_start
+            print(f"✓ Retrieved {len(all_v_files):,} approved files in {t_elapsed:.2f}s.")
             print("\n" + "=" * 98)
             print(f"ALL APPROVED FILES ({len(all_v_files):,} files across approved folders and subtrees)")
             print("=" * 98)
@@ -1584,25 +1591,39 @@ def generate_curation_verification_report(db_path: str):
 
         elif rep_choice == "3":
             # List Unapproved Level-1 / Level-2 Folders Pending Curation
+            print("\n⏳ Fetching pending / unapproved category folders... Please wait...")
+            t_start = time.time()
             cursor.execute("""
+                WITH unapproved_dirs AS (
+                    SELECT 
+                        pl.priority_tier,
+                        pl.label,
+                        d.id,
+                        d.name,
+                        d.path
+                    FROM priority_locations pl
+                    JOIN directories d ON (d.path LIKE pl.path || '/%' AND d.path NOT LIKE pl.path || '/%/%/%')
+                    WHERE pl.is_active = 1 AND d.is_verified = 0
+                )
                 SELECT 
-                    pl.priority_tier,
-                    pl.label,
-                    d.id,
-                    d.name,
-                    d.path,
-                    (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_cnt,
-                    (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_b,
-                    (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = d.id) as dir_cnt,
+                    ud.priority_tier,
+                    ud.label,
+                    ud.id,
+                    ud.name,
+                    ud.path,
+                    COUNT(f.id) as sub_cnt,
+                    COALESCE(SUM(f.size_bytes), 0) as sub_b,
                     COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') as tags
-                FROM priority_locations pl
-                JOIN directories d ON (d.path LIKE pl.path || '/%' AND d.path NOT LIKE pl.path || '/%/%/%')
-                LEFT JOIN directory_tags dt ON d.id = dt.directory_id
-                WHERE pl.is_active = 1 AND d.is_verified = 0
-                GROUP BY d.id
-                ORDER BY pl.priority_tier, d.path
+                FROM unapproved_dirs ud
+                LEFT JOIN directories sub ON (sub.id = ud.id OR sub.path LIKE ud.path || '/%')
+                LEFT JOIN files f ON f.directory_id = sub.id
+                LEFT JOIN directory_tags dt ON ud.id = dt.directory_id
+                GROUP BY ud.id
+                ORDER BY ud.priority_tier, ud.path
             """)
             u_rows = cursor.fetchall()
+            t_elapsed = time.time() - t_start
+            print(f"✓ Retrieved {len(u_rows):,} pending folders in {t_elapsed:.2f}s.")
             print("\n" + "=" * 98)
             print(f"PENDING / UNAPPROVED CATEGORY FOLDERS ({len(u_rows)} Level-1/2 folders)")
             print("=" * 98)
@@ -1657,6 +1678,7 @@ def generate_curation_verification_report(db_path: str):
         elif rep_choice == "4":
             tier_in = input("\nEnter Priority Tier to filter (1, 2, 3, or 4): ").strip()
             if tier_in in ["1", "2", "3", "4"]:
+                print(f"\n⏳ Loading Priority {tier_in} folders... Please wait...")
                 t_filter = f"priority {tier_in}"
                 cursor.execute("""
                     SELECT 
@@ -1708,11 +1730,13 @@ def generate_curation_verification_report(db_path: str):
                 ver_list = cursor.fetchall()
 
                 cursor.execute("""
+                    WITH approved_dirs AS (
+                        SELECT id, path FROM directories WHERE is_verified = 1
+                    )
                     SELECT d.name as folder_name, f.name, f.category, f.size_bytes, f.modified_at, d.path
-                    FROM files f
-                    JOIN directories d ON f.directory_id = d.id
-                    WHERE d.is_verified = 1
-                       OR EXISTS (SELECT 1 FROM directories p WHERE p.is_verified = 1 AND d.path LIKE p.path || '/%')
+                    FROM approved_dirs ad
+                    JOIN directories d ON (d.id = ad.id OR d.path LIKE ad.path || '/%')
+                    JOIN files f ON f.directory_id = d.id
                     ORDER BY d.path, f.name
                 """)
                 v_files_all = cursor.fetchall()
