@@ -269,20 +269,23 @@ pgrep -f "/Applications/IDrive.app"
 # Connect to canonical database
 sqlite3 "/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db"
 
+# Or connect via workspace symlink
+sqlite3 db/drive_audit.db
+
 # List database tables
-sqlite3 drive_audit.db ".tables"
+sqlite3 db/drive_audit.db ".tables"
 
 # View complete schema definition
-sqlite3 drive_audit.db ".schema"
+sqlite3 db/drive_audit.db ".schema"
 
 # Check Write-Ahead Logging (WAL) mode
-sqlite3 drive_audit.db "PRAGMA journal_mode;"
+sqlite3 db/drive_audit.db "PRAGMA journal_mode;"
 
 # Execute batch analytical queries
-sqlite3 -header -column drive_audit.db < sql/queries.sql
+sqlite3 -header -column db/drive_audit.db < sql/queries.sql
 
 # Calculate global recoverable duplicate GB
-sqlite3 -header -column drive_audit.db "
+sqlite3 -header -column db/drive_audit.db "
 SELECT COUNT(*) AS groups, SUM(copy_count - 1) AS dups,
 ROUND(SUM((copy_count - 1) * size_bytes) / 1024.0 / 1024.0 / 1024.0, 2) AS recoverable_gb
 FROM (SELECT name, size_bytes, COUNT(*) AS copy_count FROM files WHERE size_bytes > 0 GROUP BY name, size_bytes HAVING COUNT(*) > 1);"

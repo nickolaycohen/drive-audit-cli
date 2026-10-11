@@ -358,8 +358,11 @@ def get_default_db_path() -> Optional[str]:
     if os.path.exists(ext_pro):
         return os.path.abspath(ext_pro)
     candidates = [
+        str(Path(__file__).resolve().parent.parent / "db" / "drive_audit.db"),
+        "db/drive_audit.db",
         "drive_audit.db",
         str(Path(__file__).resolve().parent.parent / "drive_audit.db"),
+        os.path.expanduser("~/dev/drive-audit-cli/db/drive_audit.db"),
         os.path.expanduser("~/dev/drive-audit-cli/drive_audit.db"),
     ]
     for c in candidates:

@@ -446,7 +446,7 @@ Provides an executive audit report separating approved/verified folders and file
 All audit data is saved to a persistent SQLite database (`drive_audit.db`). To decouple persistent state from version-controlled source code, the operational database resides outside the Git repository:
 
 - **Primary Canonical Storage**: `/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db`
-- **Dynamic CLI Discovery**: The orchestrator automatically connects to the Extreme Pro database when mounted (with fallback to local symlink or `DRIVE_AUDIT_DB` environment variable).
+- **Dynamic CLI Discovery**: The orchestrator automatically connects to the Extreme Pro database when mounted (with fallback to `db/drive_audit.db` symlink or `DRIVE_AUDIT_DB` environment variable).
 - **Offsite Cloud Backup**: `/Volumes/Extreme Pro/Data/sqlite` is actively registered in macOS iDrive client (`NetworkDriveBackupSet.plist`) for scheduled cloud disaster recovery.
 - **Local Snapshots**: Periodic point-in-time SQLite backups can be staged into `/Volumes/LaCie/Storage/Priority 1/Data/DB Backup`.
 

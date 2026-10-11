@@ -5031,10 +5031,16 @@ def get_orchestrator_db_path() -> str:
     ext_pro_p = "/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db"
     if os.path.exists(ext_pro_p):
         return ext_pro_p
-    # 3. Project root symlink or workspace relative database
+    # 3. Dedicated db/ subfolder symlink or file
+    db_folder_link = Path(__file__).resolve().parent.parent / "db" / "drive_audit.db"
+    if db_folder_link.exists():
+        return str(db_folder_link)
+    # 4. Project root symlink or workspace relative database
     root_link = Path(__file__).resolve().parent.parent / "drive_audit.db"
     if root_link.exists():
         return str(root_link)
+    if os.path.exists("db/drive_audit.db"):
+        return "db/drive_audit.db"
     return "drive_audit.db"
 
 def main():
