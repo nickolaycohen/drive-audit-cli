@@ -4056,6 +4056,261 @@ def _handle_custom_relocation_target(
         print(f"\n[Error] Relocation failed: {e}")
         return False
 
+
+def detect_verified_folder_overlap(sub_dir: Path, db_path: str) -> dict | None:
+    """
+    Compares candidate folder files against already verified database folders (is_verified = 1).
+    Detects identical duplicate files and diff/unique files.
+    Excludes candidate itself and any ancestor or descendant paths.
+    Returns overlap summary dict if significant overlap is detected (>= 3 identical files and >= 20%, or >= 5 identical), else None.
+    """
+    if not sub_dir.exists() or not sub_dir.is_dir():
+        return None
+
+    # Collect candidate files (ignoring hidden files / macOS metadata)
+    cand_files = []
+    try:
+        for f in sub_dir.rglob('*'):
+            if f.is_file() and not f.name.startswith('.'):
+                try:
+                    cand_files.append({
+                        'file': f,
+                        'rel_path': f.relative_to(sub_dir),
+                        'name': f.name,
+                        'size': f.stat().st_size,
+                        'mtime': f.stat().st_mtime
+                    })
+                except (OSError, PermissionError):
+                    continue
+    except Exception:
+        return None
+
+    if not cand_files:
+        return None
+
+    cand_total = len(cand_files)
+    sub_dir_resolved = sub_dir.resolve()
+
+    if not os.path.exists(db_path):
+        return None
+
+    try:
+        conn = get_db_connection(db_path)
+        cur = conn.cursor()
+        ver_rows = cur.execute("""
+            SELECT id, name, path, description, app_needed
+            FROM directories
+            WHERE is_verified = 1
+        """).fetchall()
+        conn.close()
+    except Exception:
+        return None
+
+    valid_candidates = []
+    for v_id, v_name, v_path_str, v_desc, v_app in ver_rows:
+        try:
+            v_path = Path(v_path_str).resolve()
+        except Exception:
+            continue
+
+        if not v_path.exists() or not v_path.is_dir():
+            continue
+
+        # Exclude candidate itself and any ancestor or descendant
+        if v_path == sub_dir_resolved or v_path in sub_dir_resolved.parents or sub_dir_resolved in v_path.parents:
+            continue
+
+        # Collect target files
+        target_files = []
+        try:
+            for tf in v_path.rglob('*'):
+                if tf.is_file() and not tf.name.startswith('.'):
+                    try:
+                        target_files.append({
+                            'file': tf,
+                            'rel_path': tf.relative_to(v_path),
+                            'name': tf.name,
+                            'size': tf.stat().st_size,
+                            'mtime': tf.stat().st_mtime
+                        })
+                    except (OSError, PermissionError):
+                        continue
+        except Exception:
+            continue
+
+        if not target_files:
+            continue
+
+        target_by_rel = {tf['rel_path']: tf for tf in target_files}
+        target_by_name = {}
+        for tf in target_files:
+            target_by_name.setdefault(tf['name'], []).append(tf)
+
+        identical_list = []
+        diff_list = []
+        for c in cand_files:
+            if c['rel_path'] in target_by_rel and target_by_rel[c['rel_path']]['size'] == c['size']:
+                identical_list.append((c, target_by_rel[c['rel_path']]))
+            elif c['name'] in target_by_name and any(m['size'] == c['size'] for m in target_by_name[c['name']]):
+                identical_list.append((c, next(m for m in target_by_name[c['name']] if m['size'] == c['size'])))
+            elif c['rel_path'] in target_by_rel:
+                diff_list.append({
+                    'cand_file': c['file'],
+                    'rel_path': c['rel_path'],
+                    'name': c['name'],
+                    'size': c['size'],
+                    'mtime': c['mtime'],
+                    'reason': 'modified_same_path',
+                    'conflict': True,
+                    'target_match': target_by_rel[c['rel_path']]
+                })
+            elif c['name'] in target_by_name:
+                diff_list.append({
+                    'cand_file': c['file'],
+                    'rel_path': c['rel_path'],
+                    'name': c['name'],
+                    'size': c['size'],
+                    'mtime': c['mtime'],
+                    'reason': 'modified_diff_path',
+                    'conflict': False,
+                    'target_match': target_by_name[c['name']][0]
+                })
+            else:
+                diff_list.append({
+                    'cand_file': c['file'],
+                    'rel_path': c['rel_path'],
+                    'name': c['name'],
+                    'size': c['size'],
+                    'mtime': c['mtime'],
+                    'reason': 'new',
+                    'conflict': False,
+                    'target_match': None
+                })
+
+        identical_count = len(identical_list)
+        pct = (identical_count / cand_total) * 100.0 if cand_total > 0 else 0.0
+
+        if (identical_count >= 3 and pct >= 20.0) or identical_count >= 5:
+            valid_candidates.append({
+                'target_id': v_id,
+                'target_name': v_name,
+                'target_path': v_path,
+                'target_desc': v_desc,
+                'target_app': v_app,
+                'depth': len(v_path.parts),
+                'total_cand': cand_total,
+                'cand_bytes': sum(c['size'] for c in cand_files),
+                'identical_count': identical_count,
+                'identical_bytes': sum(item[0]['size'] for item in identical_list),
+                'diff_count': len(diff_list),
+                'diff_bytes': sum(d['size'] for d in diff_list),
+                'pct': pct,
+                'identical_files': identical_list,
+                'diff_files': diff_list
+            })
+
+    if not valid_candidates:
+        return None
+
+    # Filter out any candidate that is an ancestor of another candidate match
+    filtered_candidates = []
+    for c in valid_candidates:
+        is_ancestor_of_another = any(
+            other['target_path'] != c['target_path'] and c['target_path'] in other['target_path'].parents
+            for other in valid_candidates
+        )
+        if not is_ancestor_of_another:
+            filtered_candidates.append(c)
+
+    if not filtered_candidates:
+        filtered_candidates = valid_candidates
+
+    # Sort remaining by identical_count desc, then path depth desc
+    filtered_candidates.sort(key=lambda m: (m['identical_count'], m['depth']), reverse=True)
+    return filtered_candidates[0]
+
+
+def execute_folder_merge_and_cleanup(sub_dir: Path, overlap: dict, db_path: str) -> bool:
+    """
+    Merges diff/unique files from candidate sub_dir into verified overlap['target_path'].
+    Handles file conflicts by preserving older revisions.
+    Once diff files are copied safely, removes candidate sub_dir from disk and SQLite.
+    Triggers directory scan on destination to update database index.
+    """
+    dest_dir = overlap['target_path']
+    diff_files = overlap.get('diff_files', [])
+
+    print("\n" + "=" * 80)
+    print("  EXECUTING MERGE & CLEANUP")
+    print("=" * 80)
+    print(f"  • Source:      {sub_dir}")
+    print(f"  • Destination: {dest_dir}")
+    print(f"  • Diff Files to Merge: {len(diff_files)} files ({format_size(overlap['diff_bytes'])})")
+    print(f"  • Redundant Duplicates: {overlap['identical_count']} files ({format_size(overlap['identical_bytes'])})")
+    print("=" * 80)
+
+    try:
+        # Step 1: Copy diff files into target
+        merged_count = 0
+        for df in diff_files:
+            cand_file = df['cand_file']
+            rel_path = df['rel_path']
+            dest_file = dest_dir / rel_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+
+            if dest_file.exists() and dest_file.stat().st_size != df['size']:
+                # Conflict resolution: preserve older version
+                target_mtime = dest_file.stat().st_mtime
+                cand_mtime = df['mtime']
+                if cand_mtime > target_mtime:
+                    old_date_str = datetime.datetime.fromtimestamp(target_mtime).strftime('%Y%m%d_%H%M%S')
+                    bak_path = dest_file.parent / f"{dest_file.stem}_backup_{old_date_str}{dest_file.suffix}"
+                    dest_file.rename(bak_path)
+                    print(f"    ↳ [Conflict] Existing target file was older; backed up to '{bak_path.name}'")
+                else:
+                    cand_date_str = datetime.datetime.fromtimestamp(cand_mtime).strftime('%Y%m%d_%H%M%S')
+                    dest_file = dest_file.parent / f"{dest_file.stem}_cand_{cand_date_str}{dest_file.suffix}"
+                    print(f"    ↳ [Conflict] Existing target file was newer; saved candidate as '{dest_file.name}'")
+
+            shutil.copy2(str(cand_file), str(dest_file))
+            merged_count += 1
+            print(f"    ✓ Merged: '{rel_path}' ({format_size(df['size'])})")
+
+        if merged_count > 0:
+            print(f"\n[Success] ✓ Successfully merged {merged_count} diff files into '{dest_dir.name}'.")
+
+        # Step 2: Delete duplicate candidate folder from disk
+        print(f"  ↳ Removing redundant duplicate source folder '{sub_dir.name}' from disk...")
+        shutil.rmtree(str(sub_dir))
+        print(f"  ✓ Deleted '{sub_dir}' from disk.")
+
+        # Step 3: Purge deleted directory and files from SQLite
+        if os.path.exists(db_path):
+            c_conn = get_db_connection(db_path)
+            c_cur = c_conn.cursor()
+            old_p = str(sub_dir.resolve())
+            c_cur.execute("""
+                DELETE FROM files
+                WHERE directory_id IN (
+                    SELECT id FROM directories WHERE path = ? OR path LIKE ? || '/%'
+                )
+            """, (old_p, old_p))
+            c_cur.execute("DELETE FROM directories WHERE path = ? OR path LIKE ? || '/%'", (old_p, old_p))
+            c_conn.commit()
+            c_conn.close()
+            print("  ✓ Cleared deleted folder records from SQLite.")
+
+            # Step 4: Re-scan destination directory so merged files are indexed in DB
+            print(f"  ↳ Refreshing and indexing destination folder '{dest_dir.name}' in SQLite...")
+            perform_directory_scan(dest_dir, db_path, skip_hours=0.0)
+            print(f"[Success] ✓ Destination folder '{dest_dir.name}' re-scanned and synchronized.")
+
+        return True
+    except Exception as e:
+        print(f"\n[Error] Merge and cleanup failed: {e}")
+        return False
+
+
 def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, target_l1_dir: Path | None = None):
     """
     Sequential Curation Wizard:
@@ -4172,6 +4427,9 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
             verified_badge = "✓ Verified" if is_verified == 1 else "⚪ Unverified (Untagged)"
 
             while True:
+                # Detect overlap with already verified database folders
+                overlap = detect_verified_folder_overlap(sub_dir, db_path)
+
                 # Analyze mystery / extensionless files if present
                 mystery_files = stats.get("no_ext_files", [])
                 mystery_summary = ""
@@ -4227,11 +4485,30 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 print(f"  • Sample Files:   {samples}")
                 print(f"\n  💡 Suggested Description:")
                 print(f"     \"{suggested_desc}\"")
-                base_actions = [
+
+                if overlap:
+                    print(f"\n  🔄 Verified Archive Overlap Detected:")
+                    print(f"     ↳ Matching Verified Destination: '{overlap['target_name']}'")
+                    print(f"       📍 Path: {overlap['target_path']}")
+                    print(f"     ↳ {overlap['identical_count']} of {overlap['total_cand']} files ({overlap['pct']:.1f}%) are IDENTICAL duplicates ({format_size(overlap['identical_bytes'])})")
+                    if overlap['diff_count'] > 0:
+                        print(f"     ↳ {overlap['diff_count']} unique / diff files found ({format_size(overlap['diff_bytes'])})")
+                    else:
+                        print(f"     ↳ 100% duplicate — all {overlap['total_cand']} files already safely verified in destination")
+
+                base_actions = []
+                if overlap:
+                    if overlap['diff_count'] > 0:
+                        m_action_lbl = f"Merge {overlap['diff_count']} diff files into '{overlap['target_name']}' & delete duplicate folder on disk"
+                    else:
+                        m_action_lbl = f"Delete redundant duplicate folder (100% duplicate of '{overlap['target_name']}')"
+                    base_actions.append({"key": "g", "label": f"{m_action_lbl} (Recommended)"})
+
+                base_actions.extend([
                     {"key": "a", "label": f"Approve description & attach app ('{detected_app}') (Mark Verified ✓)"},
                     {"key": "e", "label": "Edit folder name, description or attached app, apply tags & verify"},
                     {"key": "r", "label": "Rename folder on disk & database"},
-                ]
+                ])
                 if mystery_files:
                     base_actions.append({"key": "i", "label": f"Inspect & analyze {len(mystery_files)} mystery / extensionless files (Magic signatures & hex dump)"})
                 if ft_info.get("has_unusable_app") and "priority 1" in tier_name.lower():
@@ -4247,7 +4524,10 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     {"key": "q", "label": "Quit wizard and return to menu"}
                 ])
                 w_usage = get_menu_option_usage(db_path, "wizard_action")
-                if not ft_info.get("is_match", True):
+                if overlap:
+                    top_key = "g"
+                    sorted_actions = sorted(base_actions, key=lambda x: (x["key"] != "g", -w_usage.get(x["key"], 0)))
+                elif not ft_info.get("is_match", True):
                     top_key = "m"
                     sorted_actions = sorted(base_actions, key=lambda x: (x["key"] != "m", -w_usage.get(x["key"], 0)))
                 else:
@@ -4267,7 +4547,51 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     action = top_key
                 record_menu_usage(db_path, "wizard_action", action, next((a["label"] for a in base_actions if a["key"] == action), ""))
 
-                if action == 'a':
+                if action == 'g' and overlap:
+                    print("\n" + "=" * 80)
+                    if overlap['diff_count'] > 0:
+                        print("  MERGE DIFF FILES & REMOVE DUPLICATE FOLDER")
+                    else:
+                        print("  DELETE REDUNDANT DUPLICATE FOLDER")
+                    print("=" * 80)
+                    print(f"  • Source Folder:      {sub_dir}")
+                    print(f"  • Destination Folder: {overlap['target_path']}")
+                    print(f"  • Identical Files:    {overlap['identical_count']} of {overlap['total_cand']} ({overlap['pct']:.1f}%) — {format_size(overlap['identical_bytes'])}")
+                    if overlap['diff_count'] > 0:
+                        print(f"  • Diff Files to Merge: {overlap['diff_count']} files ({format_size(overlap['diff_bytes'])})")
+                        print("\n  Diff / Unique files list:")
+                        for df in overlap['diff_files'][:12]:
+                            conflict_note = ""
+                            if df.get('conflict'):
+                                target_mtime = df['target_match']['mtime']
+                                if df['mtime'] > target_mtime:
+                                    conflict_note = " [Conflict: target exists → candidate is newer]"
+                                else:
+                                    conflict_note = " [Conflict: target exists → target is newer]"
+                            elif df.get('reason') == 'modified_diff_path':
+                                conflict_note = " [Modified revision: alternate path exists in target]"
+                            else:
+                                conflict_note = " [New file]"
+                            print(f"    • {df['rel_path']} ({format_size(df['size'])}){conflict_note}")
+                        if len(overlap['diff_files']) > 12:
+                            print(f"    ↳ ... (+{len(overlap['diff_files']) - 12} more files)")
+                        confirm_prompt = f"\nMerge {overlap['diff_count']} diff files into '{overlap['target_name']}' and delete '{sub_dir.name}'? [Y/n/c] (Default: Y): "
+                    else:
+                        print(f"  • All {overlap['total_cand']} files are already verified in '{overlap['target_name']}'.")
+                        confirm_prompt = f"\nDelete redundant duplicate folder '{sub_dir.name}' from disk and database? [Y/n/c] (Default: Y): "
+
+                    confirm_g = input(confirm_prompt).strip().lower()
+                    if confirm_g in ('', 'y', 'yes'):
+                        ok = execute_folder_merge_and_cleanup(sub_dir, overlap, db_path)
+                        if ok:
+                            total_curated += 1
+                            break
+                        else:
+                            continue
+                    else:
+                        print("Merge/delete cancelled.")
+                        continue
+                elif action == 'a':
                     tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
                     set_finder_tags(sub_dir, tags)
                     _sync_directory_tags_to_db(sub_dir, tags, db_path)
