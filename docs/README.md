@@ -321,8 +321,17 @@ Inspects mapped storage locations across Priority tiers (`Priority 1` through `P
 - **Sequential Curation Wizard ('w')**:
   - Steps through each mapped location and Level-1 category across Priority 1 $\rightarrow$ 4 sequentially.
   - Rapidly inspects Level-2 subfolders (e.g. `Priority 1/Data/13-Data.Money`, `Priority 1/Data/DB Backup`), profiling file counts, size, date spans, sample filenames, and file type distributions.
-  - **File Type Identification Engine**: Maps discovered file extensions against the persistent SQLite `file_extensions` catalog (99+ formats across Financial, Tax, Code, DBs, Media, RAW Photos, etc.) with human-readable descriptions (e.g., `141 .lrd (MS Money Lock / Report Definition), 121 .mbf (MS Money Backup Archive), 32 .mny (MS Money DB), 26 .ofx (Open Financial Exchange Data)`).
-  - **Application Association (`app_needed`)**: Automatically detects the primary software and macOS-compatible alternative required to open files (e.g. `Microsoft Money (Mac: MoneyDance / Banktivity / Parallels Windows)` or `Intuit Quicken (Mac: Quicken for Mac / Banktivity)`), permanently attaching it to the folder in SQLite.
+  - **File Type & Application Association Tree**: Maps discovered file extensions against the persistent SQLite `file_extensions` catalog (99+ formats across Financial, Tax, Code, DBs, Media, RAW Photos, etc.) and presents them as a structured application tree grouping files by their primary application, macOS alternatives, compatibility status, and mystery signatures:
+    ```text
+    • Discovered Files & Associated Apps:
+      ├── [300 files] Windows Microsoft Money (Discontinued):
+      │    • 141 .lrd (MS Money Lock/Report Def)  •  121 .mbf (MS Money Backup Archive)  •  32 .mny (MS Money Active DB)  •  (+2 more)
+      │    ↳ Status: Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)
+      ├── [26 files] Financial / Banking Software (Mac: Banktivity / MoneyDance / Excel):
+      │    • 26 .ofx (Open Financial Exchange Data)
+      └── [4 files] Extensionless / Mystery Files:
+           ↳ 🔍 4 (no ext) detected → 2x MS Money Backup (.mbf), 2x MS Money DB (.mny)
+    ```
   - **Priority 1 High-Availability Mandate & Archival Relocation**:
     - **Rule**: **Priority 1** is strictly reserved for active personal data stored **ONLY on high-availability local storage** (Internal HD for iMini) with applicable, directly openable applications (e.g. active Quicken financial DBs, essential personal/legal documents), backed up to iDrive.
     - **Archival Policy**: Legacy and discontinued application archives (e.g. Windows Microsoft Money `.mny`, `.mbf`, `.lrd` or historical accounting data) belong primarily on external storage (**LaCie Priority 2** or secondary external drives), where they are safely preserved and **remain backed up to iDrive for eventual reference**.

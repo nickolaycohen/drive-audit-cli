@@ -42,9 +42,9 @@ EXTENSION_MAP = {
 # Comprehensive File Extension Catalog with Category, Description and Default/macOS Applications
 DEFAULT_FILE_EXTENSIONS = [
     # Financial & Accounting (Critical proprietary formats)
-    (".mny", "Financial Data", "Microsoft Money DB (Discontinued format)", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
-    (".mbf", "Financial Data", "Microsoft Money Backup Archive (Discontinued format)", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
-    (".lrd", "Financial Data", "Microsoft Money Lock/Report Definition (Discontinued format)", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
+    (".mny", "Financial Data", "MS Money Active Database", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
+    (".mbf", "Financial Data", "MS Money Backup Archive", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
+    (".lrd", "Financial Data", "MS Money Lock/Report Definition", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
     (".ofx", "Financial Data", "Open Financial Exchange Transaction Data", "Financial / Banking Software", "Banktivity / MoneyDance / Excel", 1),
     (".qfx", "Financial Data", "Quicken Financial Exchange Data", "Quicken", "Quicken for Mac / Banktivity", 1),
     (".qdf", "Financial Data", "Quicken Financial Database", "Quicken", "Quicken for Mac / Parallels Windows", 1),
@@ -3005,14 +3005,39 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
             continue
         ext_lower = ext.lower()
         if ext_lower not in db_ext_map:
-            cat = get_file_category(ext_lower).title()
-            db_ext_map[ext_lower] = {
-                "category": cat,
-                "description": f"{ext_lower.upper().lstrip('.')} File",
-                "primary_app": f"{ext_lower.upper().lstrip('.')} Viewer",
-                "mac_app": None,
-                "critical": False
-            }
+            if ext_lower.startswith('.mny'):
+                db_ext_map[ext_lower] = {
+                    "category": "Financial Data",
+                    "description": f"MS Money DB Snapshot ({ext_lower.lstrip('.')})",
+                    "primary_app": "Windows Microsoft Money (Discontinued)",
+                    "mac_app": "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)",
+                    "critical": True
+                }
+            elif ext_lower.startswith('.mbf'):
+                db_ext_map[ext_lower] = {
+                    "category": "Financial Data",
+                    "description": f"MS Money Backup Archive ({ext_lower.lstrip('.')})",
+                    "primary_app": "Windows Microsoft Money (Discontinued)",
+                    "mac_app": "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)",
+                    "critical": True
+                }
+            elif ext_lower.startswith('.lrd'):
+                db_ext_map[ext_lower] = {
+                    "category": "Financial Data",
+                    "description": f"MS Money Lock/Report Def ({ext_lower.lstrip('.')})",
+                    "primary_app": "Windows Microsoft Money (Discontinued)",
+                    "mac_app": "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)",
+                    "critical": True
+                }
+            else:
+                cat = get_file_category(ext_lower).title()
+                db_ext_map[ext_lower] = {
+                    "category": cat,
+                    "description": f"{ext_lower.upper().lstrip('.')} File",
+                    "primary_app": f"{ext_lower.upper().lstrip('.')} Viewer",
+                    "mac_app": None,
+                    "critical": False
+                }
 
     # Format top extensions with descriptions
     ext_summary_parts = []
@@ -3057,6 +3082,47 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
             info = db_ext_map.get(ext.lower())
             cat_name = info["category"] if info else "Other"
             cat_weights[cat_name] += cnt
+
+    # Build structured application groups
+    grouped_map = defaultdict(lambda: {"count": 0, "app_name": "", "mac_note": None, "ext_items": []})
+    for ext, cnt in ext_counts.items():
+        if ext == '(no ext)':
+            continue
+        info = db_ext_map.get(ext.lower(), {})
+        p_app = info.get("primary_app", "General Viewer")
+        m_app = info.get("mac_app")
+        desc = info.get("description", ext)
+        clean_desc = (desc.replace(" (Discontinued format)", "")
+                          .replace("(Discontinued format)", "")
+                          .replace("Microsoft Money", "MS Money")
+                          .replace("Account Database", "DB")
+                          .replace("Transaction Data", "Data")
+                          .strip())
+
+        mac_note = None
+        if m_app and ("unusable" in m_app.lower() or "archival" in m_app.lower()):
+            mac_note = m_app
+            p_app_display = p_app
+        elif m_app and m_app.strip().lower() != p_app.strip().lower():
+            p_app_display = f"{p_app} (Mac: {m_app})"
+        else:
+            p_app_display = p_app
+
+        grouped_map[p_app_display]["count"] += cnt
+        grouped_map[p_app_display]["app_name"] = p_app_display
+        if mac_note:
+            grouped_map[p_app_display]["mac_note"] = mac_note
+        grouped_map[p_app_display]["ext_items"].append({"ext": ext, "cnt": cnt, "label": f"{cnt} {ext} ({clean_desc})"})
+
+    app_groups = []
+    for app_name, g_data in sorted(grouped_map.items(), key=lambda x: x[1]["count"], reverse=True):
+        sorted_exts = sorted(g_data["ext_items"], key=lambda x: x["cnt"], reverse=True)
+        app_groups.append({
+            "name": app_name,
+            "count": g_data["count"],
+            "mac_note": g_data["mac_note"],
+            "exts": [e["label"] for e in sorted_exts]
+        })
 
     top_cat = "Other"
     top_pct = 0.0
@@ -3139,7 +3205,8 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
         "category_match_msg": match_msg,
         "suggested_move_tier": suggested_move,
         "has_unusable_app": has_unusable_app,
-        "unusable_file_count": unusable_file_count
+        "unusable_file_count": unusable_file_count,
+        "app_groups": app_groups
     }
 
 def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name: str, stats: dict, ft_info: dict | None = None) -> str:
@@ -3639,10 +3706,39 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 print(f"  • Status:         {verified_badge}")
                 print(f"  • Storage:        {size_str} across {files_count:,} files ({stats['subfolder_count']} subfolders)")
                 print(f"  • Date Range:     {date_range}")
-                print(f"  • File Types:     {top_exts}")
-                if mystery_summary:
-                    print(f"  • Mystery Files:  🔍 {mystery_summary}")
-                print(f"  • App Needed:     {detected_app}")
+
+                # Format structured files and applications tree
+                app_groups = ft_info.get("app_groups", [])
+                no_ext_count = stats["ext_counts"].get('(no ext)', 0)
+                total_groups = len(app_groups) + (1 if no_ext_count > 0 else 0)
+
+                if total_groups > 0:
+                    print(f"  • Discovered Files & Associated Apps:")
+                    curr_item = 0
+                    for grp in app_groups:
+                        curr_item += 1
+                        is_last = (curr_item == total_groups)
+                        b_sym = "└──" if is_last else "├──"
+                        pipe_sym = "   " if is_last else "│  "
+                        print(f"    {b_sym} [{grp['count']:,} files] {grp['name']}:")
+                        if grp["exts"]:
+                            ext_line = "  •  ".join(grp["exts"][:4])
+                            if len(grp["exts"]) > 4:
+                                ext_line += f"  •  (+{len(grp['exts']) - 4} more)"
+                            print(f"    {pipe_sym}  • {ext_line}")
+                        if grp.get("mac_note"):
+                            print(f"    {pipe_sym}  ↳ Status: {grp['mac_note']}")
+
+                    if no_ext_count > 0:
+                        curr_item += 1
+                        print(f"    └── [{no_ext_count:,} files] Extensionless / Mystery Files:")
+                        if mystery_summary:
+                            print(f"         ↳ 🔍 {mystery_summary}")
+                        else:
+                            print(f"         ↳ 🔍 {no_ext_count} files with no extension")
+                else:
+                    print(f"  • Files & Apps:   ⚪ Empty folder (0 files)")
+
                 print(f"  • Category Check: {ft_info['category_match_msg']}")
                 print(f"  • Sample Files:   {samples}")
                 print(f"\n  💡 Suggested Description:")
