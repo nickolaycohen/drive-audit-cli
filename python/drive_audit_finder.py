@@ -2080,6 +2080,17 @@ def generate_curation_verification_report(db_path: str):
                                         print(f"    ⏳ {disp_pname:<24} {ps_f:,} files ({format_size(ps_b)}) 📍 {ps_path}")
 
                             print("#" * 90)
+                            drill_act = input("\n[e] Edit folder description or attached app, or press Enter to return: ").strip().lower()
+                            if drill_act == 'e':
+                                print(f"\nCurrent description: \"{ddesc or '(none)'}\"")
+                                new_desc = input("Enter new description (or Enter to keep): ").strip()
+                                print(f"Current attached app: \"{dapp or '(none)'}\"")
+                                new_app = input("Enter new attached app (or Enter to keep): ").strip()
+                                final_desc = new_desc if new_desc else ddesc
+                                final_app = new_app if new_app else dapp
+                                _set_directory_description_in_db(Path(dpath), final_desc, db_path, is_verified=True, app_needed=final_app)
+                                print(f"\n[Success] ✓ Updated description & app for '{dname}' in SQLite!")
+                                break
                         else:
                             print(f"[Error] Invalid selection. Choose 1-{len(v_rows)}.")
                     else:
