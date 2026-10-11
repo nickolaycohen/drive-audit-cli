@@ -3572,6 +3572,215 @@ def reset_subfolder_tags_and_verification(db_path: str, storage_root: Path | Non
         print(f"  • Removed {total_deleted_dt:,} directory tags and {total_deleted_ft:,} file tags from SQLite")
         print(f"  • Reset {total_reset_dirs:,} subfolders to Unverified (ready for Curation Wizard)")
 
+def _handle_custom_relocation_target(
+    raw_path_input: str | None,
+    sub_dir: Path,
+    active_locs: list[dict],
+    db_path: str,
+    suggested_desc: str,
+    detected_app: str | None
+) -> bool:
+    """
+    Handles custom target relocation path input:
+    - Prompts for path if not already provided.
+    - Strips quotes and expands ~ / paths.
+    - Determines if target is container or rename target.
+    - Dynamically detects and creates all intermediate destination folders (mkdir parents=True).
+    - Sets Finder tags and registers newly created directories in SQLite.
+    - Relocates folder via shutil.move, updates SQLite directories records, and tags destination.
+    Returns True if successfully relocated, False if cancelled or failed.
+    """
+    if not raw_path_input or raw_path_input.lower() == 'p':
+        raw_path_input = input(f"\nEnter custom target folder path for '{sub_dir.name}': ").strip()
+
+    if not raw_path_input:
+        print("Move cancelled.")
+        return False
+
+    clean_str = raw_path_input.strip().strip("'\"")
+    if clean_str.lower() == 'c':
+        print("Move cancelled.")
+        return False
+
+    is_explicit_container = clean_str.endswith('/') or clean_str.endswith('\\')
+    entered_path = Path(clean_str).expanduser()
+
+    if entered_path.exists() and entered_path.resolve() == sub_dir.resolve():
+        print(f"\n[Error] Destination cannot be the same as the source directory '{sub_dir}'.")
+        return False
+
+    # Determine resolved destination path and parent to ensure
+    if entered_path.exists():
+        if entered_path.is_dir():
+            target_dest_path = entered_path / sub_dir.name
+            parent_to_ensure = entered_path
+        else:
+            print(f"\n[Error] Destination '{entered_path}' exists and is a regular file, not a directory.")
+            return False
+    else:
+        if is_explicit_container:
+            target_dest_path = entered_path / sub_dir.name
+            parent_to_ensure = entered_path
+        elif entered_path.name == sub_dir.name:
+            target_dest_path = entered_path
+            parent_to_ensure = entered_path.parent
+        else:
+            print(f"\nDestination folder does not currently exist on disk:")
+            print(f"  • Specified path: {entered_path}")
+            print(f"\nHow should '{sub_dir.name}' be relocated?")
+            print(f"  [1] Relocate and rename to '{entered_path.name}' (Recommended)")
+            print(f"      → {entered_path}")
+            print(f"  [2] Create directory and relocate inside as '{sub_dir.name}'")
+            print(f"      → {entered_path / sub_dir.name}")
+            print(f"  [c] Cancel move")
+            c_sel = input("\nSelect placement [1/2/c] (Default: 1): ").strip().lower()
+            if not c_sel:
+                c_sel = "1"
+            if c_sel == 'c':
+                print("Move cancelled.")
+                return False
+            elif c_sel == '2':
+                target_dest_path = entered_path / sub_dir.name
+                parent_to_ensure = entered_path
+            else:
+                target_dest_path = entered_path
+                parent_to_ensure = entered_path.parent
+
+    if target_dest_path.exists():
+        print(f"\n[Error] Destination '{target_dest_path}' already exists!")
+        return False
+
+    # Discover any non-existent directories in parent_to_ensure hierarchy
+    dirs_to_create = []
+    curr = parent_to_ensure
+    while curr and not curr.exists() and curr != curr.parent:
+        dirs_to_create.append(curr)
+        curr = curr.parent
+    dirs_to_create.reverse()
+
+    # Match target Priority Location
+    target_loc = None
+    for al in active_locs:
+        try:
+            al_res = al["path"].resolve()
+            if al_res in target_dest_path.parents or al_res == target_dest_path.parent:
+                target_loc = al
+                break
+        except Exception:
+            if str(target_dest_path).startswith(al["path_str"]):
+                target_loc = al
+                break
+
+    if not target_loc:
+        t_lower = str(target_dest_path).lower()
+        for p_tier in ["priority 1", "priority 2", "priority 3", "priority 4"]:
+            if p_tier in t_lower:
+                target_loc = next((al for al in active_locs if al["priority_tier"].lower() == p_tier), None)
+                if not target_loc:
+                    target_loc = {
+                        "priority_tier": p_tier,
+                        "label": f"{p_tier.title()} Storage",
+                        "path": parent_to_ensure,
+                        "path_str": str(parent_to_ensure),
+                    }
+                break
+
+    if not target_loc:
+        target_loc = next((al for al in active_locs if al["priority_tier"].lower() == "priority 2"), None)
+        if not target_loc:
+            target_loc = {
+                "priority_tier": "priority 2",
+                "label": "Custom Storage Target",
+                "path": parent_to_ensure,
+                "path_str": str(parent_to_ensure),
+            }
+
+    p_tier_name = target_loc["priority_tier"].lower()
+    p_info = PRIORITY_TIER_CONFIG.get(p_tier_name, {"tag": "Priority 2", "color": 4})
+    p_em = FINDER_COLOR_EMOJI.get(p_info.get("color", 4), "⚪")
+
+    try:
+        rel_parts = list(target_dest_path.relative_to(target_loc["path"]).parts[:-1])
+    except Exception:
+        rel_parts = list(target_dest_path.parent.parts[-2:])
+
+    target_cat_name = " ▸ ".join(rel_parts) if rel_parts else target_dest_path.parent.name
+
+    print("\n" + "=" * 80)
+    print("  CUSTOM RELOCATION PLAN")
+    print("=" * 80)
+    print(f"  • Source Folder:    {sub_dir}")
+    print(f"  • Destination Path: {target_dest_path}")
+    print(f"  • Priority Tier:    {p_em} {target_loc['priority_tier'].title()} ({target_loc['label']})")
+    print(f"  • Category Branch:  {target_cat_name}")
+    if dirs_to_create:
+        print(f"  • Destination Directories to Create ({len(dirs_to_create)}):")
+        for d in dirs_to_create:
+            print(f"    + {d}")
+    else:
+        print("  • Destination parent directory already exists on disk.")
+    print("=" * 80)
+
+    confirm = input(f"Confirm creating destination hierarchy and moving '{sub_dir.name}'? [Y/n]: ").strip().lower()
+    if confirm not in ('', 'y', 'yes'):
+        print("Move cancelled.")
+        return False
+
+    try:
+        # Create non-existent directory hierarchy
+        for d in dirs_to_create:
+            d.mkdir(parents=True, exist_ok=True)
+            print(f"  ✓ Created destination directory: {d}")
+            d_tags = [(p_info["tag"], p_info["color"]), (d.name, 0)]
+            set_finder_tags(d, d_tags)
+            _sync_directory_tags_to_db(d, d_tags, db_path)
+            d_desc = f"Archived {d.name} assets and legacy data" if any(w in str(d).lower() for w in ["legacy", "archive", "windows"]) else f"{d.name} category container"
+            _set_directory_description_in_db(d, d_desc, db_path, is_verified=True, app_needed=detected_app)
+
+        # Ensure parent exists
+        parent_to_ensure.mkdir(parents=True, exist_ok=True)
+
+        # Move folder
+        shutil.move(str(sub_dir), str(target_dest_path))
+
+        # Update SQLite directories table
+        if os.path.exists(db_path):
+            c_conn = get_db_connection(db_path)
+            c_cur = c_conn.cursor()
+            old_p = str(sub_dir.resolve())
+            new_p = str(target_dest_path.resolve())
+            c_cur.execute("""
+                UPDATE directories
+                SET path = ? || SUBSTR(path, LENGTH(?) + 1)
+                WHERE path = ? OR path LIKE ? || '/%'
+            """, (new_p, old_p, old_p, old_p))
+            c_cur.execute("UPDATE directories SET name = ? WHERE path = ?", (target_dest_path.name, new_p))
+            c_conn.commit()
+            c_conn.close()
+
+        # Tag destination folder and mark verified
+        dest_tags = [(p_info["tag"], p_info["color"])]
+        for part in rel_parts:
+            dest_tags.append((part, 0))
+        dest_tags.append((target_dest_path.name, 0))
+
+        seen_tags = set()
+        unique_tags = []
+        for t_name, t_col in dest_tags:
+            if t_name not in seen_tags:
+                seen_tags.add(t_name)
+                unique_tags.append((t_name, t_col))
+
+        set_finder_tags(target_dest_path, unique_tags)
+        _sync_directory_tags_to_db(target_dest_path, unique_tags, db_path)
+        _set_directory_description_in_db(target_dest_path, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
+
+        print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' → '{target_dest_path}' under {target_loc['label']} / {target_cat_name}.")
+        return True
+    except Exception as e:
+        print(f"\n[Error] Relocation failed: {e}")
+        return False
+
 def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, target_l1_dir: Path | None = None):
     """
     Sequential Curation Wizard:
@@ -3851,12 +4060,13 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         print("=" * 80)
                         print("  [1] Move to 'Priority 2 ▸ Data' on LaCie (Recommended)")
                         print("  [2] Move to 'Priority 2 ▸ Legacy / Windows Data' on LaCie (Recommended Archival)")
-                        print("  [3] Choose another custom destination location & category")
+                        print("  [3] Choose standard destination location & category")
+                        print("  [p] Enter custom target path directly (creates destination folders if needed)")
                         print("  [c] Cancel move")
-                        m_rec_choice = input("\nSelect relocation target [1/2/3/c] (Default: 1): ").strip().lower()
+                        m_rec_choice = input("\nSelect relocation target [1/2/3/p/c] or paste full path (Default: 1): ").strip()
                         if not m_rec_choice:
                             m_rec_choice = "1"
-                        if m_rec_choice == 'c':
+                        if m_rec_choice.lower() == 'c':
                             print("Move cancelled.")
                             continue
                         elif m_rec_choice == '1' and p2_loc:
@@ -3875,16 +4085,36 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                             if not target_l1_dest.exists():
                                 target_l1_dest.mkdir(parents=True, exist_ok=True)
                                 newly_created_l1 = True
+                        elif m_rec_choice.lower() == 'p' or '/' in m_rec_choice or m_rec_choice.startswith('~'):
+                            path_arg = None if m_rec_choice.lower() == 'p' else m_rec_choice
+                            ok = _handle_custom_relocation_target(path_arg, sub_dir, active_locs, db_path, suggested_desc, detected_app)
+                            if ok:
+                                total_curated += 1
+                                break
+                            else:
+                                continue
 
-                    # Otherwise, or if user chose [3] Custom:
+                    # Otherwise, or if user chose [3] Standard / Custom:
                     if not target_loc or not target_l1_dest:
                         print("\nSelect Target Location for move:")
                         for l_idx, al in enumerate(active_locs, 1):
                             p_info = PRIORITY_TIER_CONFIG.get(al["priority_tier"].lower(), {"color": 0})
                             p_em = FINDER_COLOR_EMOJI.get(p_info["color"], "⚪")
                             print(f"  {l_idx}: {p_em} {al['priority_tier'].title()} - {al['label']} ({al['path_str']})")
-                        l_sel = input(f"Select location (1-{len(active_locs)}) or 'c' to cancel: ").strip()
-                        if not l_sel.isdigit() or int(l_sel) < 1 or int(l_sel) > len(active_locs):
+                        print("  p: 📁 Enter custom target folder path directly (creates destination hierarchy)")
+                        l_sel = input(f"Select location (1-{len(active_locs)}), 'p' for custom path, or 'c' to cancel: ").strip()
+                        if l_sel.lower() == 'c':
+                            print("Move cancelled.")
+                            continue
+                        elif l_sel.lower() == 'p' or '/' in l_sel or l_sel.startswith('~'):
+                            path_arg = None if l_sel.lower() == 'p' else l_sel
+                            ok = _handle_custom_relocation_target(path_arg, sub_dir, active_locs, db_path, suggested_desc, detected_app)
+                            if ok:
+                                total_curated += 1
+                                break
+                            else:
+                                continue
+                        elif not l_sel.isdigit() or int(l_sel) < 1 or int(l_sel) > len(active_locs):
                             print("Move cancelled.")
                             continue
                         
@@ -3933,6 +4163,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                                 SET path = ? || SUBSTR(path, LENGTH(?) + 1)
                                 WHERE path = ? OR path LIKE ? || '/%'
                             """, (new_p, old_p, old_p, old_p))
+                            c_cur.execute("UPDATE directories SET name = ? WHERE path = ?", (target_dest_path.name, new_p))
                             c_conn.commit()
                             c_conn.close()
 

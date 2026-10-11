@@ -240,6 +240,10 @@ Prompts:
       ↳ Provides interactive hex dump viewing ([v]) and safe extension restore ([r])
   [m] Move / Reassign Tier
       ↳ Relocate folder to another Priority tier, mapped location, or parent category
+      ↳ Enter custom destination path directly (paste full path or select '[p]')
+      ↳ Automatically creates missing destination directory hierarchy (e.g. Data/Legacy/Windows/MS-Money)
+      ↳ Smart placement prompt: relocate & rename vs. relocate inside container
+      ↳ Auto-detects Priority Tier from path, sets macOS Finder color tags & syncs SQLite records
   [s] Skip Folder
       ↳ Leaves folder unverified and untagged for later triage
   [q] Quit Wizard
