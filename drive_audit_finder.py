@@ -1248,6 +1248,299 @@ def generate_largest_files_report(db_path: str):
             print(f"[Error] Failed to export Markdown: {e}")
 
 
+def generate_curation_verification_report(db_path: str):
+    """
+    Generates a comprehensive verification status report separating Approved/Verified
+    folders and files from Unapproved/Pending folders and files across storage locations.
+    """
+    if not os.path.exists(db_path):
+        print("\n[Notice] No database found. Run a scan first.")
+        return
+
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+
+    while True:
+        # 1. Fetch Global Summary
+        cursor.execute("""
+            SELECT 
+                d.is_verified,
+                COUNT(DISTINCT d.id) as folder_count,
+                COUNT(f.id) as file_count,
+                COALESCE(SUM(f.size_bytes), 0) as total_bytes
+            FROM directories d
+            LEFT JOIN files f ON f.directory_id = d.id
+            GROUP BY d.is_verified
+        """)
+        global_rows = cursor.fetchall()
+        
+        verified_folders = 0
+        verified_files = 0
+        verified_bytes = 0
+        unverified_folders = 0
+        unverified_files = 0
+        unverified_bytes = 0
+
+        for is_ver, f_cnt, files_cnt, b_cnt in global_rows:
+            if is_ver == 1:
+                verified_folders = f_cnt
+                verified_files = files_cnt
+                verified_bytes = b_cnt
+            else:
+                unverified_folders = f_cnt
+                unverified_files = files_cnt
+                unverified_bytes = b_cnt
+
+        total_folders = verified_folders + unverified_folders
+        total_files = verified_files + unverified_files
+        total_bytes = verified_bytes + unverified_bytes
+
+        pct_folders = (verified_folders / total_folders * 100) if total_folders > 0 else 0
+        pct_files = (verified_files / total_files * 100) if total_files > 0 else 0
+        pct_bytes = (verified_bytes / total_bytes * 100) if total_bytes > 0 else 0
+
+        bar_len = 30
+        filled_len = int(round(bar_len * pct_folders / 100))
+        prog_bar = "█" * filled_len + "░" * (bar_len - filled_len)
+
+        # 2. Fetch Priority Locations Breakdown
+        cursor.execute("""
+            SELECT 
+                pl.id,
+                pl.priority_tier,
+                pl.label,
+                pl.path,
+                d.is_verified,
+                COUNT(DISTINCT d.id) as f_cnt,
+                COUNT(f.id) as files_cnt,
+                COALESCE(SUM(f.size_bytes), 0) as b_cnt
+            FROM priority_locations pl
+            JOIN directories d ON (d.path = pl.path OR d.path LIKE pl.path || '/%')
+            LEFT JOIN files f ON f.directory_id = d.id
+            WHERE pl.is_active = 1
+            GROUP BY pl.id, d.is_verified
+            ORDER BY pl.priority_tier, pl.id, d.is_verified
+        """)
+        loc_rows = cursor.fetchall()
+
+        loc_stats = {}
+        for pl_id, p_tier, p_lbl, p_path, is_ver, f_cnt, files_cnt, b_cnt in loc_rows:
+            key = (pl_id, p_tier, p_lbl, p_path)
+            if key not in loc_stats:
+                loc_stats[key] = {"v_folders": 0, "v_files": 0, "v_bytes": 0, "u_folders": 0, "u_files": 0, "u_bytes": 0}
+            if is_ver == 1:
+                loc_stats[key]["v_folders"] += f_cnt
+                loc_stats[key]["v_files"] += files_cnt
+                loc_stats[key]["v_bytes"] += b_cnt
+            else:
+                loc_stats[key]["u_folders"] += f_cnt
+                loc_stats[key]["u_files"] += files_cnt
+                loc_stats[key]["u_bytes"] += b_cnt
+
+        print("\n" + "=" * 92)
+        print("           STORAGE CURATION & VERIFICATION STATUS REPORT           ")
+        print("             (Separated Approved vs. Unapproved Inventory)         ")
+        print("=" * 92)
+        print(f"  Overall Progress : [{prog_bar}] {pct_folders:.1f}% Folders Approved")
+        print(f"  • Approved       : {verified_folders:,} Folders | {verified_files:,} Files | {format_size(verified_bytes)}")
+        print(f"  • Unapproved     : {unverified_folders:,} Folders | {unverified_files:,} Files | {format_size(unverified_bytes)}")
+        print(f"  • Total Database : {total_folders:,} Folders | {total_files:,} Files | {format_size(total_bytes)}")
+        print("-" * 92)
+        print(f"{'Priority Tier / Location':<36} | {'Approved Folders':<18} | {'Approved Size':<15} | {'Pending Unapproved'}")
+        print("-" * 92)
+
+        for (pl_id, p_tier, p_lbl, p_path), s in loc_stats.items():
+            tot_f = s["v_folders"] + s["u_folders"]
+            tot_b = s["v_bytes"] + s["u_bytes"]
+            loc_pct = (s["v_folders"] / tot_f * 100) if tot_f > 0 else 0
+            tier_badge = f"{p_tier.title()} ({p_lbl})"
+            app_str = f"{s['v_folders']:,} / {tot_f:,} ({loc_pct:.1f}%)"
+            app_sz = format_size(s["v_bytes"])
+            unapp_str = f"{s['u_folders']:,} folders ({format_size(s['u_bytes'])})"
+            print(f"{tier_badge:<36} | {app_str:<18} | {app_sz:<15} | {unapp_str}")
+
+        print("=" * 92)
+        print("\nOptions:")
+        print("  1. List all Approved / Verified Folders (is_verified = 1)")
+        print("  2. List Unapproved Level-1 / Level-2 Folders Pending Curation (is_verified = 0)")
+        print("  3. Filter Approved / Unapproved by Priority Tier (P1, P2, P3, P4)")
+        print("  4. Export Full Report (Markdown / CSV)")
+        print("  5. Return to previous menu")
+
+        rep_choice = input("\nSelect report option (1-5): ").strip()
+
+        if rep_choice == "5":
+            break
+
+        elif rep_choice == "1":
+            # List Approved Folders
+            cursor.execute("""
+                SELECT 
+                    d.id,
+                    d.name,
+                    d.path,
+                    d.verified_at,
+                    d.description,
+                    COUNT(f.id) as file_count,
+                    COALESCE(SUM(f.size_bytes), 0) as total_bytes,
+                    COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') as tags
+                FROM directories d
+                LEFT JOIN directory_tags dt ON d.id = dt.directory_id
+                LEFT JOIN files f ON f.directory_id = d.id
+                WHERE d.is_verified = 1
+                GROUP BY d.id
+                ORDER BY d.path
+            """)
+            v_rows = cursor.fetchall()
+            print("\n" + "=" * 96)
+            print(f"APPROVED / VERIFIED FOLDERS ({len(v_rows)} folders)")
+            print("=" * 96)
+            print(f"{'#':<4} {'Folder Name':<28} {'Files / Size':<20} {'Verified Date':<20} {'Tags'}")
+            print("-" * 96)
+            for idx, (did, dname, dpath, v_at, ddesc, f_cnt, b_cnt, dtags) in enumerate(v_rows, 1):
+                v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
+                stat_str = f"{f_cnt:,} files ({format_size(b_cnt)})"
+                print(f"{idx:<4} {dname:<28} {stat_str:<20} {v_date_str:<20} {dtags}")
+                print(f"     📍 Path: {dpath}")
+                if ddesc:
+                    print(f"     ↳ 📝 \"{ddesc}\"")
+            print("=" * 96)
+            input("\nPress Enter to continue...")
+
+        elif rep_choice == "2":
+            # List Unapproved Level-1 / Level-2 Folders Pending Curation
+            cursor.execute("""
+                SELECT 
+                    pl.priority_tier,
+                    pl.label,
+                    d.id,
+                    d.name,
+                    d.path,
+                    COUNT(f.id) as file_count,
+                    COALESCE(SUM(f.size_bytes), 0) as total_bytes,
+                    COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') as tags
+                FROM priority_locations pl
+                JOIN directories d ON (d.path LIKE pl.path || '/%' AND d.path NOT LIKE pl.path || '/%/%/%')
+                LEFT JOIN directory_tags dt ON d.id = dt.directory_id
+                LEFT JOIN files f ON f.directory_id = d.id
+                WHERE pl.is_active = 1 AND d.is_verified = 0
+                GROUP BY d.id
+                ORDER BY pl.priority_tier, d.path
+            """)
+            u_rows = cursor.fetchall()
+            print("\n" + "=" * 96)
+            print(f"PENDING / UNAPPROVED CATEGORY FOLDERS ({len(u_rows)} Level-1/2 folders)")
+            print("=" * 96)
+            print(f"{'#':<4} {'Tier':<14} {'Folder Name':<28} {'Files / Size':<22} {'Tags'}")
+            print("-" * 96)
+            for idx, (ptier, plbl, did, dname, dpath, f_cnt, b_cnt, dtags) in enumerate(u_rows, 1):
+                stat_str = f"{f_cnt:,} files ({format_size(b_cnt)})"
+                print(f"{idx:<4} {ptier.title():<14} {dname:<28} {stat_str:<22} {dtags}")
+                print(f"     📍 Path: {dpath}")
+            print("=" * 96)
+            input("\nPress Enter to continue...")
+
+        elif rep_choice == "3":
+            tier_in = input("\nEnter Priority Tier to filter (1, 2, 3, or 4): ").strip()
+            if tier_in in ["1", "2", "3", "4"]:
+                t_filter = f"priority {tier_in}"
+                cursor.execute("""
+                    SELECT 
+                        d.is_verified,
+                        d.name,
+                        d.path,
+                        d.verified_at,
+                        d.description,
+                        COUNT(f.id) as file_count,
+                        COALESCE(SUM(f.size_bytes), 0) as total_bytes
+                    FROM priority_locations pl
+                    JOIN directories d ON (d.path = pl.path OR d.path LIKE pl.path || '/%')
+                    LEFT JOIN files f ON f.directory_id = d.id
+                    WHERE pl.priority_tier = ? AND pl.is_active = 1
+                    GROUP BY d.id
+                    ORDER BY d.is_verified DESC, d.path
+                """, (t_filter,))
+                tier_rows = cursor.fetchall()
+                t_ver = [r for r in tier_rows if r[0] == 1]
+                t_unver = [r for r in tier_rows if r[0] == 0]
+                print("\n" + "=" * 90)
+                print(f"PRIORITY {tier_in} STATUS: {len(t_ver):,} Approved | {len(t_unver):,} Pending Unapproved")
+                print("=" * 90)
+                print(f"\n--- APPROVED FOLDERS ({len(t_ver)}) ---")
+                for idx, (_, dname, dpath, v_at, ddesc, f_cnt, b_cnt) in enumerate(t_ver, 1):
+                    v_date = v_at.replace("T", " ")[:19] if v_at else ""
+                    print(f"  [{idx}] {dname} ({f_cnt:,} files, {format_size(b_cnt)}) - {v_date}")
+                    if ddesc:
+                        print(f"      ↳ 📝 \"{ddesc}\"")
+                print(f"\n--- PENDING UNAPPROVED FOLDERS ({min(len(t_unver), 30)} of {len(t_unver):,}) ---")
+                for idx, (_, dname, dpath, _, _, f_cnt, b_cnt) in enumerate(t_unver[:30], 1):
+                    print(f"  [{idx}] {dname} ({f_cnt:,} files, {format_size(b_cnt)}) 📍 {dpath}")
+                if len(t_unver) > 30:
+                    print(f"  ... and {len(t_unver) - 30:,} more subfolders pending curation.")
+                print("=" * 90)
+                input("\nPress Enter to continue...")
+
+        elif rep_choice == "4":
+            exp_fmt = input("\nExport format [m = Markdown, c = CSV, or enter to cancel]: ").strip().lower()
+            if exp_fmt == "m":
+                fname = "curation_status_report.md"
+                cursor.execute("""
+                    SELECT d.id, d.name, d.path, d.is_verified, d.verified_at, d.description,
+                           COUNT(f.id) as file_count, COALESCE(SUM(f.size_bytes), 0) as total_bytes
+                    FROM directories d
+                    LEFT JOIN files f ON f.directory_id = d.id
+                    GROUP BY d.id
+                    ORDER BY d.is_verified DESC, d.path
+                """)
+                all_d = cursor.fetchall()
+                ver_list = [r for r in all_d if r[3] == 1]
+                unver_list = [r for r in all_d if r[3] == 0]
+                with open(fname, "w", encoding="utf-8") as f:
+                    f.write("# Storage Curation & Verification Status Report\n\n")
+                    f.write(f"**Generated**: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n")
+                    f.write(f"**Overall Progress**: {pct_folders:.1f}% Approved ({verified_folders:,} / {total_folders:,} folders)\n\n")
+                    f.write(f"- **Approved Storage**: {format_size(verified_bytes)} across {verified_files:,} files\n")
+                    f.write(f"- **Pending Storage**: {format_size(unverified_bytes)} across {unverified_files:,} files\n\n")
+                    f.write("## 1. Approved / Verified Folders (`is_verified = 1`)\n\n")
+                    f.write("| # | Folder Name | Files | Size | Verified Date | Description | Path |\n")
+                    f.write("|---|---|---|---|---|---|---|\n")
+                    for i, (_, dn, dp, _, va, dd, fc, bc) in enumerate(ver_list, 1):
+                        v_str = va.replace("T", " ")[:19] if va else "N/A"
+                        desc_str = dd.replace("|", "/") if dd else "-"
+                        f.write(f"| {i} | `{dn}` | {fc:,} | {format_size(bc)} | {v_str} | {desc_str} | `{dp}` |\n")
+                    f.write("\n## 2. Unapproved / Pending Folders (`is_verified = 0`)\n\n")
+                    f.write(f"Total unapproved subfolders: **{len(unver_list):,}**\n\n")
+                    f.write("| # | Folder Name | Files | Size | Path |\n")
+                    f.write("|---|---|---|---|---|\n")
+                    for i, (_, dn, dp, _, _, _, fc, bc) in enumerate(unver_list[:200], 1):
+                        f.write(f"| {i} | `{dn}` | {fc:,} | {format_size(bc)} | `{dp}` |\n")
+                    if len(unver_list) > 200:
+                        f.write(f"\n*(Showing top 200 of {len(unver_list):,} unapproved folders in Markdown summary)*\n")
+                print(f"\n[Success] Full Markdown report exported to: {os.path.abspath(fname)}")
+                input("\nPress Enter to continue...")
+            elif exp_fmt == "c":
+                fname = "curation_status_report.csv"
+                cursor.execute("""
+                    SELECT d.id, d.name, d.path, d.is_verified, d.verified_at, d.description,
+                           COUNT(f.id) as file_count, COALESCE(SUM(f.size_bytes), 0) as total_bytes
+                    FROM directories d
+                    LEFT JOIN files f ON f.directory_id = d.id
+                    GROUP BY d.id
+                    ORDER BY d.is_verified DESC, d.path
+                """)
+                all_d = cursor.fetchall()
+                with open(fname, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["ID", "Status", "Folder Name", "Path", "Files Count", "Size Bytes", "Size Formatted", "Verified At", "Description"])
+                    for did, dname, dpath, is_v, vat, ddesc, fc, bc in all_d:
+                        status_str = "Approved" if is_v == 1 else "Unapproved"
+                        writer.writerow([did, status_str, dname, dpath, fc, bc, format_size(bc), vat or "", ddesc or ""])
+                print(f"\n[Success] Full CSV report exported to: {os.path.abspath(fname)}")
+                input("\nPress Enter to continue...")
+
+    conn.close()
+
+
 def auto_tag_priority_tree_interactive(db_path: str):
     """Recursively derives and applies Priority Tier (with colors) and Category tags across a folder tree."""
     print("\n--- AUTO-TAG STORAGE TREE (PRIORITY & CATEGORY) ---")
@@ -2948,6 +3241,7 @@ def tag_review_priority_folders_interactive(db_path: str):
         print(f"Total Folders: {len(level1_items)}")
         print("\nOptions:")
         print(f"  • Enter folder number (1-{len(level1_items)}) to inspect & edit tags / color / description / tier")
+        print("  • 'v' / 'status' - Curation & Verification Report (Separated Approved vs Unapproved folders)")
         print("  • 'loc' - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)")
         print("  • 'idrive' - Audit iDrive backup inclusion (Check Priority 1 & 2 folders in iDrive)")
         print("  • 'w' - Launch Sequential Curation Wizard (Triage subfolders across locations)")
@@ -2962,6 +3256,9 @@ def tag_review_priority_folders_interactive(db_path: str):
         if action_choice == 'b':
             break
         elif action_choice == 'r':
+            continue
+        elif action_choice in ['v', 'status']:
+            generate_curation_verification_report(db_path)
             continue
         elif action_choice == 'idrive':
             audit_idrive_backup_interactive(db_path, ["priority 1", "priority 2"])
@@ -3779,9 +4076,10 @@ def main():
         print("9. Search files by tag (Finder & Manual)")
         print("10. Segregate non-media files from folder (On-demand migration)")
         print("11. Detect & clean duplicate files (Interactive duplicate resolver)")
-        print("12. Exit")
+        print("12. View Curation & Verification Report (Approved vs Unapproved folders)")
+        print("13. Exit")
 
-        choice = input("\nSelect option (1-12): ").strip()
+        choice = input("\nSelect option (1-13): ").strip()
 
         if choice == "1":
             tag_review_priority_folders_interactive(db_file)
@@ -3806,6 +4104,8 @@ def main():
         elif choice == "11":
             detect_and_resolve_duplicates_interactive(db_file)
         elif choice == "12":
+            generate_curation_verification_report(db_file)
+        elif choice == "13":
             print("\nExiting Storage Orchestrator. Goodbye!")
             break
         else:

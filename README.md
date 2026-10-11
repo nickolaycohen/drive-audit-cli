@@ -186,6 +186,7 @@ The orchestrator operates as an interactive, human-in-the-loop governance consol
 ```text
 Options:
   • 1-N        - Select folder number to inspect & edit tags / color / description / tier
+  • 'v' / 'status' - Curation & Verification Report (Separated Approved vs Unapproved folders)
   • 'loc'      - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)
   • 'idrive'   - Audit iDrive backup inclusion (Check Priority 1 & 2 folders in iDrive)
   • 'w'        - Launch Sequential Curation Wizard (Triage subfolders across locations)
@@ -416,6 +417,16 @@ Scans indexed files across all folders to find exact duplicates (`name` and byte
 - **Physical Disk Safety Verification**: Double-checks disk existence and exact byte sizes of the keeper file before unlinking any duplicate.
 - **Interactive Review Modes**: Choose between *Batch Review* (preview table + one-click confirmation) or *Step-by-Step* (inspect and confirm group by group).
 - **Automated Database Sync**: Instantly removes deleted file IDs from SQLite and offers to prune empty directories.
+
+### 12. View Curation & Verification Report (Approved vs Unapproved Folders)
+Provides an executive audit report separating approved/verified folders and files (`is_verified = 1`) from pending unapproved folders and files (`is_verified = 0`):
+- **Executive Progress Bar & Statistics**: Visual progress meter showing overall folder approval percentage, along with total files and cumulative storage sizes for both verified and unverified data.
+- **Priority Tier & Location Breakdown**: Shows approval ratios and storage consumption broken down by mapped location (`Priority 1` through `Priority 4`).
+- **Approved Folders Inventory**: Full listing of verified folders showing file counts, storage size, approval date (`verified_at`), and saved descriptions.
+- **Pending Curation Listing**: Curated listing of Level-1 and Level-2 unapproved category folders awaiting triage in the Curation Wizard (`w`).
+- **Granular Tier Filtering**: Filter approved vs unapproved inventories specifically for Priority 1, 2, 3, or 4.
+- **One-Click Export**: Export full audit reports to Markdown (`curation_status_report.md`) or CSV (`curation_status_report.csv`).
+- **Direct Access**: Also accessible anytime inside Option 1 by typing `'v'` or `'status'`.
 
 ---
 

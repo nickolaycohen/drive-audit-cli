@@ -22,3 +22,11 @@ env/
 
 # macOS metadata
 .DS_Store
+
+# Generated reports & exports
+*_report.csv
+*_report.md
+curation_status_report.*
+largest_files_report.*
+top_level_scans_report.*
+
