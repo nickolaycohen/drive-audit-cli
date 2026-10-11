@@ -279,7 +279,7 @@ sqlite3 drive_audit.db ".schema"
 sqlite3 drive_audit.db "PRAGMA journal_mode;"
 
 # Execute batch analytical queries
-sqlite3 -header -column drive_audit.db < queries.sql
+sqlite3 -header -column drive_audit.db < sql/queries.sql
 
 # Calculate global recoverable duplicate GB
 sqlite3 -header -column drive_audit.db "

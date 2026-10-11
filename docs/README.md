@@ -141,9 +141,9 @@ flowchart TD
 
 3. **Install dependencies**:
    ```bash
-   pip3 install -r requirements.txt
+   pip3 install -r python/requirements.txt
    # or
-   python3 -m pip install -r requirements.txt
+   python3 -m pip install -r python/requirements.txt
    ```
 
 ---
