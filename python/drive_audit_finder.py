@@ -3422,6 +3422,7 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
 
     is_match = True
     match_msg = f"✓ {top_pct:.0f}% {top_cat} (Consistent with {tier_name} / {l1_name})"
+    suggested_move = None
     # Check for unusable / discontinued applications
     has_unusable_app = False
     unusable_file_count = 0
