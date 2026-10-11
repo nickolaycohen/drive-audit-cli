@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import csv
 import time
@@ -3209,6 +3210,31 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
         "app_groups": app_groups
     }
 
+def suggest_clean_folder_name(folder_name: str, detected_app: str | None = None, ext_counts: dict | None = None) -> str:
+    """Suggests a modernized, clean folder name by stripping legacy numbered prefixes and standardizing app naming."""
+    lower_name = folder_name.lower()
+    app_lower = (detected_app or "").lower()
+    exts = ext_counts or {}
+
+    # Check for MS Money
+    if any(ext in exts for ext in [".mny", ".mbf", ".lrd"]) or "microsoft money" in app_lower or "ms money" in app_lower:
+        return "MS-Money"
+
+    # Check for Quicken
+    if any(ext in exts for ext in [".qdf", ".qel", ".qsd", ".qph"]) or "quicken" in app_lower:
+        return "Quicken"
+
+    # Check for TurboTax
+    if any(ext.startswith(".tax") for ext in exts) or "turbotax" in app_lower:
+        return "Tax-Returns"
+
+    # Remove leading numeric prefixes like "01-", "13.", "02_Data.", "13-Data."
+    cleaned = re.sub(r'^\d+[\s._-]+(?:(?:data|DATA)[\s._-]+)?', '', folder_name)
+    # Replace dots or underscores with dashes if appropriate
+    cleaned = re.sub(r'[._]+', '-', cleaned).strip('- ')
+
+    return cleaned if cleaned else folder_name
+
 def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name: str, stats: dict, ft_info: dict | None = None) -> str:
     """Intelligently suggests a concise human-readable description for a folder based on its name, contents, and detected applications."""
     name_lower = folder_name.lower()
@@ -3612,14 +3638,32 @@ def _handle_custom_relocation_target(
     # Determine resolved destination path and parent to ensure
     if entered_path.exists():
         if entered_path.is_dir():
-            target_dest_path = entered_path / sub_dir.name
+            clean_sug = suggest_clean_folder_name(sub_dir.name, detected_app)
+            if clean_sug != sub_dir.name:
+                print(f"\nDestination folder name:")
+                print(f"  • Current name:     '{sub_dir.name}'")
+                print(f"  • Suggested clean:  '{clean_sug}' (Default)")
+                c_name = input(f"Enter folder name in destination [Press Enter for '{clean_sug}', '1' for '{sub_dir.name}', or type new name]: ").strip()
+                dest_fn = clean_sug if not c_name else (sub_dir.name if c_name == '1' else c_name)
+            else:
+                dest_fn = sub_dir.name
+            target_dest_path = entered_path / dest_fn
             parent_to_ensure = entered_path
         else:
             print(f"\n[Error] Destination '{entered_path}' exists and is a regular file, not a directory.")
             return False
     else:
         if is_explicit_container:
-            target_dest_path = entered_path / sub_dir.name
+            clean_sug = suggest_clean_folder_name(sub_dir.name, detected_app)
+            if clean_sug != sub_dir.name:
+                print(f"\nDestination folder name:")
+                print(f"  • Current name:     '{sub_dir.name}'")
+                print(f"  • Suggested clean:  '{clean_sug}' (Default)")
+                c_name = input(f"Enter folder name in destination [Press Enter for '{clean_sug}', '1' for '{sub_dir.name}', or type new name]: ").strip()
+                dest_fn = clean_sug if not c_name else (sub_dir.name if c_name == '1' else c_name)
+            else:
+                dest_fn = sub_dir.name
+            target_dest_path = entered_path / dest_fn
             parent_to_ensure = entered_path
         elif entered_path.name == sub_dir.name:
             target_dest_path = entered_path
@@ -4145,13 +4189,39 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
 
                     if not target_cat_name:
                         target_cat_name = target_l1_dest.name
-                    target_dest_path = target_l1_dest / sub_dir.name
+
+                    clean_suggested = suggest_clean_folder_name(sub_dir.name, detected_app, stats.get("ext_counts", {}))
+                    if clean_suggested != sub_dir.name:
+                        print(f"\nDestination folder name:")
+                        print(f"  • Current name:     '{sub_dir.name}'")
+                        print(f"  • Suggested clean:  '{clean_suggested}' (Default)")
+                        name_input = input(f"Enter folder name in destination [Press Enter for '{clean_suggested}', '1' for '{sub_dir.name}', or type new name]: ").strip()
+                        if not name_input:
+                            dest_fname = clean_suggested
+                        elif name_input == '1':
+                            dest_fname = sub_dir.name
+                        else:
+                            dest_fname = name_input
+                    else:
+                        name_input = input(f"\nEnter destination folder name [Press Enter for '{sub_dir.name}', or type new name]: ").strip()
+                        dest_fname = name_input if name_input else sub_dir.name
+
+                    if dest_fname.lower() == 'c':
+                        print("Move cancelled.")
+                        continue
+
+                    target_dest_path = target_l1_dest / dest_fname
                     if target_dest_path.exists():
                         print(f"\n[Error] Destination '{target_dest_path}' already exists!")
                         continue
 
-                    confirm_m = input(f"Move '{sub_dir.name}' to '{target_dest_path}'? [y/N]: ").strip().lower()
-                    if confirm_m == 'y':
+                    # If the target parent category doesn't exist on disk, create it
+                    if not target_l1_dest.exists():
+                        target_l1_dest.mkdir(parents=True, exist_ok=True)
+                        newly_created_l1 = True
+
+                    confirm_m = input(f"Move '{sub_dir.name}' → '{target_dest_path}'? [y/N]: ").strip().lower()
+                    if confirm_m in ('y', 'yes'):
                         shutil.move(str(sub_dir), str(target_dest_path))
                         if os.path.exists(db_path):
                             c_conn = get_db_connection(db_path)
@@ -4175,13 +4245,18 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                             l1_desc = f"Archived {target_cat_name} assets and legacy applications" if "legacy" in target_cat_name.lower() else f"Secondary {target_cat_name} assets"
                             _set_directory_description_in_db(target_l1_dest, l1_desc, db_path, is_verified=True, app_needed=detected_app)
 
-                        new_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_cat_name, 0), (sub_dir.name, 0)]
+                        new_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_cat_name, 0), (target_dest_path.name, 0)]
                         set_finder_tags(target_dest_path, new_tags)
                         _sync_directory_tags_to_db(target_dest_path, new_tags, db_path)
+                        if target_dest_path.name != sub_dir.name:
+                            suggested_desc = suggest_folder_description(target_dest_path.name, target_cat_name, target_loc["priority_tier"], stats, ft_info)
                         _set_directory_description_in_db(target_dest_path, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
-                        print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' under {target_loc['label']} / {target_cat_name}.")
+                        print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' → '{target_dest_path.name}' under {target_loc['label']} / {target_cat_name}.")
                         total_curated += 1
                         break
+                    else:
+                        print("Move cancelled.")
+                        continue
                 elif action == 'i' and mystery_files:
                     did_rename = _handle_inspect_mystery_files(sub_dir, mystery_analyses, db_path)
                     if did_rename:
