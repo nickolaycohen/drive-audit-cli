@@ -886,39 +886,21 @@ def update_scan_progress(scanned_dirs: int, scanned_files: int, skipped_dirs: in
     sys.stdout.write(f"\r\033[K{status}")
     sys.stdout.flush()
 
-def audit_directory_interactive(db_path: str):
-    """Scans local directory, extracts Finder tags for folders/files, and stores EXIF."""
-    print("\n--- NEW DRIVE / FOLDER AUDIT ---")
-    last_dir = get_app_setting(db_path, "last_scanned_dir")
-
-    if last_dir and os.path.exists(last_dir):
-        prompt_msg = f"Enter path to scan [Default: {last_dir}]: "
-    else:
-        prompt_msg = "Enter path to scan (e.g., ./ or /Users/name/Pictures): "
-
-    target_input = input(prompt_msg).strip().strip('"').strip("'")
-    if not target_input and last_dir and os.path.exists(last_dir):
-        target_path = last_dir
-    else:
-        target_path = target_input
-
-    root = Path(target_path)
-
+def perform_directory_scan(root_input: Path | str, db_path: str, skip_hours: float = 0.0) -> dict:
+    """Scans local directory, extracts Finder tags for folders/files, stores EXIF, and reconciles deleted files/dirs."""
+    root = Path(root_input)
     if not root.exists():
-        print(f"\n[Error] Path '{target_path}' does not exist.")
-        return
-
-    # Save last scanned path for future suggestion
-    set_app_setting(db_path, "last_scanned_dir", str(root.resolve()))
-
-    skip_input = input("Skip folders scanned within last N hours? [Default: 24, enter 0 to force rescan]: ").strip()
-    if not skip_input:
-        skip_hours = 24.0
-    else:
-        try:
-            skip_hours = float(skip_input)
-        except ValueError:
-            skip_hours = 24.0
+        print(f"\n[Error] Path '{root}' does not exist.")
+        return {
+            "interrupted": False,
+            "scanned_dirs": 0,
+            "scanned_files": 0,
+            "skipped_dirs": 0,
+            "skipped_files": 0,
+            "purged_dirs": 0,
+            "purged_files": 0,
+            "total_bytes": 0
+        }
 
     conn = init_database(db_path)
     cursor = conn.cursor()
@@ -1166,7 +1148,16 @@ def audit_directory_interactive(db_path: str):
         total_bytes = tracker.cached_bytes + tracker.fresh_bytes
         print(f"\n[Scan Interrupted] Stopped by user.")
         print(f"  • Processed: {scanned_dirs:,} folders ({skipped_dirs:,} cached), {scanned_files + skipped_files:,} files ({format_size(total_bytes)}).")
-        return
+        return {
+            "interrupted": True,
+            "scanned_dirs": scanned_dirs,
+            "scanned_files": scanned_files,
+            "skipped_dirs": skipped_dirs,
+            "skipped_files": skipped_files,
+            "purged_dirs": purged_dirs,
+            "purged_files": purged_files,
+            "total_bytes": total_bytes
+        }
 
     conn.commit()
     conn.close()
@@ -1190,6 +1181,71 @@ def audit_directory_interactive(db_path: str):
     if purged_dirs > 0 or purged_files > 0:
         print(f"  • Purged deleted:  {purged_dirs:,} folders, {purged_files:,} files removed from database")
     print(f"  • Total storage:   {format_size(total_bytes)}")
+
+    return {
+        "interrupted": False,
+        "scanned_dirs": scanned_dirs,
+        "scanned_files": scanned_files,
+        "skipped_dirs": skipped_dirs,
+        "skipped_files": skipped_files,
+        "purged_dirs": purged_dirs,
+        "purged_files": purged_files,
+        "total_bytes": total_bytes
+    }
+
+def get_minimal_scan_roots(paths: list[str]) -> list[Path]:
+    """Given a list of directory paths, filters to existing paths and returns the minimal set of top-level roots."""
+    valid_paths = []
+    for p in paths:
+        try:
+            p_obj = Path(p).resolve()
+            if p_obj.exists() and p_obj.is_dir():
+                valid_paths.append(p_obj)
+        except Exception:
+            continue
+    unique_paths = list(dict.fromkeys(valid_paths))
+    sorted_paths = sorted(unique_paths, key=lambda p: (len(p.parts), len(str(p))))
+    minimal_roots = []
+    for p in sorted_paths:
+        if not any(p == r or r in p.parents for r in minimal_roots):
+            minimal_roots.append(p)
+    return minimal_roots
+
+def audit_directory_interactive(db_path: str):
+    """Scans local directory, extracts Finder tags for folders/files, and stores EXIF."""
+    print("\n--- NEW DRIVE / FOLDER AUDIT ---")
+    last_dir = get_app_setting(db_path, "last_scanned_dir")
+
+    if last_dir and os.path.exists(last_dir):
+        prompt_msg = f"Enter path to scan [Default: {last_dir}]: "
+    else:
+        prompt_msg = "Enter path to scan (e.g., ./ or /Users/name/Pictures): "
+
+    target_input = input(prompt_msg).strip().strip('"').strip("'")
+    if not target_input and last_dir and os.path.exists(last_dir):
+        target_path = last_dir
+    else:
+        target_path = target_input
+
+    root = Path(target_path)
+
+    if not root.exists():
+        print(f"\n[Error] Path '{target_path}' does not exist.")
+        return
+
+    # Save last scanned path for future suggestion
+    set_app_setting(db_path, "last_scanned_dir", str(root.resolve()))
+
+    skip_input = input("Skip folders scanned within last N hours? [Default: 24, enter 0 to force rescan]: ").strip()
+    if not skip_input:
+        skip_hours = 24.0
+    else:
+        try:
+            skip_hours = float(skip_input)
+        except ValueError:
+            skip_hours = 24.0
+
+    perform_directory_scan(root, db_path, skip_hours=skip_hours)
 
 
 
@@ -1656,166 +1712,213 @@ def generate_curation_verification_report(db_path: str):
 
         elif rep_choice == "1":
             # List Approved Folders with Option B (Separated Direct vs Subtree Curated Status)
-            print("\n⏳ Fetching approved / verified folders... Please wait...")
-            cursor.execute("""
-                WITH approved_dirs AS (
-                    SELECT id, path, name, verified_at, description, app_needed
-                    FROM directories
-                    WHERE is_verified = 1
-                )
-                SELECT 
-                    ad.id,
-                    ad.name,
-                    ad.path,
-                    ad.verified_at,
-                    ad.description,
-                    ad.app_needed,
-                    -- Direct files in this approved folder
-                    (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_files,
-                    (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_bytes,
-                    -- Files in verified subfolders under this folder
-                    (SELECT COUNT(f.id) 
-                     FROM directories sub 
-                     JOIN files f ON f.directory_id = sub.id 
-                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_files,
-                    (SELECT COALESCE(SUM(f.size_bytes), 0) 
-                     FROM directories sub 
-                     JOIN files f ON f.directory_id = sub.id 
-                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_bytes,
-                    -- Unverified subfolders count under this folder
-                    (SELECT COUNT(sub.id) 
-                     FROM directories sub 
-                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0) as pending_sub_count,
-                    -- Unverified files & bytes in subfolders
-                    (SELECT COUNT(f.id) 
-                     FROM directories sub 
-                     JOIN files f ON f.directory_id = sub.id 
-                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_files,
-                    (SELECT COALESCE(SUM(f.size_bytes), 0) 
-                     FROM directories sub 
-                     JOIN files f ON f.directory_id = sub.id 
-                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_bytes,
-                    COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') as tags
-                FROM approved_dirs ad
-                LEFT JOIN directory_tags dt ON ad.id = dt.directory_id
-                GROUP BY ad.id
-                ORDER BY ad.path
-            """)
-            v_rows = cursor.fetchall()
-            print("\n" + "=" * 106)
-            print(f"APPROVED / VERIFIED FOLDERS ({len(v_rows)} folders)")
-            print("=" * 106)
-            print(f"{'#':<4} {'Folder Name':<24} {'Status':<22} {'Approved Size':<16} {'Verified Date':<20} {'Tags'}")
-            print("-" * 106)
-            for idx, (did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags) in enumerate(v_rows, 1):
-                app_f = df_cnt + vs_cnt
-                app_b = df_b + vs_b
-                v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
-                if pend_cnt == 0:
-                    status_badge = "✓ Fully Verified"
-                else:
-                    status_badge = "⚠️ Partially Curated"
-                stat_str = f"{app_f:,} files ({format_size(app_b)})"
-                print(f"{idx:<4} {dname:<24} {status_badge:<22} {stat_str:<16} {v_date_str:<20} {dtags}")
-                print(f"     📍 Path: {dpath}")
-                if dapp:
-                    print(f"     ↳ 💻 App Needed: {dapp}")
-                if pend_cnt > 0:
-                    print(f"     ↳ ⏳ Pending Subfolders: {pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})")
-                if ddesc:
-                    print(f"     ↳ 📝 \"{ddesc}\"")
-            print("=" * 106)
-
+            auto_prompted_rescan = False
             while True:
-                f_drill = input("\nEnter folder # (1-N) to view contained files & details, or Enter to return: ").strip().lower()
-                if not f_drill:
-                    break
-                if f_drill.isdigit():
-                    f_idx = int(f_drill) - 1
-                    if 0 <= f_idx < len(v_rows):
-                        did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = v_rows[f_idx]
-                        app_f = df_cnt + vs_cnt
-                        app_b = df_b + vs_b
-                        v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
-                        
-                        # Category breakdown across approved files
-                        cursor.execute("""
-                            SELECT f.category, COUNT(f.id), SUM(f.size_bytes)
-                            FROM directories sub
-                            JOIN files f ON f.directory_id = sub.id
-                            WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
-                              AND f.name != '.DS_Store'
-                            GROUP BY f.category
-                            ORDER BY SUM(f.size_bytes) DESC
-                        """, (did, dpath))
-                        cat_breakdown = cursor.fetchall()
-                        cat_str = " | ".join([f"{c}: {cnt:,} ({format_size(sb)})" for c, cnt, sb in cat_breakdown]) if cat_breakdown else "0 approved files"
-
-                        # Fetch strictly approved files in folder (up to 100)
-                        cursor.execute("""
-                            SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at, sub.name as sub_folder
-                            FROM directories sub
-                            JOIN files f ON f.directory_id = sub.id
-                            WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
-                              AND f.name != '.DS_Store'
-                            ORDER BY f.size_bytes DESC
-                            LIMIT 100
-                        """, (did, dpath))
-                        dir_files = cursor.fetchall()
-
-                        print("\n" + "#" * 90)
-                        print(f"  APPROVED FOLDER DETAILS: '{dname}'")
-                        print("#" * 90)
-                        print(f"  • Full Path:         {dpath}")
-                        if pend_cnt == 0:
-                            print(f"  • Status:            ✓ Fully Verified ({v_date_str})")
-                        else:
-                            print(f"  • Status:            ⚠️ Partially Curated ({pend_cnt} unverified subfolders pending triage)")
-                        print(f"  • Approved Storage:  {format_size(app_b)} across {app_f:,} files ({df_cnt:,} direct files, {vs_cnt:,} verified subfolder files)")
-                        if dapp:
-                            print(f"  • Required App:      {dapp}")
-                        if pend_cnt > 0:
-                            print(f"  • Pending Subtree:   {format_size(pend_b)} across {pend_f:,} files in {pend_cnt} unverified subfolders")
-                        print(f"  • Folder Tags:       {dtags}")
-                        print(f"  • Categories:        {cat_str}")
-                        if ddesc:
-                            print(f"  • Description:       \"{ddesc}\"")
-                        print("-" * 90)
-
-                        if dir_files:
-                            print(f"  Contained Approved Files ({len(dir_files)} displayed):")
-                            print(f"  {'#':<4} {'Subfolder':<22} {'File Name':<34} {'Category':<10} {'Size':<10} {'Modified Date'}")
-                            print("  " + "-" * 86)
-                            for d_fi, (df_name, df_cat, df_ext, df_sz, df_mod, df_sub) in enumerate(dir_files, 1):
-                                m_str = df_mod.replace("T", " ")[:19] if df_mod else "N/A"
-                                s_str = format_size(df_sz)
-                                disp_name = df_name if len(df_name) <= 32 else df_name[:29] + "..."
-                                disp_sub = df_sub if len(df_sub) <= 20 else df_sub[:17] + "..."
-                                print(f"  {d_fi:<4} {disp_sub:<22} {disp_name:<34} {df_cat:<10} {s_str:<10} {m_str}")
-                        else:
-                            print("  (Folder contains 0 directly approved files)")
-
-                        if pend_cnt > 0:
-                            cursor.execute("""
-                                SELECT sub.name, sub.path, COUNT(f.id) as cnt, COALESCE(SUM(f.size_bytes), 0) as b
-                                FROM directories sub
-                                LEFT JOIN files f ON f.directory_id = sub.id AND f.name != '.DS_Store'
-                                WHERE sub.path LIKE ? || '/%' AND sub.is_verified = 0
-                                GROUP BY sub.id
-                                ORDER BY b DESC
-                                LIMIT 15
-                            """, (dpath,))
-                            pending_subs = cursor.fetchall()
-                            if pending_subs:
-                                print("-" * 90)
-                                print(f"  Pending Subfolders Awaiting Triage ({len(pending_subs)} displayed of {pend_cnt}):")
-                                for ps_name, ps_path, ps_f, ps_b in pending_subs:
-                                    disp_pname = ps_name if len(ps_name) <= 24 else ps_name[:21] + "..."
-                                    print(f"    ⏳ {disp_pname:<24} {ps_f:,} files ({format_size(ps_b)}) 📍 {ps_path}")
-
-                        print("#" * 90)
+                conn.commit()
+                cursor = conn.cursor()
+                print("\n⏳ Fetching approved / verified folders... Please wait...")
+                cursor.execute("""
+                    WITH approved_dirs AS (
+                        SELECT id, path, name, verified_at, description, app_needed
+                        FROM directories
+                        WHERE is_verified = 1
+                    )
+                    SELECT 
+                        ad.id,
+                        ad.name,
+                        ad.path,
+                        ad.verified_at,
+                        ad.description,
+                        ad.app_needed,
+                        -- Direct files in this approved folder
+                        (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_bytes,
+                        -- Files in verified subfolders under this folder
+                        (SELECT COUNT(f.id) 
+                         FROM directories sub 
+                         JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) 
+                         FROM directories sub 
+                         JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_bytes,
+                        -- Unverified subfolders count under this folder
+                        (SELECT COUNT(sub.id) 
+                         FROM directories sub 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0) as pending_sub_count,
+                        -- Unverified files & bytes in subfolders
+                        (SELECT COUNT(f.id) 
+                         FROM directories sub 
+                         JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) 
+                         FROM directories sub 
+                         JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_bytes,
+                        COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') as tags
+                    FROM approved_dirs ad
+                    LEFT JOIN directory_tags dt ON ad.id = dt.directory_id
+                    GROUP BY ad.id
+                    ORDER BY ad.path
+                """)
+                v_rows = cursor.fetchall()
+                print("\n" + "=" * 106)
+                print(f"APPROVED / VERIFIED FOLDERS ({len(v_rows)} folders)")
+                print("=" * 106)
+                print(f"{'#':<4} {'Folder Name':<24} {'Status':<22} {'Approved Size':<16} {'Verified Date':<20} {'Tags'}")
+                print("-" * 106)
+                for idx, (did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags) in enumerate(v_rows, 1):
+                    app_f = df_cnt + vs_cnt
+                    app_b = df_b + vs_b
+                    v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
+                    if pend_cnt == 0:
+                        status_badge = "✓ Fully Verified"
                     else:
-                        print(f"[Error] Invalid selection. Choose 1-{len(v_rows)}.")
+                        status_badge = "⚠️ Partially Curated"
+                    stat_str = f"{app_f:,} files ({format_size(app_b)})"
+                    print(f"{idx:<4} {dname:<24} {status_badge:<22} {stat_str:<16} {v_date_str:<20} {dtags}")
+                    print(f"     📍 Path: {dpath}")
+                    if dapp:
+                        print(f"     ↳ 💻 App Needed: {dapp}")
+                    if pend_cnt > 0:
+                        print(f"     ↳ ⏳ Pending Subfolders: {pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})")
+                    if ddesc:
+                        print(f"     ↳ 📝 \"{ddesc}\"")
+                print("=" * 106)
+
+                partially_curated = [r for r in v_rows if r[10] > 0]
+                if partially_curated and not auto_prompted_rescan:
+                    auto_prompted_rescan = True
+                    pend_count = len(partially_curated)
+                    tot_pend_subs = sum(r[10] for r in partially_curated)
+                    print(f"\n⚠️  {pend_count} Partially Curated folder(s) detected with {tot_pend_subs:,} pending subfolder(s).")
+                    rescan_ans = input("Would you like to rescan these folders from disk to reconcile changes & refresh the view? [Y/n]: ").strip().lower()
+                    if rescan_ans in ("", "y", "yes"):
+                        paths_to_rescan = [r[2] for r in partially_curated]
+                        roots_to_rescan = get_minimal_scan_roots(paths_to_rescan)
+                        if roots_to_rescan:
+                            print(f"\n🔄 Rescanning {len(roots_to_rescan)} top-level root folder(s) from disk to reconcile changes...")
+                            for r_p in roots_to_rescan:
+                                print(f"  ↳ Scanning: {r_p}")
+                                perform_directory_scan(r_p, db_path, skip_hours=0.0)
+                            print("\n✓ Rescan complete. Refreshing report view...\n")
+                            continue
+                        else:
+                            print("\n[Notice] None of the partially curated folder paths currently exist on disk.")
+
+                exit_report = False
+                while True:
+                    prompt_label = "\nEnter folder # (1-N) to view contained files & details, 'r' to rescan & refresh, or Enter to return: "
+                    f_drill = input(prompt_label).strip().lower()
+                    if not f_drill:
+                        exit_report = True
+                        break
+                    if f_drill in ("r", "rescan"):
+                        targets = [r[2] for r in partially_curated] if partially_curated else [r[2] for r in v_rows]
+                        roots_to_rescan = get_minimal_scan_roots(targets)
+                        if roots_to_rescan:
+                            print(f"\n🔄 Rescanning {len(roots_to_rescan)} root folder(s) from disk...")
+                            for r_p in roots_to_rescan:
+                                print(f"  ↳ Scanning: {r_p}")
+                                perform_directory_scan(r_p, db_path, skip_hours=0.0)
+                            print("\n✓ Rescan complete. Refreshing report view...\n")
+                            auto_prompted_rescan = True
+                            break
+                        else:
+                            print("\n[Notice] No target folders exist on disk to rescan.")
+                            continue
+
+                    if f_drill.isdigit():
+                        f_idx = int(f_drill) - 1
+                        if 0 <= f_idx < len(v_rows):
+                            did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = v_rows[f_idx]
+                            app_f = df_cnt + vs_cnt
+                            app_b = df_b + vs_b
+                            v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
+                            
+                            # Category breakdown across approved files
+                            cursor.execute("""
+                                SELECT f.category, COUNT(f.id), SUM(f.size_bytes)
+                                FROM directories sub
+                                JOIN files f ON f.directory_id = sub.id
+                                WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
+                                  AND f.name != '.DS_Store'
+                                GROUP BY f.category
+                                ORDER BY SUM(f.size_bytes) DESC
+                            """, (did, dpath))
+                            cat_breakdown = cursor.fetchall()
+                            cat_str = " | ".join([f"{c}: {cnt:,} ({format_size(sb)})" for c, cnt, sb in cat_breakdown]) if cat_breakdown else "0 approved files"
+
+                            # Fetch strictly approved files in folder (up to 100)
+                            cursor.execute("""
+                                SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at, sub.name as sub_folder
+                                FROM directories sub
+                                JOIN files f ON f.directory_id = sub.id
+                                WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
+                                  AND f.name != '.DS_Store'
+                                ORDER BY f.size_bytes DESC
+                                LIMIT 100
+                            """, (did, dpath))
+                            dir_files = cursor.fetchall()
+
+                            print("\n" + "#" * 90)
+                            print(f"  APPROVED FOLDER DETAILS: '{dname}'")
+                            print("#" * 90)
+                            print(f"  • Full Path:         {dpath}")
+                            if pend_cnt == 0:
+                                print(f"  • Status:            ✓ Fully Verified ({v_date_str})")
+                            else:
+                                print(f"  • Status:            ⚠️ Partially Curated ({pend_cnt} unverified subfolders pending triage)")
+                            print(f"  • Approved Storage:  {format_size(app_b)} across {app_f:,} files ({df_cnt:,} direct files, {vs_cnt:,} verified subfolder files)")
+                            if dapp:
+                                print(f"  • Required App:      {dapp}")
+                            if pend_cnt > 0:
+                                print(f"  • Pending Subtree:   {format_size(pend_b)} across {pend_f:,} files in {pend_cnt} unverified subfolders")
+                            print(f"  • Folder Tags:       {dtags}")
+                            print(f"  • Categories:        {cat_str}")
+                            if ddesc:
+                                print(f"  • Description:       \"{ddesc}\"")
+                            print("-" * 90)
+
+                            if dir_files:
+                                print(f"  Contained Approved Files ({len(dir_files)} displayed):")
+                                print(f"  {'#':<4} {'Subfolder':<22} {'File Name':<34} {'Category':<10} {'Size':<10} {'Modified Date'}")
+                                print("  " + "-" * 86)
+                                for d_fi, (df_name, df_cat, df_ext, df_sz, df_mod, df_sub) in enumerate(dir_files, 1):
+                                    m_str = df_mod.replace("T", " ")[:19] if df_mod else "N/A"
+                                    s_str = format_size(df_sz)
+                                    disp_name = df_name if len(df_name) <= 32 else df_name[:29] + "..."
+                                    disp_sub = df_sub if len(df_sub) <= 20 else df_sub[:17] + "..."
+                                    print(f"  {d_fi:<4} {disp_sub:<22} {disp_name:<34} {df_cat:<10} {s_str:<10} {m_str}")
+                            else:
+                                print("  (Folder contains 0 directly approved files)")
+
+                            if pend_cnt > 0:
+                                cursor.execute("""
+                                    SELECT sub.name, sub.path, COUNT(f.id) as cnt, COALESCE(SUM(f.size_bytes), 0) as b
+                                    FROM directories sub
+                                    LEFT JOIN files f ON f.directory_id = sub.id AND f.name != '.DS_Store'
+                                    WHERE sub.path LIKE ? || '/%' AND sub.is_verified = 0
+                                    GROUP BY sub.id
+                                    ORDER BY b DESC
+                                    LIMIT 15
+                                """, (dpath,))
+                                pending_subs = cursor.fetchall()
+                                if pending_subs:
+                                    print("-" * 90)
+                                    print(f"  Pending Subfolders Awaiting Triage ({len(pending_subs)} displayed of {pend_cnt}):")
+                                    for ps_name, ps_path, ps_f, ps_b in pending_subs:
+                                        disp_pname = ps_name if len(ps_name) <= 24 else ps_name[:21] + "..."
+                                        print(f"    ⏳ {disp_pname:<24} {ps_f:,} files ({format_size(ps_b)}) 📍 {ps_path}")
+
+                            print("#" * 90)
+                        else:
+                            print(f"[Error] Invalid selection. Choose 1-{len(v_rows)}.")
+                    else:
+                        print(f"[Error] Invalid selection. Choose 1-{len(v_rows)}, 'r' to rescan, or Enter to return.")
+
+                if exit_report:
+                    break
 
         elif rep_choice == "2":
             # List All Approved Files (strictly files inside verified directories, excluding .DS_Store)
