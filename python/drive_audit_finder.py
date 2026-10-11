@@ -1590,6 +1590,65 @@ def generate_largest_files_report(db_path: str):
         except Exception as e:
             print(f"[Error] Failed to export Markdown: {e}")
 
+def deduplicate_verified_rows_with_breadcrumbs(
+    v_rows: list,
+    path_idx: int = 2,
+    name_idx: int = 1,
+    df_cnt_idx: int = 6,
+    df_b_idx: int = 7,
+    vs_cnt_idx: int = 8,
+    vs_b_idx: int = 9,
+    pend_cnt_idx: int = 10,
+    pend_f_idx: int = 11
+) -> list:
+    """
+    Deduplicates verified directory rows where ancestor and descendant contain the exact same set
+    of approved files, keeping the deepest folder and annotating it with the full breadcrumb path
+    (e.g., 'Data ▸ Legacy ▸ Windows ▸ MS-Money').
+    
+    Returns a list of tuples: (row, breadcrumb_str)
+    """
+    if not v_rows:
+        return []
+
+    row_by_path = {r[path_idx]: r for r in v_rows}
+    # Sort paths by length (parts) descending so deepest folders are processed first
+    sorted_paths = sorted(row_by_path.keys(), key=lambda p: (len(Path(p).parts), len(p)), reverse=True)
+    
+    subsumed_ancestors = set()
+    breadcrumbs = {}
+
+    for deep_path in sorted_paths:
+        if deep_path in subsumed_ancestors:
+            continue
+        deep_row = row_by_path[deep_path]
+        deep_app_f = deep_row[df_cnt_idx] + deep_row[vs_cnt_idx]
+        deep_app_b = deep_row[df_b_idx] + deep_row[vs_b_idx]
+        
+        chain = [deep_row]
+        for anc_path in sorted(row_by_path.keys(), key=lambda p: (len(Path(p).parts), len(p))):
+            if anc_path != deep_path and deep_path.startswith(anc_path + "/"):
+                anc_row = row_by_path[anc_path]
+                anc_app_f = anc_row[df_cnt_idx] + anc_row[vs_cnt_idx]
+                anc_app_b = anc_row[df_b_idx] + anc_row[vs_b_idx]
+                # Condition for exact same set of approved files:
+                # 1. anc_row has 0 direct files (df_cnt == 0 and df_b == 0)
+                # 2. anc_row total approved files and bytes match deep_row
+                # 3. anc_row pending subfolder counts match deep_row
+                if (anc_row[df_cnt_idx] == 0 and anc_app_f == deep_app_f and anc_app_b == deep_app_b and
+                    anc_row[pend_cnt_idx] == deep_row[pend_cnt_idx] and anc_row[pend_f_idx] == deep_row[pend_f_idx]):
+                    subsumed_ancestors.add(anc_path)
+                    chain.append(anc_row)
+
+        chain_sorted = sorted(chain, key=lambda r: len(Path(r[path_idx]).parts))
+        breadcrumbs[deep_path] = " ▸ ".join([r[name_idx] for r in chain_sorted])
+
+    deduped = []
+    for r in v_rows:
+        if r[path_idx] not in subsumed_ancestors:
+            deduped.append((r, breadcrumbs.get(r[path_idx], r[name_idx])))
+
+    return deduped
 
 def generate_curation_verification_report(db_path: str):
     """
@@ -1761,13 +1820,15 @@ def generate_curation_verification_report(db_path: str):
                     GROUP BY ad.id
                     ORDER BY ad.path
                 """)
-                v_rows = cursor.fetchall()
-                print("\n" + "=" * 106)
+                v_rows_raw = cursor.fetchall()
+                v_rows = deduplicate_verified_rows_with_breadcrumbs(v_rows_raw)
+                print("\n" + "=" * 116)
                 print(f"APPROVED / VERIFIED FOLDERS ({len(v_rows)} folders)")
-                print("=" * 106)
-                print(f"{'#':<4} {'Folder Name':<24} {'Status':<22} {'Approved Size':<16} {'Verified Date':<20} {'Tags'}")
-                print("-" * 106)
-                for idx, (did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags) in enumerate(v_rows, 1):
+                print("=" * 116)
+                print(f"{'#':<4} {'Folder / Breadcrumb':<36} {'Status':<22} {'Approved Size':<16} {'Verified Date':<20} {'Tags'}")
+                print("-" * 116)
+                for idx, (r_data, breadcrumb) in enumerate(v_rows, 1):
+                    did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = r_data
                     app_f = df_cnt + vs_cnt
                     app_b = df_b + vs_b
                     v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
@@ -1776,17 +1837,20 @@ def generate_curation_verification_report(db_path: str):
                     else:
                         status_badge = "⚠️ Partially Curated"
                     stat_str = f"{app_f:,} files ({format_size(app_b)})"
-                    print(f"{idx:<4} {dname:<24} {status_badge:<22} {stat_str:<16} {v_date_str:<20} {dtags}")
+                    disp_name = breadcrumb if len(breadcrumb) <= 36 else ("..." + breadcrumb[-33:])
+                    print(f"{idx:<4} {disp_name:<36} {status_badge:<22} {stat_str:<16} {v_date_str:<20} {dtags}")
                     print(f"     📍 Path: {dpath}")
+                    if breadcrumb != dname and len(breadcrumb) > 36:
+                        print(f"     ↳ 📂 Hierarchy: {breadcrumb}")
                     if dapp:
                         print(f"     ↳ 💻 App Needed: {dapp}")
                     if pend_cnt > 0:
                         print(f"     ↳ ⏳ Pending Subfolders: {pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})")
                     if ddesc:
                         print(f"     ↳ 📝 \"{ddesc}\"")
-                print("=" * 106)
+                print("=" * 116)
 
-                partially_curated = [r for r in v_rows if r[10] > 0]
+                partially_curated = [r_data for r_data, _ in v_rows if r_data[10] > 0]
                 if partially_curated and not auto_prompted_rescan:
                     auto_prompted_rescan = True
                     pend_count = len(partially_curated)
@@ -1814,7 +1878,7 @@ def generate_curation_verification_report(db_path: str):
                         exit_report = True
                         break
                     if f_drill in ("r", "rescan"):
-                        targets = [r[2] for r in partially_curated] if partially_curated else [r[2] for r in v_rows]
+                        targets = [r[2] for r in partially_curated] if partially_curated else [r_data[2] for r_data, _ in v_rows]
                         roots_to_rescan = get_minimal_scan_roots(targets)
                         if roots_to_rescan:
                             print(f"\n🔄 Rescanning {len(roots_to_rescan)} root folder(s) from disk...")
@@ -1831,7 +1895,8 @@ def generate_curation_verification_report(db_path: str):
                     if f_drill.isdigit():
                         f_idx = int(f_drill) - 1
                         if 0 <= f_idx < len(v_rows):
-                            did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = v_rows[f_idx]
+                            r_data, breadcrumb = v_rows[f_idx]
+                            did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = r_data
                             app_f = df_cnt + vs_cnt
                             app_b = df_b + vs_b
                             v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
@@ -1862,9 +1927,11 @@ def generate_curation_verification_report(db_path: str):
                             dir_files = cursor.fetchall()
 
                             print("\n" + "#" * 90)
-                            print(f"  APPROVED FOLDER DETAILS: '{dname}'")
+                            print(f"  APPROVED FOLDER DETAILS: '{breadcrumb}'")
                             print("#" * 90)
                             print(f"  • Full Path:         {dpath}")
+                            if breadcrumb != dname:
+                                print(f"  • Hierarchy:         {breadcrumb}")
                             if pend_cnt == 0:
                                 print(f"  • Status:            ✓ Fully Verified ({v_date_str})")
                             else:
@@ -2077,13 +2144,21 @@ def generate_curation_verification_report(db_path: str):
                     ORDER BY td.is_verified DESC, td.path
                 """, (t_filter,))
                 tier_rows = cursor.fetchall()
-                t_ver = [r for r in tier_rows if r[0] == 1]
+                t_ver_raw = [r for r in tier_rows if r[0] == 1]
+                t_ver = deduplicate_verified_rows_with_breadcrumbs(
+                    t_ver_raw,
+                    path_idx=2, name_idx=1,
+                    df_cnt_idx=5, df_b_idx=6,
+                    vs_cnt_idx=7, vs_b_idx=8,
+                    pend_cnt_idx=9, pend_f_idx=10
+                )
                 t_unver = [r for r in tier_rows if r[0] == 0]
                 print("\n" + "=" * 98)
                 print(f"PRIORITY {tier_in} STATUS: {len(t_ver):,} Approved | {len(t_unver):,} Pending Unapproved")
                 print("=" * 98)
                 print(f"\n--- APPROVED FOLDERS ({len(t_ver)}) ---")
-                for idx, (_, dname, dpath, v_at, ddesc, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b) in enumerate(t_ver, 1):
+                for idx, (row, breadcrumb) in enumerate(t_ver, 1):
+                    _, dname, dpath, v_at, ddesc, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b = row
                     app_f = df_c + vs_c
                     app_b = df_b + vs_b
                     v_date = v_at.replace("T", " ")[:19] if v_at else ""
@@ -2092,7 +2167,11 @@ def generate_curation_verification_report(db_path: str):
                     else:
                         status_str = f"⚠️ Partially Curated"
                     stat_str = f"{app_f:,} files ({format_size(app_b)})"
-                    print(f"  [{idx}] {dname:<24} {status_str:<22} {stat_str:<16} - {v_date}")
+                    disp_name = breadcrumb if len(breadcrumb) <= 32 else ("..." + breadcrumb[-29:])
+                    print(f"  [{idx}] {disp_name:<32} {status_str:<22} {stat_str:<16} - {v_date}")
+                    print(f"      📍 Path: {dpath}")
+                    if breadcrumb != dname and len(breadcrumb) > 32:
+                        print(f"      ↳ 📂 Hierarchy: {breadcrumb}")
                     if p_cnt > 0:
                         print(f"      ↳ ⏳ Pending Subfolders: {p_cnt} folders ({p_f:,} files, {format_size(p_b)})")
                     if ddesc:
@@ -2139,7 +2218,8 @@ def generate_curation_verification_report(db_path: str):
                     FROM approved_dirs ad
                     ORDER BY ad.path
                 """)
-                ver_list = cursor.fetchall()
+                ver_list_raw = cursor.fetchall()
+                ver_list = deduplicate_verified_rows_with_breadcrumbs(ver_list_raw)
 
                 cursor.execute("""
                     SELECT d.name as folder_name, f.name, f.category, f.size_bytes, f.modified_at, d.path
@@ -2168,9 +2248,10 @@ def generate_curation_verification_report(db_path: str):
                     f.write(f"- **Approved Storage**: {format_size(verified_bytes)} across {verified_files:,} files\n")
                     f.write(f"- **Pending Storage**: {format_size(unverified_bytes)} across {unverified_files:,} files\n\n")
                     f.write("## 1. Approved / Verified Folders (`is_verified = 1`)\n\n")
-                    f.write("| # | Folder Name | Status | Approved Files | Approved Size | Required App | Pending Subfolders | Verified Date | Description | Path |\n")
+                    f.write("| # | Folder / Breadcrumb | Status | Approved Files | Approved Size | Required App | Pending Subfolders | Verified Date | Description | Path |\n")
                     f.write("|---|---|---|---|---|---|---|---|---|---|\n")
-                    for i, (_, dn, dp, va, dd, dapp, df_c, df_b, vs_c, vs_b, pend_cnt, pend_f, pend_b) in enumerate(ver_list, 1):
+                    for i, (row, breadcrumb) in enumerate(ver_list, 1):
+                        _, dn, dp, va, dd, dapp, df_c, df_b, vs_c, vs_b, pend_cnt, pend_f, pend_b = row
                         v_str = va.replace("T", " ")[:19] if va else "N/A"
                         desc_str = dd.replace("|", "/") if dd else "-"
                         app_str = dapp if dapp else "-"
@@ -2182,7 +2263,7 @@ def generate_curation_verification_report(db_path: str):
                         else:
                             status_str = "⚠️ Partially Curated"
                             pend_str = f"{pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})"
-                        f.write(f"| {i} | `{dn}` | {status_str} | {app_f:,} | {format_size(app_b)} | {app_str} | {pend_str} | {v_str} | {desc_str} | `{dp}` |\n")
+                        f.write(f"| {i} | `{breadcrumb}` | {status_str} | {app_f:,} | {format_size(app_b)} | {app_str} | {pend_str} | {v_str} | {desc_str} | `{dp}` |\n")
 
                     f.write(f"\n## 2. Approved Files Inventory ({len(v_files_all):,} files)\n\n")
                     f.write("| # | Folder | File Name | Category | Size | Modified Date | Path |\n")
@@ -2230,7 +2311,8 @@ def generate_curation_verification_report(db_path: str):
                     FROM approved_dirs ad
                     ORDER BY ad.path
                 """)
-                ver_rows = cursor.fetchall()
+                ver_rows_raw = cursor.fetchall()
+                ver_rows = deduplicate_verified_rows_with_breadcrumbs(ver_rows_raw)
 
                 cursor.execute("""
                     SELECT d.id, d.name, d.path,
@@ -2244,12 +2326,12 @@ def generate_curation_verification_report(db_path: str):
 
                 with open(fname, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["ID", "Status", "Folder Name", "Path", "Approved Files", "Approved Size Bytes", "Approved Size Formatted", "Required App", "Pending Subfolders Count", "Pending Subfolder Files", "Pending Subfolder Size Formatted", "Verified At", "Description"])
-                    for did, dname, dpath, vat, ddesc, dapp, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b in ver_rows:
+                    writer.writerow(["ID", "Status", "Folder / Breadcrumb", "Path", "Approved Files", "Approved Size Bytes", "Approved Size Formatted", "Required App", "Pending Subfolders Count", "Pending Subfolder Files", "Pending Subfolder Size Formatted", "Verified At", "Description"])
+                    for (did, dname, dpath, vat, ddesc, dapp, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b), breadcrumb in ver_rows:
                         status_str = "Fully Verified" if p_cnt == 0 else "Partially Curated"
                         app_f = df_c + vs_c
                         app_b = df_b + vs_b
-                        writer.writerow([did, status_str, dname, dpath, app_f, app_b, format_size(app_b), dapp or "", p_cnt, p_f, format_size(p_b), vat or "", ddesc or ""])
+                        writer.writerow([did, status_str, breadcrumb, dpath, app_f, app_b, format_size(app_b), dapp or "", p_cnt, p_f, format_size(p_b), vat or "", ddesc or ""])
                     for did, dname, dpath, sub_cnt, sub_b in unver_rows:
                         writer.writerow([did, "Pending / Unapproved", dname, dpath, 0, 0, "0 B", "", 0, sub_cnt, format_size(sub_b), "", ""])
                 print(f"\n[Success] Full CSV report exported to: {os.path.abspath(fname)}")
