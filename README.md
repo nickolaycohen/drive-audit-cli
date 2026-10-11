@@ -317,12 +317,16 @@ Inspects mapped storage locations across Priority tiers (`Priority 1` through `P
   - **Application Association (`app_needed`)**: Automatically detects the primary software and macOS-compatible alternative required to open files (e.g. `Microsoft Money (Mac: MoneyDance / Banktivity / Parallels Windows)` or `Intuit Quicken (Mac: Quicken for Mac / Banktivity)`), permanently attaching it to the folder in SQLite.
   - **Category Verification & Mismatch Warning**: Cross-references detected file types against the parent Priority Tier and Category folder (e.g., flags video files inside Priority 1 / Data or source code in Priority 4 / Media Depot with `⚠️ Category Mismatch: 100% Video in 'Priority 1 / Data'! Recommended: Priority 4 (Media Staging & Photos)`).
   - Generates intelligent, context-aware description suggestions.
-  - Prompts for human review & approval:
     - `[a]` **Approve**: Applies parent Priority Finder color tag + category tags, persists description and required application (`app_needed`), and marks `is_verified = 1` in SQLite.
-    - `[e]` **Edit**: Customize description and/or required application before applying tags and marking verified.
+    - `[e]` **Edit**: Customize folder name, description and/or attached application before applying tags and marking verified.
+    - `[r]` **Rename**: Standalone folder rename on disk and database before triage decisions.
     - `[m]` **Move**: Relocate folder to another Priority tier, mapped location, or parent category (preserving required app metadata).
     - `[s]` **Skip**: Leave untagged and unverified.
     - `[q]` **Quit**: Safely exits with all verified progress persisted.
+- **Auto-Bubbling Menu Usage Tracking (`menu_option_usage`)**:
+  - Automatically records every prompt and menu selection in SQLite (`menu_option_usage` table).
+  - Dynamically floats the most frequently executed options to the top of the menu with a popularity indicator (`(Used 25x) 🔥`).
+  - Sets the dynamic recommended default (`[Default: ...]`) to your #1 most frequent choice across Main Menu, Curation Wizard actions, Level-1 reviews, and Curation reports.
 - **File Extensions Catalog ('ext')**:
   - View the complete seeded database catalog of file extensions, categories, descriptions, primary applications, and macOS alternatives.
 - **Reset Subfolder Tags & Verification ('reset-tags')**:

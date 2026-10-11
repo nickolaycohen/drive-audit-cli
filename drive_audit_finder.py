@@ -519,7 +519,20 @@ def init_database(db_path: str) -> sqlite3.Connection:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_extensions_cat ON file_extensions(category);")
     _seed_file_extensions(cursor)
 
-    # 10. Performance Indexes
+    # 10. Menu Option Usage Table (Tracks frequency and auto-bubbles options)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS menu_option_usage (
+            menu_key TEXT NOT NULL,
+            option_key TEXT NOT NULL,
+            option_label TEXT,
+            use_count INTEGER DEFAULT 1,
+            last_used_at TEXT NOT NULL,
+            PRIMARY KEY (menu_key, option_key)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_usage_count ON menu_option_usage(menu_key, use_count DESC);")
+
+    # 11. Performance Indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_name_size ON files(name, size_bytes);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_directories_path ON directories(path);")
@@ -572,6 +585,64 @@ def set_app_setting(db_path: str, key: str, value: str):
         conn.close()
     except Exception:
         pass
+
+def record_menu_usage(db_path: str, menu_key: str, option_key: str, option_label: str = ""):
+    """Records selection of a menu option to track usage frequency and auto-bubble popular items."""
+    if not db_path or not os.path.exists(db_path):
+        return
+    opt_k = str(option_key).strip().lower()
+    if not opt_k:
+        return
+    try:
+        conn = get_db_connection(db_path)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS menu_option_usage (
+                menu_key TEXT NOT NULL,
+                option_key TEXT NOT NULL,
+                option_label TEXT,
+                use_count INTEGER DEFAULT 1,
+                last_used_at TEXT NOT NULL,
+                PRIMARY KEY (menu_key, option_key)
+            )
+        """)
+        now = datetime.datetime.now().isoformat()
+        cur.execute("""
+            INSERT INTO menu_option_usage (menu_key, option_key, option_label, use_count, last_used_at)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(menu_key, option_key) DO UPDATE SET
+                use_count = use_count + 1,
+                option_label = CASE WHEN ? != '' THEN ? ELSE option_label END,
+                last_used_at = ?
+        """, (menu_key, opt_k, option_label, now, option_label, option_label, now))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def get_menu_option_usage(db_path: str, menu_key: str) -> dict[str, int]:
+    """Retrieves usage counts for a given menu: {option_key: use_count}."""
+    if not db_path or not os.path.exists(db_path):
+        return {}
+    try:
+        conn = get_db_connection(db_path)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS menu_option_usage (
+                menu_key TEXT NOT NULL,
+                option_key TEXT NOT NULL,
+                option_label TEXT,
+                use_count INTEGER DEFAULT 1,
+                last_used_at TEXT NOT NULL,
+                PRIMARY KEY (menu_key, option_key)
+            )
+        """)
+        cur.execute("SELECT option_key, use_count FROM menu_option_usage WHERE menu_key = ? ORDER BY use_count DESC", (menu_key,))
+        rows = cur.fetchall()
+        conn.close()
+        return {r[0]: r[1] for r in rows}
+    except Exception:
+        return {}
 
 def get_or_create_host(cursor: sqlite3.Cursor) -> int:
     """Detects current desktop host details and returns its database ID."""
@@ -1544,15 +1615,29 @@ def generate_curation_verification_report(db_path: str):
             print(f"{tier_badge:<36} | {app_str:<18} | {app_sz:<15} | {unapp_str}")
 
         print("=" * 96)
-        print("\nOptions:")
-        print("  1. List Approved Folders (is_verified = 1) — [Enter # to inspect folder details & files]")
-        print("  2. List All Approved Files (Detailed file-by-file inventory)")
-        print("  3. List Unapproved Category Folders (is_verified = 0) — [Enter # to inspect pending files]")
-        print("  4. Filter Approved / Unapproved by Priority Tier (P1, P2, P3, P4)")
-        print("  5. Export Full Report (Markdown / CSV with file inventory)")
-        print("  6. Return to previous menu")
+        report_options = [
+            {"key": "1", "label": "List Approved Folders (is_verified = 1) — [Enter # to inspect folder details & files]"},
+            {"key": "2", "label": "List All Approved Files (Detailed file-by-file inventory)"},
+            {"key": "3", "label": "List Unapproved Category Folders (is_verified = 0) — [Enter # to inspect pending files]"},
+            {"key": "4", "label": "Filter Approved / Unapproved by Priority Tier (P1, P2, P3, P4)"},
+            {"key": "5", "label": "Export Full Report (Markdown / CSV with file inventory)"},
+            {"key": "6", "label": "Return to previous menu"}
+        ]
+        rep_usage = get_menu_option_usage(db_path, "curation_reports_menu")
+        sorted_rep = sorted(report_options, key=lambda x: rep_usage.get(x["key"], 0), reverse=True)
+        top_rep = sorted_rep[0]["key"] if (rep_usage and rep_usage.get(sorted_rep[0]["key"], 0) > 0) else "1"
 
-        rep_choice = input("\nSelect report option (1-6): ").strip()
+        print("\nOptions:")
+        for ro in sorted_rep:
+            cnt = rep_usage.get(ro["key"], 0)
+            badge = f" (Used {cnt}x) 🔥" if cnt > 0 and cnt == max(rep_usage.values()) else (f" (Used {cnt}x)" if cnt > 0 else "")
+            def_badge = " [Default]" if ro["key"] == top_rep and rep_usage.get(top_rep, 0) > 0 else ""
+            print(f"  {ro['key']}. {ro['label']}{badge}{def_badge}")
+
+        def_prompt = f" [Default: {top_rep}]" if (rep_usage and rep_usage.get(top_rep, 0) > 0) else ""
+        raw_rep = input(f"\nSelect report option (1-6){def_prompt}: ").strip()
+        rep_choice = raw_rep if raw_rep else (top_rep if (rep_usage and rep_usage.get(top_rep, 0) > 0) else "")
+        record_menu_usage(db_path, "curation_reports_menu", rep_choice, next((r["label"] for r in report_options if r["key"] == rep_choice), ""))
 
         if rep_choice == "6":
             break
@@ -2882,14 +2967,28 @@ def manage_priority_locations_interactive(db_path: str):
                 print(f"     ↳ 📝 {loc['description']}")
         print("-" * 80)
 
-        print("\nActions:")
-        print("  1. Add a new folder location mapping to a Priority level")
-        print("  2. Toggle Active / Inactive status of a location")
-        print("  3. Edit location Label or Description")
-        print("  4. Remove / Unmap a location")
-        print("  5. Return to previous menu")
+        loc_actions = [
+            {"key": "1", "label": "Add a new folder location mapping to a Priority level"},
+            {"key": "2", "label": "Toggle Active / Inactive status of a location"},
+            {"key": "3", "label": "Edit location Label or Description"},
+            {"key": "4", "label": "Remove / Unmap a location"},
+            {"key": "5", "label": "Return to previous menu"}
+        ]
+        loc_usage = get_menu_option_usage(db_path, "locations_manager_menu")
+        sorted_loc = sorted(loc_actions, key=lambda x: loc_usage.get(x["key"], 0), reverse=True)
+        top_loc = sorted_loc[0]["key"] if (loc_usage and loc_usage.get(sorted_loc[0]["key"], 0) > 0) else "1"
 
-        choice = input("\nSelect action (1-5): ").strip()
+        print("\nActions:")
+        for la in sorted_loc:
+            cnt = loc_usage.get(la["key"], 0)
+            badge = f" (Used {cnt}x) 🔥" if cnt > 0 and cnt == max(loc_usage.values()) else (f" (Used {cnt}x)" if cnt > 0 else "")
+            def_badge = " [Default]" if la["key"] == top_loc and loc_usage.get(top_loc, 0) > 0 else ""
+            print(f"  {la['key']}. {la['label']}{badge}{def_badge}")
+
+        def_prompt = f" [Default: {top_loc}]" if (loc_usage and loc_usage.get(top_loc, 0) > 0) else ""
+        raw_loc = input(f"\nSelect action (1-5){def_prompt}: ").strip()
+        choice = raw_loc if raw_loc else (top_loc if (loc_usage and loc_usage.get(top_loc, 0) > 0) else "")
+        record_menu_usage(db_path, "locations_manager_menu", choice, next((a["label"] for a in loc_actions if a["key"] == choice), ""))
         if choice == "1":
             print("\nSelect Priority Tier to map:")
             for p_num in range(1, 5):
@@ -3175,17 +3274,30 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 print(f"  • Sample Files:   {samples}")
                 print(f"\n  💡 Suggested Description:")
                 print(f"     \"{suggested_desc}\"")
-                print("\n  Actions:")
-                print(f"    [a] Approve description & attach app ('{detected_app}') (Mark Verified ✓)")
-                print("    [e] Edit folder name, description or attached app, apply tags & verify")
-                print("    [r] Rename folder on disk & database")
-                print("    [m] Move / Reassign to another Priority tier or parent folder")
-                print("    [s] Skip for now (remain unverified)")
-                print("    [q] Quit wizard and return to menu")
+                base_actions = [
+                    {"key": "a", "label": f"Approve description & attach app ('{detected_app}') (Mark Verified ✓)"},
+                    {"key": "e", "label": "Edit folder name, description or attached app, apply tags & verify"},
+                    {"key": "r", "label": "Rename folder on disk & database"},
+                    {"key": "m", "label": "Move / Reassign to another Priority tier or parent folder"},
+                    {"key": "s", "label": "Skip for now (remain unverified)"},
+                    {"key": "q", "label": "Quit wizard and return to menu"}
+                ]
+                w_usage = get_menu_option_usage(db_path, "wizard_action")
+                sorted_actions = sorted(base_actions, key=lambda x: w_usage.get(x["key"], 0), reverse=True)
+                top_key = sorted_actions[0]["key"] if (w_usage and w_usage.get(sorted_actions[0]["key"], 0) > 0) else "a"
 
-                action = input("\nSelect action [a/e/r/m/s/q] (Default: a): ").strip().lower()
+                print("\n  Actions:")
+                for act in sorted_actions:
+                    cnt = w_usage.get(act["key"], 0)
+                    cnt_badge = f" (Used {cnt}x) 🔥" if cnt > 0 and cnt == max(w_usage.values()) else (f" (Used {cnt}x)" if cnt > 0 else "")
+                    def_badge = " [Default]" if act["key"] == top_key else ""
+                    print(f"    [{act['key']}]{def_badge} {act['label']}{cnt_badge}")
+
+                action_prompt_keys = "/".join([act["key"] for act in sorted_actions])
+                action = input(f"\nSelect action [{action_prompt_keys}] (Default: {top_key}): ").strip().lower()
                 if not action:
-                    action = 'a'
+                    action = top_key
+                record_menu_usage(db_path, "wizard_action", action, next((a["label"] for a in base_actions if a["key"] == action), ""))
 
                 if action == 'a':
                     tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
@@ -3353,18 +3465,32 @@ def _inspect_and_edit_single_folder(item: dict, storage_root: Path, db_path: str
         cov_icon = "✅ Included" if is_cov else "❌ Missing"
         print(f"  • iDrive Backup: {cov_icon} ({cov_reason})")
 
-        print("\nActions:")
-        print("  1. Apply standard Priority tags (Priority tier with color + folder name tag)")
-        print("  2. Add / Edit folder description & required application (Stored in SQLite)")
-        print("  3. Custom tag & Finder color (Add/edit custom tag and pick color)")
-        print("  4. Move / Reassign to a different Priority Tier (e.g., Priority 2 -> Priority 3)")
-        print("  5. Propagate current tags to all subfolders in this subtree")
-        print("  6. Remove / Clear all tags from this folder")
-        print("  7. Launch Curation Wizard on this folder's subdirectories (Scan & Triage)")
-        print("  8. Add / Sync this folder to iDrive backup set (.plist)")
-        print("  9. Return to folder list")
+        level1_actions = [
+            {"key": "1", "label": "Apply standard Priority tags (Priority tier with color + folder name tag)"},
+            {"key": "2", "label": "Add / Edit folder description & required application (Stored in SQLite)"},
+            {"key": "3", "label": "Custom tag & Finder color (Add/edit custom tag and pick color)"},
+            {"key": "4", "label": "Move / Reassign to a different Priority Tier (e.g., Priority 2 -> Priority 3)"},
+            {"key": "5", "label": "Propagate current tags to all subfolders in this subtree"},
+            {"key": "6", "label": "Remove / Clear all tags from this folder"},
+            {"key": "7", "label": "Launch Curation Wizard on this folder's subdirectories (Scan & Triage)"},
+            {"key": "8", "label": "Add / Sync this folder to iDrive backup set (.plist)"},
+            {"key": "9", "label": "Return to folder list"}
+        ]
+        l1_usage = get_menu_option_usage(db_path, "level1_inspect_menu")
+        sorted_l1 = sorted(level1_actions, key=lambda x: l1_usage.get(x["key"], 0), reverse=True)
+        top_l1 = sorted_l1[0]["key"] if (l1_usage and l1_usage.get(sorted_l1[0]["key"], 0) > 0) else "2"
 
-        sub_choice = input("\nSelect action (1-9): ").strip()
+        print("\nActions:")
+        for la in sorted_l1:
+            cnt = l1_usage.get(la["key"], 0)
+            badge = f" (Used {cnt}x) 🔥" if cnt > 0 and cnt == max(l1_usage.values()) else (f" (Used {cnt}x)" if cnt > 0 else "")
+            def_badge = " [Default]" if la["key"] == top_l1 and l1_usage.get(top_l1, 0) > 0 else ""
+            print(f"  {la['key']}. {la['label']}{badge}{def_badge}")
+
+        def_prompt = f" [Default: {top_l1}]" if (l1_usage and l1_usage.get(top_l1, 0) > 0) else ""
+        raw_l1 = input(f"\nSelect action (1-9){def_prompt}: ").strip()
+        sub_choice = raw_l1 if raw_l1 else (top_l1 if (l1_usage and l1_usage.get(top_l1, 0) > 0) else "")
+        record_menu_usage(db_path, "level1_inspect_menu", sub_choice, next((a["label"] for a in level1_actions if a["key"] == sub_choice), ""))
 
         if sub_choice == "1":
             tier_info = PRIORITY_TIER_CONFIG.get(item["parent_tier"].lower(), {"tag": item["parent_tier"], "color": item["tier_color"]})
@@ -4060,20 +4186,35 @@ def tag_review_priority_folders_interactive(db_path: str):
 
         print("-" * 98)
         print(f"Total Folders: {len(level1_items)}")
-        print("\nOptions:")
-        print(f"  • Enter folder number (1-{len(level1_items)}) to inspect & edit tags / color / description / tier")
-        print("  • 'v' / 'status' - Curation & Verification Report (Separated Approved vs Unapproved folders)")
-        print("  • 'loc' - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)")
-        print("  • 'idrive' - Audit iDrive backup inclusion (Check Priority 1 & 2 folders in iDrive)")
-        print("  • 'w' - Launch Sequential Curation Wizard (Triage subfolders across locations)")
-        print("  • 'ext' - View File Extensions & Required Applications Catalog (Database library)")
-        print("  • 'p1'-'p4' - Edit description of a top-level Priority tier (Priority 1-4)")
-        print("  • 'a' - Auto-tag untagged folders with parent Priority & category")
-        print("  • 'reset-tags' - Reset subfolder tags & verification (Preserve level-1, clear level-2+ tags)")
-        print("  • 'r' - Refresh view from filesystem")
-        print("  • 'b' - Return to main menu")
+        cmd_options = [
+            {"key": "w", "label": "'w' - Launch Sequential Curation Wizard (Triage subfolders across locations)"},
+            {"key": "v", "label": "'v' / 'status' - Curation & Verification Report (Separated Approved vs Unapproved folders)"},
+            {"key": "loc", "label": "'loc' - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)"},
+            {"key": "idrive", "label": "'idrive' - Audit iDrive backup inclusion (Check Priority 1 & 2 folders in iDrive)"},
+            {"key": "ext", "label": "'ext' - View File Extensions & Required Applications Catalog (Database library)"},
+            {"key": "a", "label": "'a' - Auto-tag untagged folders with parent Priority & category"},
+            {"key": "reset-tags", "label": "'reset-tags' - Reset subfolder tags & verification (Preserve level-1, clear level-2+ tags)"},
+            {"key": "r", "label": "'r' - Refresh view from filesystem"},
+            {"key": "b", "label": "'b' - Return to main menu"}
+        ]
+        review_usage = get_menu_option_usage(db_path, "priority_review_menu")
+        sorted_cmds = sorted(cmd_options, key=lambda x: review_usage.get(x["key"], 0), reverse=True)
+        top_cmd = sorted_cmds[0]["key"] if (review_usage and review_usage.get(sorted_cmds[0]["key"], 0) > 0) else None
 
-        action_choice = input("\nSelect option or folder number: ").strip().lower()
+        print("\nCommands:")
+        for c in sorted_cmds:
+            cnt = review_usage.get(c["key"], 0)
+            badge = f" (Used {cnt}x) 🔥" if cnt > 0 and cnt == max(review_usage.values()) else (f" (Used {cnt}x)" if cnt > 0 else "")
+            def_badge = " [Default]" if c["key"] == top_cmd else ""
+            print(f"  • {c['label']}{badge}{def_badge}")
+        print(f"  • Enter folder number (1-{len(level1_items)}) to inspect & edit tags / color / description / tier")
+        print("  • 'p1'-'p4' - Edit description of a top-level Priority tier (Priority 1-4)")
+
+        def_prompt = f" [Default: {top_cmd}]" if top_cmd else ""
+        raw_action = input(f"\nSelect option or folder number{def_prompt}: ").strip().lower()
+        action_choice = raw_action if raw_action else (top_cmd if top_cmd else "")
+        if action_choice:
+            record_menu_usage(db_path, "priority_review_menu", action_choice, next((c["label"] for c in cmd_options if c["key"] == action_choice), ""))
 
         if action_choice == 'b':
             break
@@ -4890,21 +5031,35 @@ def main():
         print("=" * 55)
         print(f"  📍 Database: {db_file}")
         print("=" * 55)
-        print("1. Tagging Review, Curation Wizard & Subfolder Triage")
-        print("2. Scan & index directory (Read-only catalog & tag sync)")
-        print("3. View hosts & storage overview")
-        print("4. View top-level folder scans report")
-        print("5. Generate report of largest files")
-        print("6. Prune deleted records from DB (Sync with disk)")
-        print("7. List all active tags (Directory & File)")
-        print("8. Tag & sync folders (Priority Tiers, Finder Colors & DB)")
-        print("9. Search files by tag (Finder & Manual)")
-        print("10. Segregate non-media files from folder (On-demand migration)")
-        print("11. Detect & clean duplicate files (Interactive duplicate resolver)")
-        print("12. View Curation & Verification Report (Approved vs Unapproved folders)")
-        print("13. Exit")
+        main_options = [
+            {"key": "1", "label": "Tagging Review, Curation Wizard & Subfolder Triage"},
+            {"key": "2", "label": "Scan & index directory (Read-only catalog & tag sync)"},
+            {"key": "3", "label": "View hosts & storage overview"},
+            {"key": "4", "label": "View top-level folder scans report"},
+            {"key": "5", "label": "Generate report of largest files"},
+            {"key": "6", "label": "Prune deleted records from DB (Sync with disk)"},
+            {"key": "7", "label": "List all active tags (Directory & File)"},
+            {"key": "8", "label": "Tag & sync folders (Priority Tiers, Finder Colors & DB)"},
+            {"key": "9", "label": "Search files by tag (Finder & Manual)"},
+            {"key": "10", "label": "Segregate non-media files from folder (On-demand migration)"},
+            {"key": "11", "label": "Detect & clean duplicate files (Interactive duplicate resolver)"},
+            {"key": "12", "label": "View Curation & Verification Report (Approved vs Unapproved folders)"},
+            {"key": "13", "label": "Exit"}
+        ]
+        main_usage = get_menu_option_usage(db_file, "main_menu")
+        sorted_main = sorted(main_options, key=lambda x: main_usage.get(x["key"], 0), reverse=True)
+        top_main = sorted_main[0]["key"] if (main_usage and main_usage.get(sorted_main[0]["key"], 0) > 0) else "1"
 
-        choice = input("\nSelect option (1-13): ").strip()
+        for opt in sorted_main:
+            cnt = main_usage.get(opt["key"], 0)
+            badge = f" (Used {cnt}x) 🔥" if cnt > 0 and cnt == max(main_usage.values()) else (f" (Used {cnt}x)" if cnt > 0 else "")
+            def_badge = " [Default]" if opt["key"] == top_main and main_usage.get(top_main, 0) > 0 else ""
+            print(f"{opt['key']:>2}. {opt['label']}{badge}{def_badge}")
+
+        def_prompt = f" [Default: {top_main}]" if (main_usage and main_usage.get(top_main, 0) > 0) else ""
+        raw_choice = input(f"\nSelect option (1-13){def_prompt}: ").strip()
+        choice = raw_choice if raw_choice else (top_main if (main_usage and main_usage.get(top_main, 0) > 0) else "")
+        record_menu_usage(db_file, "main_menu", choice, next((o["label"] for o in main_options if o["key"] == choice), ""))
 
         if choice == "1":
             tag_review_priority_folders_interactive(db_file)
