@@ -3067,10 +3067,38 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
 
     is_match = True
     match_msg = f"✓ {top_pct:.0f}% {top_cat} (Consistent with {tier_name} / {l1_name})"
-    suggested_move = None
+    # Check for unusable / discontinued applications
+    has_unusable_app = False
+    unusable_file_count = 0
+    for ext, cnt in ext_counts.items():
+        if ext != '(no ext)':
+            info = db_ext_map.get(ext.lower(), {})
+            p_app = (info.get("primary_app") or "").lower()
+            m_app = (info.get("mac_app") or "").lower()
+            desc = (info.get("description") or "").lower()
+            is_unusable = (
+                "discontinued" in p_app
+                or "discontinued" in desc
+                or "unusable" in m_app
+                or "archival backup only" in m_app
+                or "legacy windows vm" in m_app
+                or "no modern app" in m_app
+            )
+            if is_unusable:
+                unusable_file_count += cnt
 
-    # Check Tier 1 Mismatches:
-    if "priority 1" in t_lower:
+    # Enforce Rule: All files in Priority 1 must have an applicable app to open them directly.
+    # If not, suggest moving to Priority 2 / Data or Priority 2 / Legacy / Windows Data.
+    if "priority 1" in t_lower and (unusable_file_count > 0 or "discontinued" in detected_app.lower() or "unusable" in detected_app.lower()):
+        has_unusable_app = True
+        is_match = False
+        suggested_move = "Priority 2 / Data or Priority 2 / Legacy / Windows Data"
+        match_msg = (
+            f"⚠️ Priority 1 Rule Violation: Files cannot be opened directly ({unusable_file_count}/{total_non_empty} files in discontinued/unusable format)! "
+            f"Priority 1 requires active, directly openable applications. Recommended: Move to Priority 2 / Data or Priority 2 / Legacy / Windows Data"
+        )
+    # Check Tier 1 Category Mismatches:
+    elif "priority 1" in t_lower:
         if top_cat in ["Video", "RAW Photography"] and top_pct >= 50:
             is_match = False
             suggested_move = "Priority 4 (Media Staging & Photos)"
@@ -3105,7 +3133,9 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
         "category_percent": top_pct,
         "is_match": is_match,
         "category_match_msg": match_msg,
-        "suggested_move_tier": suggested_move
+        "suggested_move_tier": suggested_move,
+        "has_unusable_app": has_unusable_app,
+        "unusable_file_count": unusable_file_count
     }
 
 def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name: str, stats: dict, ft_info: dict | None = None) -> str:
@@ -3620,14 +3650,25 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 ]
                 if mystery_files:
                     base_actions.append({"key": "i", "label": f"Inspect & analyze {len(mystery_files)} mystery / extensionless files (Magic signatures & hex dump)"})
+                if ft_info.get("has_unusable_app") and "priority 1" in tier_name.lower():
+                    m_label = "Move to 'Priority 2 / Data' or 'Priority 2 / Legacy / Windows Data' (Recommended: Cannot be opened directly)"
+                elif ft_info.get("suggested_move_tier"):
+                    m_label = f"Move to {ft_info['suggested_move_tier']} (Recommended)"
+                else:
+                    m_label = "Move / Reassign to another Priority tier or parent folder"
+
                 base_actions.extend([
-                    {"key": "m", "label": "Move / Reassign to another Priority tier or parent folder"},
+                    {"key": "m", "label": m_label},
                     {"key": "s", "label": "Skip for now (remain unverified)"},
                     {"key": "q", "label": "Quit wizard and return to menu"}
                 ])
                 w_usage = get_menu_option_usage(db_path, "wizard_action")
-                sorted_actions = sorted(base_actions, key=lambda x: w_usage.get(x["key"], 0), reverse=True)
-                top_key = sorted_actions[0]["key"] if (w_usage and w_usage.get(sorted_actions[0]["key"], 0) > 0) else "a"
+                if not ft_info.get("is_match", True):
+                    top_key = "m"
+                    sorted_actions = sorted(base_actions, key=lambda x: (x["key"] != "m", -w_usage.get(x["key"], 0)))
+                else:
+                    sorted_actions = sorted(base_actions, key=lambda x: w_usage.get(x["key"], 0), reverse=True)
+                    top_key = sorted_actions[0]["key"] if (w_usage and w_usage.get(sorted_actions[0]["key"], 0) > 0) else "a"
 
                 print("\n  Actions:")
                 for act in sorted_actions:
@@ -3694,28 +3735,84 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         continue
                 elif action == 'm':
                     active_locs = get_priority_locations(db_path, active_only=True)
-                    print("\nSelect Target Location for move:")
-                    for l_idx, al in enumerate(active_locs, 1):
-                        p_info = PRIORITY_TIER_CONFIG.get(al["priority_tier"].lower(), {"color": 0})
-                        p_em = FINDER_COLOR_EMOJI.get(p_info["color"], "⚪")
-                        print(f"  {l_idx}: {p_em} {al['priority_tier'].title()} - {al['label']} ({al['path_str']})")
-                    l_sel = input(f"Select location (1-{len(active_locs)}) or 'c' to cancel: ").strip()
-                    if not l_sel.isdigit() or int(l_sel) < 1 or int(l_sel) > len(active_locs):
-                        print("Move cancelled.")
-                        continue
-                    
-                    target_loc = active_locs[int(l_sel) - 1]
-                    target_tier_dir = target_loc["path"]
-                    target_l1_subdirs = [s for s in sorted(target_tier_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')]
-                    print(f"\nSelect target category in {target_loc['label']}:")
-                    for t_idx, tl1 in enumerate(target_l1_subdirs, 1):
-                        print(f"  {t_idx}: {tl1.name}")
-                    tl1_sel = input(f"Select category (1-{len(target_l1_subdirs)}) or 'c' to cancel: ").strip()
-                    if not tl1_sel.isdigit() or int(tl1_sel) < 1 or int(tl1_sel) > len(target_l1_subdirs):
-                        print("Move cancelled.")
-                        continue
-                    
-                    target_l1_dest = target_l1_subdirs[int(tl1_sel) - 1]
+                    target_loc = None
+                    target_l1_dest = None
+                    newly_created_l1 = False
+                    target_cat_name = ""
+
+                    # If this folder triggered the Priority 1 unusable app rule, provide quick archival targets:
+                    if ft_info.get("has_unusable_app") and "priority 1" in tier_name.lower():
+                        p2_loc = next((al for al in active_locs if al["priority_tier"].lower() == "priority 2"), None)
+                        print("\n" + "=" * 80)
+                        print("  RECOMMENDED ARCHIVAL RELOCATION (Priority 1 Rule)")
+                        print("  Files in this folder cannot be opened directly and must be archived in Priority 2.")
+                        print("=" * 80)
+                        print("  [1] Move to 'Priority 2 ▸ Data' (Recommended)")
+                        print("  [2] Move to 'Priority 2 ▸ Legacy / Windows Data' (Recommended Archival)")
+                        print("  [3] Choose another custom destination location & category")
+                        print("  [c] Cancel move")
+                        m_rec_choice = input("\nSelect relocation target [1/2/3/c] (Default: 1): ").strip().lower()
+                        if not m_rec_choice:
+                            m_rec_choice = "1"
+                        if m_rec_choice == 'c':
+                            print("Move cancelled.")
+                            continue
+                        elif m_rec_choice == '1' and p2_loc:
+                            target_loc = p2_loc
+                            target_tier_dir = target_loc["path"]
+                            target_cat_name = "Data"
+                            target_l1_dest = target_tier_dir / target_cat_name
+                            if not target_l1_dest.exists():
+                                target_l1_dest.mkdir(parents=True, exist_ok=True)
+                                newly_created_l1 = True
+                        elif m_rec_choice == '2' and p2_loc:
+                            target_loc = p2_loc
+                            target_tier_dir = target_loc["path"]
+                            target_cat_name = "Legacy / Windows Data"
+                            target_l1_dest = target_tier_dir / target_cat_name
+                            if not target_l1_dest.exists():
+                                target_l1_dest.mkdir(parents=True, exist_ok=True)
+                                newly_created_l1 = True
+
+                    # Otherwise, or if user chose [3] Custom:
+                    if not target_loc or not target_l1_dest:
+                        print("\nSelect Target Location for move:")
+                        for l_idx, al in enumerate(active_locs, 1):
+                            p_info = PRIORITY_TIER_CONFIG.get(al["priority_tier"].lower(), {"color": 0})
+                            p_em = FINDER_COLOR_EMOJI.get(p_info["color"], "⚪")
+                            print(f"  {l_idx}: {p_em} {al['priority_tier'].title()} - {al['label']} ({al['path_str']})")
+                        l_sel = input(f"Select location (1-{len(active_locs)}) or 'c' to cancel: ").strip()
+                        if not l_sel.isdigit() or int(l_sel) < 1 or int(l_sel) > len(active_locs):
+                            print("Move cancelled.")
+                            continue
+                        
+                        target_loc = active_locs[int(l_sel) - 1]
+                        target_tier_dir = target_loc["path"]
+                        target_l1_subdirs = [s for s in sorted(target_tier_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')]
+                        print(f"\nSelect target category in {target_loc['label']}:")
+                        for t_idx, tl1 in enumerate(target_l1_subdirs, 1):
+                            print(f"  {t_idx}: {tl1.name}")
+                        print(f"  {len(target_l1_subdirs) + 1}: Create new category folder...")
+                        tl1_sel = input(f"Select category (1-{len(target_l1_subdirs) + 1}) or 'c' to cancel: ").strip()
+                        if tl1_sel == str(len(target_l1_subdirs) + 1):
+                            new_cat_input = input("Enter new category name: ").strip()
+                            if not new_cat_input:
+                                print("Move cancelled.")
+                                continue
+                            target_cat_name = new_cat_input
+                            target_l1_dest = target_tier_dir / target_cat_name
+                            if not target_l1_dest.exists():
+                                target_l1_dest.mkdir(parents=True, exist_ok=True)
+                                newly_created_l1 = True
+                        elif tl1_sel.isdigit() and 1 <= int(tl1_sel) <= len(target_l1_subdirs):
+                            target_l1_dest = target_l1_subdirs[int(tl1_sel) - 1]
+                            target_cat_name = target_l1_dest.name
+                        else:
+                            print("Move cancelled.")
+                            continue
+
+                    if not target_cat_name:
+                        target_cat_name = target_l1_dest.name
                     target_dest_path = target_l1_dest / sub_dir.name
                     if target_dest_path.exists():
                         print(f"\n[Error] Destination '{target_dest_path}' already exists!")
@@ -3738,11 +3835,18 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                             c_conn.close()
 
                         new_tier_info = PRIORITY_TIER_CONFIG[target_loc["priority_tier"].lower()]
-                        new_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_l1_dest.name, 0), (sub_dir.name, 0)]
+                        if newly_created_l1:
+                            l1_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_cat_name, 0)]
+                            set_finder_tags(target_l1_dest, l1_tags)
+                            _sync_directory_tags_to_db(target_l1_dest, l1_tags, db_path)
+                            l1_desc = f"Archived {target_cat_name} assets and legacy applications" if "legacy" in target_cat_name.lower() else f"Secondary {target_cat_name} assets"
+                            _set_directory_description_in_db(target_l1_dest, l1_desc, db_path, is_verified=True, app_needed=detected_app)
+
+                        new_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_cat_name, 0), (sub_dir.name, 0)]
                         set_finder_tags(target_dest_path, new_tags)
                         _sync_directory_tags_to_db(target_dest_path, new_tags, db_path)
                         _set_directory_description_in_db(target_dest_path, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
-                        print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' under {target_loc['label']} / {target_l1_dest.name}.")
+                        print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' under {target_loc['label']} / {target_cat_name}.")
                         total_curated += 1
                         break
                 elif action == 'i' and mystery_files:
