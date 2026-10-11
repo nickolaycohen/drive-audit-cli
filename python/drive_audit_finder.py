@@ -3598,6 +3598,71 @@ def reset_subfolder_tags_and_verification(db_path: str, storage_root: Path | Non
         print(f"  • Removed {total_deleted_dt:,} directory tags and {total_deleted_ft:,} file tags from SQLite")
         print(f"  • Reset {total_reset_dirs:,} subfolders to Unverified (ready for Curation Wizard)")
 
+def apply_hierarchical_tags_for_path(
+    target_path: Path,
+    target_loc: dict,
+    db_path: str,
+    leaf_desc: str | None = None,
+    leaf_app: str | None = None
+) -> None:
+    """
+    Applies macOS Finder color & category tags and SQLite metadata for EACH level in the
+    hierarchy from the target location root down to the target folder path.
+    """
+    loc_path = target_loc["path"]
+    p_tier_name = target_loc.get("priority_tier", "priority 2").lower()
+    p_info = PRIORITY_TIER_CONFIG.get(p_tier_name, {"tag": "Priority 2", "color": 4})
+    p_em = FINDER_COLOR_EMOJI.get(p_info.get("color", 4), "⚪")
+    tier_tag = p_info["tag"]
+    tier_color = p_info["color"]
+
+    try:
+        rel = target_path.resolve().relative_to(loc_path.resolve())
+        parts = rel.parts
+        base_dir = loc_path
+    except Exception:
+        parts = target_path.parts[1:]
+        base_dir = Path(target_path.anchor)
+
+    print("\n  Applying hierarchical Finder tags & SQLite metadata:")
+    curr = base_dir
+    for i, part in enumerate(parts):
+        curr = curr / part
+        if not curr.exists():
+            continue
+        is_leaf = (i == len(parts) - 1)
+        
+        # Build tags for this specific level: Tier Tag (with color) + all category ancestors down to this level
+        level_tags = [(tier_tag, tier_color)]
+        seen = {tier_tag}
+        for p in parts[:i+1]:
+            clean_p = p.strip()
+            if clean_p and clean_p not in seen:
+                seen.add(clean_p)
+                level_tags.append((clean_p, 0))
+
+        # Apply native macOS Finder tags & SQLite sync
+        set_finder_tags(curr, level_tags)
+        _sync_directory_tags_to_db(curr, level_tags, db_path)
+
+        # Update description & verification status in SQLite
+        if is_leaf:
+            desc = leaf_desc or f"Curated {curr.name} directory"
+            app = leaf_app
+            lvl_name = f"Leaf folder '{curr.name}'"
+        else:
+            p_lower = str(curr).lower()
+            if any(w in p_lower for w in ["legacy", "archive", "windows"]):
+                desc = f"Archived {curr.name} assets and legacy application containers"
+            else:
+                desc = f"{curr.name} category container"
+            app = None
+            lvl_name = f"Level {i+1} parent '{curr.name}'"
+
+        _set_directory_description_in_db(curr, desc, db_path, is_verified=True, app_needed=app)
+        tag_labels = [t[0] for t in level_tags]
+        print(f"    ✓ {p_em} {lvl_name} tagged with: {tag_labels}")
+
 def _handle_custom_relocation_target(
     raw_path_input: str | None,
     sub_dir: Path,
@@ -3775,11 +3840,6 @@ def _handle_custom_relocation_target(
         for d in dirs_to_create:
             d.mkdir(parents=True, exist_ok=True)
             print(f"  ✓ Created destination directory: {d}")
-            d_tags = [(p_info["tag"], p_info["color"]), (d.name, 0)]
-            set_finder_tags(d, d_tags)
-            _sync_directory_tags_to_db(d, d_tags, db_path)
-            d_desc = f"Archived {d.name} assets and legacy data" if any(w in str(d).lower() for w in ["legacy", "archive", "windows"]) else f"{d.name} category container"
-            _set_directory_description_in_db(d, d_desc, db_path, is_verified=True, app_needed=detected_app)
 
         # Ensure parent exists
         parent_to_ensure.mkdir(parents=True, exist_ok=True)
@@ -3802,22 +3862,8 @@ def _handle_custom_relocation_target(
             c_conn.commit()
             c_conn.close()
 
-        # Tag destination folder and mark verified
-        dest_tags = [(p_info["tag"], p_info["color"])]
-        for part in rel_parts:
-            dest_tags.append((part, 0))
-        dest_tags.append((target_dest_path.name, 0))
-
-        seen_tags = set()
-        unique_tags = []
-        for t_name, t_col in dest_tags:
-            if t_name not in seen_tags:
-                seen_tags.add(t_name)
-                unique_tags.append((t_name, t_col))
-
-        set_finder_tags(target_dest_path, unique_tags)
-        _sync_directory_tags_to_db(target_dest_path, unique_tags, db_path)
-        _set_directory_description_in_db(target_dest_path, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
+        # Apply hierarchical tags and metadata for each level from root to target
+        apply_hierarchical_tags_for_path(target_dest_path, target_loc, db_path, suggested_desc, detected_app)
 
         print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' → '{target_dest_path}' under {target_loc['label']} / {target_cat_name}.")
         return True
@@ -4103,7 +4149,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         print("  • Backup Protection:  Priority 2 preserves iDrive backup inclusion for eventual reference.")
                         print("=" * 80)
                         print("  [1] Move to 'Priority 2 ▸ Data' on LaCie (Recommended)")
-                        print("  [2] Move to 'Priority 2 ▸ Legacy / Windows Data' on LaCie (Recommended Archival)")
+                        print("  [2] Move to 'Priority 2 ▸ Data / Legacy / Windows' on LaCie (Recommended Archival)")
                         print("  [3] Choose standard destination location & category")
                         print("  [p] Enter custom target path directly (creates destination folders if needed)")
                         print("  [c] Cancel move")
@@ -4124,8 +4170,8 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         elif m_rec_choice == '2' and p2_loc:
                             target_loc = p2_loc
                             target_tier_dir = target_loc["path"]
-                            target_cat_name = "Legacy / Windows Data"
-                            target_l1_dest = target_tier_dir / target_cat_name
+                            target_cat_name = "Data / Legacy / Windows"
+                            target_l1_dest = target_tier_dir / "Data" / "Legacy" / "Windows"
                             if not target_l1_dest.exists():
                                 target_l1_dest.mkdir(parents=True, exist_ok=True)
                                 newly_created_l1 = True
@@ -4237,20 +4283,12 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                             c_conn.commit()
                             c_conn.close()
 
-                        new_tier_info = PRIORITY_TIER_CONFIG[target_loc["priority_tier"].lower()]
-                        if newly_created_l1:
-                            l1_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_cat_name, 0)]
-                            set_finder_tags(target_l1_dest, l1_tags)
-                            _sync_directory_tags_to_db(target_l1_dest, l1_tags, db_path)
-                            l1_desc = f"Archived {target_cat_name} assets and legacy applications" if "legacy" in target_cat_name.lower() else f"Secondary {target_cat_name} assets"
-                            _set_directory_description_in_db(target_l1_dest, l1_desc, db_path, is_verified=True, app_needed=detected_app)
-
-                        new_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_cat_name, 0), (target_dest_path.name, 0)]
-                        set_finder_tags(target_dest_path, new_tags)
-                        _sync_directory_tags_to_db(target_dest_path, new_tags, db_path)
                         if target_dest_path.name != sub_dir.name:
                             suggested_desc = suggest_folder_description(target_dest_path.name, target_cat_name, target_loc["priority_tier"], stats, ft_info)
-                        _set_directory_description_in_db(target_dest_path, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
+
+                        # Apply hierarchical tags and metadata for each level from root to target
+                        apply_hierarchical_tags_for_path(target_dest_path, target_loc, db_path, suggested_desc, detected_app)
+
                         print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' → '{target_dest_path.name}' under {target_loc['label']} / {target_cat_name}.")
                         total_curated += 1
                         break
