@@ -998,8 +998,15 @@ def show_hosts_summary(db_path: str):
     print("-" * 75)
     for host, os_name, ip, count, size in rows:
         gb = (size or 0) / (1024**3)
-        print(f"{host:<20} | {os_name or 'N/A':<10} | {ip or 'N/A':<15} | {count or 0:<8} | {gb:.2f} GB")
     print("=" * 75)
+
+    bench_prompt = input("\nRun live drive performance & I/O benchmark across mounted volumes? (y/N): ").strip().lower()
+    if bench_prompt == 'y':
+        try:
+            import benchmark_drives
+            benchmark_drives.run_benchmark_interactive()
+        except ImportError:
+            print("\n[Notice] benchmark_drives.py not found in working directory.")
 
 def generate_top_level_scans_report(db_path: str):
     """Generates a detailed breakdown report for each top-level scanned root folder."""

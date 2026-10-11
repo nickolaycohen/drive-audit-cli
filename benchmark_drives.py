@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""
+benchmark_drives.py — Drive Performance & I/O Benchmark Utility
+===============================================================
+Measures direct, uncached sequential read and write throughput (MB/s)
+for attached storage volumes on macOS using low-level direct I/O
+(fcntl.F_NOCACHE) to bypass the OS buffer cache.
+
+Usage:
+  python3 benchmark_drives.py                  # Benchmark all mounted local drives
+  python3 benchmark_drives.py --target /Volumes/LaCie
+  python3 benchmark_drives.py --size-mb 128    # Use 128 MB test file (default: 256 MB)
+  python3 benchmark_drives.py --quick          # 64 MB quick test
+  python3 benchmark_drives.py --json           # Machine-readable JSON output
+"""
+
+import os
+import sys
+import time
+import fcntl
+import argparse
+import subprocess
+import json
+import shutil
+from typing import Dict, List, Optional, Tuple
+
+# macOS fcntl command to disable Unified Buffer Cache (UBC)
+# Defined in sys/fcntl.h: #define F_NOCACHE 48
+F_NOCACHE = getattr(fcntl, 'F_NOCACHE', 48)
+
+CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB chunk size
+
+
+def get_diskutil_info(mount_point: str) -> Dict[str, str]:
+    """Retrieves disk hardware and filesystem metadata via macOS diskutil."""
+    info = {
+        "volume_name": os.path.basename(mount_point) or "Root",
+        "device_node": "Unknown",
+        "protocol": "Internal",
+        "solid_state": "Unknown",
+        "filesystem": "Unknown",
+        "total_gb": 0.0,
+        "free_gb": 0.0,
+    }
+
+    try:
+        statvfs = os.statvfs(mount_point)
+        info["total_gb"] = round((statvfs.f_frsize * statvfs.f_blocks) / (1024 ** 3), 1)
+        info["free_gb"] = round((statvfs.f_frsize * statvfs.f_bavail) / (1024 ** 3), 1)
+    except Exception:
+        pass
+
+    try:
+        proc = subprocess.run(
+            ["diskutil", "info", mount_point],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("Device Identifier:"):
+                    info["device_node"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Protocol:"):
+                    info["protocol"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Solid State:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val.lower() == "yes":
+                        info["solid_state"] = "SSD"
+                    elif val.lower() == "no":
+                        info["solid_state"] = "HDD"
+                    else:
+                        info["solid_state"] = "HDD" if "rugged" in mount_point.lower() or "lacie" in mount_point.lower() else "HDD/Ext"
+                elif line.startswith("Device / Media Name:"):
+                    mname = line.split(":", 1)[1].strip()
+                    if "rugged" in mname.lower() and info["solid_state"] in ("Unknown", "Info not available"):
+                        info["solid_state"] = "HDD"
+                elif line.startswith("Type (Bundle):"):
+                    info["filesystem"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Volume Name:"):
+                    info["volume_name"] = line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+
+    return info
+
+
+def benchmark_volume(mount_point: str, test_size_bytes: int) -> Dict[str, any]:
+    """
+    Performs direct uncached write and read throughput tests on a mount point.
+    Returns a dictionary of metrics.
+    """
+    info = get_diskutil_info(mount_point)
+    result = {
+        "mount_point": mount_point,
+        "volume_name": info["volume_name"],
+        "device_node": info["device_node"],
+        "protocol": info["protocol"],
+        "media_type": info["solid_state"],
+        "total_gb": info["total_gb"],
+        "free_gb": info["free_gb"],
+        "test_size_mb": round(test_size_bytes / (1024 * 1024), 1),
+        "write_mb_s": None,
+        "read_mb_s": None,
+        "status": "OK",
+        "error": None,
+    }
+
+    # Generate pseudo-random test pattern to prevent inline hardware compression from skewing results
+    pattern = os.urandom(min(CHUNK_SIZE, test_size_bytes))
+
+    test_file = os.path.join(mount_point, f".disk_benchmark_test_{os.getpid()}_{int(time.time())}.tmp")
+
+    # If the root of the volume isn't directly writable, try a temporary fallback folder (e.g. user home for /)
+    if mount_point == "/":
+        test_file = os.path.expanduser(f"~/.disk_benchmark_test_{os.getpid()}_{int(time.time())}.tmp")
+
+    fd = None
+    try:
+        # Check free disk space before writing
+        free_bytes = 0
+        try:
+            statvfs = os.statvfs(mount_point)
+            free_bytes = statvfs.f_frsize * statvfs.f_bavail
+        except Exception:
+            pass
+
+        if free_bytes > 0 and free_bytes < (test_size_bytes * 2):
+            result["status"] = "Skipped (Insufficient space)"
+            return result
+
+        # ==========================================
+        # 1. DIRECT WRITE BENCHMARK
+        # ==========================================
+        bytes_to_write = test_size_bytes
+        fd = os.open(test_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+
+        # Disable cache on macOS
+        try:
+            fcntl.fcntl(fd, F_NOCACHE, 1)
+        except Exception:
+            pass
+
+        start_write = time.perf_counter()
+        written = 0
+        while written < bytes_to_write:
+            chunk = pattern[:min(CHUNK_SIZE, bytes_to_write - written)]
+            os.write(fd, chunk)
+            written += len(chunk)
+
+        # Force physical sync to storage medium
+        os.fsync(fd)
+        write_duration = time.perf_counter() - start_write
+        os.close(fd)
+        fd = None
+
+        if write_duration > 0:
+            result["write_mb_s"] = round((written / (1024 * 1024)) / write_duration, 1)
+
+        # ==========================================
+        # 2. DIRECT READ BENCHMARK
+        # ==========================================
+        fd = os.open(test_file, os.O_RDONLY)
+
+        # Disable read cache on macOS
+        try:
+            fcntl.fcntl(fd, F_NOCACHE, 1)
+        except Exception:
+            pass
+
+        start_read = time.perf_counter()
+        read_bytes = 0
+        while read_bytes < bytes_to_write:
+            to_read = min(CHUNK_SIZE, bytes_to_write - read_bytes)
+            data = os.read(fd, to_read)
+            if not data:
+                break
+            read_bytes += len(data)
+
+        read_duration = time.perf_counter() - start_read
+        os.close(fd)
+        fd = None
+
+        if read_duration > 0:
+            result["read_mb_s"] = round((read_bytes / (1024 * 1024)) / read_duration, 1)
+
+    except PermissionError:
+        result["status"] = "Read-only / Protected"
+    except OSError as e:
+        if "Read-only file system" in str(e) or e.errno == 30:
+            result["status"] = "Read-only volume"
+        else:
+            result["status"] = f"Error ({e})"
+            result["error"] = str(e)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        if os.path.exists(test_file):
+            try:
+                os.remove(test_file)
+            except Exception:
+                pass
+
+    return result
+
+
+def discover_candidate_volumes() -> List[str]:
+    """Finds all mounted non-virtual local volumes."""
+    candidates = ["/"]
+    volumes_dir = "/Volumes"
+    if os.path.exists(volumes_dir):
+        for entry in sorted(os.listdir(volumes_dir)):
+            full_path = os.path.join(volumes_dir, entry)
+            # Skip hidden, symlinks, or special volumes like .timemachine
+            if entry.startswith(".") or not os.path.isdir(full_path):
+                continue
+            if os.path.islink(full_path):
+                continue
+            # Skip installer DMGs or known read-only mounts if obvious
+            if entry in ("Antigravity", "Recovery"):
+                continue
+            candidates.append(full_path)
+    return candidates
+
+
+def print_table(results: List[Dict[str, any]]):
+    """Prints a styled terminal table of benchmark results."""
+    print("\n" + "=" * 96)
+    print("                      STORAGE DRIVES PERFORMANCE BENCHMARK                      ")
+    print("                    (Direct Uncached Sequential I/O via F_NOCACHE)              ")
+    print("=" * 96)
+    print(f"{'Volume / Mount Point':<26} | {'Media':<6} | {'Interface':<12} | {'Write Speed':<14} | {'Read Speed':<14} | {'Free Space'}")
+    print("-" * 96)
+
+    baseline_speed = None
+    for r in results:
+        vol_label = r["volume_name"]
+        if len(vol_label) > 24:
+            vol_label = vol_label[:21] + "..."
+
+        media = r.get("media_type") or "N/A"
+        protocol = r.get("protocol") or "Internal"
+
+        if r["status"] == "OK":
+            w_str = f"{r['write_mb_s']:,} MB/s" if r["write_mb_s"] else "N/A"
+            r_str = f"{r['read_mb_s']:,} MB/s" if r["read_mb_s"] else "N/A"
+        else:
+            w_str = r["status"]
+            r_str = "-"
+
+        free_str = f"{r['free_gb']:,} GB free" if r.get("free_gb") else "N/A"
+
+        print(f"{vol_label:<26} | {media:<6} | {protocol:<12} | {w_str:<14} | {r_str:<14} | {free_str}")
+
+    print("=" * 96)
+    print("💡 Notes:")
+    print(" • Benchmarks use uncompressed pseudo-random blocks with direct I/O to measure hardware throughput.")
+    print(" • NVMe SSDs (e.g. Extreme Pro) deliver ~10x-100x superior random 4K I/O vs mechanical HDDs (LaCie).")
+    print(" • Ideal placement: Active databases (SQLite) on NVMe SSD; archival cold storage on high-capacity HDD.")
+    print("=" * 96 + "\n")
+
+
+def run_benchmark_interactive(default_quick: bool = False):
+    """Interactive helper designed to be called directly or from the main orchestrator."""
+    print("\n" + "=" * 60)
+    print("      STORAGE PERFORMANCE & DIRECT I/O BENCHMARK      ")
+    print("=" * 60)
+    print("Tests uncached sequential write and read throughput (MB/s).")
+    print("Uses low-level direct I/O (fcntl.F_NOCACHE) to bypass RAM cache.")
+    print("\nOptions:")
+    print("  1. Quick Test (64 MB test file per drive)")
+    print("  2. Standard Test (256 MB test file per drive - Recommended)")
+    print("  3. Thorough Test (512 MB test file per drive)")
+    print("  4. Cancel")
+    
+    choice = input("\nSelect test size (1-4, default 2): ").strip()
+    if choice == "4":
+        return
+    elif choice == "1":
+        size_mb = 64
+    elif choice == "3":
+        size_mb = 512
+    else:
+        size_mb = 256
+
+    test_size_bytes = size_mb * 1024 * 1024
+    volumes = discover_candidate_volumes()
+
+    print(f"\n[INFO] Starting benchmark with {size_mb} MB payload per drive...")
+    results = []
+    for vol in volumes:
+        print(f"  ⏳ Testing: {vol} ...", end="", flush=True)
+        res = benchmark_volume(vol, test_size_bytes)
+        results.append(res)
+        if res["status"] == "OK":
+            print(f" Done! (Write: {res['write_mb_s']} MB/s | Read: {res['read_mb_s']} MB/s)")
+        else:
+            print(f" {res['status']}")
+
+    print_table(results)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Direct I/O Storage Performance Benchmark for macOS")
+    parser.add_argument("--target", "-t", type=str, help="Specific volume or mount point to benchmark")
+    parser.add_argument("--size-mb", "-s", type=int, default=256, help="Test payload size in MB (default: 256)")
+    parser.add_argument("--quick", "-q", action="store_true", help="Quick mode (64 MB payload)")
+    parser.add_argument("--interactive", "-i", action="store_true", help="Run interactive menu")
+    parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+
+    args = parser.parse_args()
+
+    if args.interactive:
+        run_benchmark_interactive()
+        return
+
+    size_mb = 64 if args.quick else args.size_mb
+    test_size_bytes = size_mb * 1024 * 1024
+
+    if args.target:
+        if not os.path.exists(args.target):
+            print(f"[Error] Target path '{args.target}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+        volumes = [args.target]
+    else:
+        volumes = discover_candidate_volumes()
+
+    if not args.json:
+        print(f"\n[INFO] Initializing direct I/O benchmark ({size_mb} MB payload per drive)...")
+
+    results = []
+    for vol in volumes:
+        if not args.json:
+            print(f"  ⏳ Testing: {vol} ...", end="", flush=True)
+        res = benchmark_volume(vol, test_size_bytes)
+        results.append(res)
+        if not args.json:
+            if res["status"] == "OK":
+                print(f" Done! (Write: {res['write_mb_s']} MB/s | Read: {res['read_mb_s']} MB/s)")
+            else:
+                print(f" {res['status']}")
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+    else:
+        print_table(results)
+
+
+if __name__ == "__main__":
+    main()
+

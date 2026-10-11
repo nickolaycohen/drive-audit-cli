@@ -347,6 +347,22 @@ Scans a target directory path (e.g., `/Users/username/Pictures` or `/Volumes/Ext
 
 ### 3. View Hosts & Storage Overview
 Displays a summary table showing all indexed hosts, their operating system, IP address, total file count, and aggregate storage size in gigabytes (GB).
+- **Interactive Drive Performance Benchmark**: Prompt to measure real-world uncached read and write speeds (`MB/s`) across attached storage drives on demand.
+
+### Storage Performance & I/O Benchmark (`benchmark_drives.py`)
+Measures direct, uncached sequential read and write throughput (MB/s) for attached storage volumes on macOS using low-level direct I/O (`fcntl.F_NOCACHE = 48`) to completely bypass the operating system's RAM buffer cache:
+- **Automatic Multi-Volume Discovery**: Automatically identifies local disks (Macintosh HD internal NVMe, SanDisk Extreme Pro NVMe SSD, LaCie Rugged HDD, etc.) and gracefully handles write-protected Time Machine backup snapshots.
+- **Hardware Metadata Detection**: Detects bus interface (Apple Fabric PCIe vs USB 3.2), media type (NVMe SSD vs rotational HDD), filesystem, capacity, and remaining free space via `diskutil`.
+- **Safety First**: Writes pseudo-random uncompressible test blocks to a temporary hidden file with `os.fsync`, measures raw throughput, and guarantees immediate deletion upon completion.
+- **Command-line Options**:
+  ```bash
+  python3 benchmark_drives.py                  # Benchmark all mounted volumes (256 MB payload)
+  python3 benchmark_drives.py --quick          # 64 MB payload quick test
+  python3 benchmark_drives.py --target /Volumes/LaCie  # Test single drive
+  python3 benchmark_drives.py --size-mb 512    # Custom payload size
+  python3 benchmark_drives.py --json           # Machine-readable JSON output
+  python3 benchmark_drives.py --interactive    # Interactive size selection menu
+  ```
 
 ### 4. View Top-Level Folder Scans Report
 Provides an overarching summary of each primary root folder scanned:
