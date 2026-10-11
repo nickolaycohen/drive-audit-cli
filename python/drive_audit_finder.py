@@ -5620,6 +5620,115 @@ def view_file_extensions_catalog(db_path: str):
     input("\nPress Enter to continue...")
 
 
+def backfill_curation_events(db_path: str) -> dict:
+    """
+    Backfills historical verified directories and files into curation_events table.
+    Ensures baseline provenance records exist for all previously verified resources.
+    """
+    if not os.path.exists(db_path):
+        return {"backfilled_dirs": 0, "backfilled_files": 0}
+
+    conn = get_db_connection(db_path)
+    cur = conn.cursor()
+    ensure_curation_events_table(cur)
+
+    ver_dirs = cur.execute("""
+        SELECT id, name, path, description, verified_at, app_needed
+        FROM directories
+        WHERE is_verified = 1
+        ORDER BY verified_at ASC
+    """).fetchall()
+
+    backfilled_dirs = 0
+    backfilled_files = 0
+
+    for d_id, d_name, d_path, d_desc, v_at, app_need in ver_dirs:
+        exists = cur.execute("""
+            SELECT id FROM curation_events WHERE directory_id = ? AND resource_type = 'directory'
+        """, (d_id,)).fetchone()
+
+        v_time = v_at or datetime.datetime.now().isoformat()
+        b_date = v_time[:10].replace('-', '')
+        batch_id = f"baseline_{b_date}_{d_name.lower().replace(' ', '_')}"
+
+        tags = [r[0] for r in cur.execute("SELECT tag_name FROM directory_tags WHERE directory_id = ?", (d_id,)).fetchall()]
+        tags_str = ", ".join(tags)
+
+        if not exists:
+            d_size_row = cur.execute("""
+                SELECT COALESCE(SUM(f.size_bytes), 0)
+                FROM directories sub
+                JOIN files f ON f.directory_id = sub.id
+                WHERE sub.id = ? OR sub.path LIKE ? || '/%'
+            """, (d_id, d_path)).fetchone()
+            dir_bytes = d_size_row[0] if d_size_row else 0
+
+            cur.execute("""
+                INSERT INTO curation_events (
+                    batch_id, event_type, created_at, source_path, destination_path,
+                    origin_folder, resource_type, resource_path, file_id, directory_id,
+                    file_size_bytes, finder_tags, details
+                ) VALUES (?, 'verified_baseline_folder', ?, ?, ?, ?, 'directory', ?, NULL, ?, ?, ?, ?)
+            """, (
+                batch_id, v_time, d_path, d_path,
+                d_name, d_path, d_id,
+                dir_bytes, tags_str, json.dumps({
+                    'description': d_desc,
+                    'app_needed': app_need,
+                    'is_backfilled': True
+                })
+            ))
+            backfilled_dirs += 1
+
+        # Files for this folder
+        files = cur.execute("""
+            SELECT f.id, f.name, f.size_bytes, f.directory_id, f.scanned_at, sub.path
+            FROM files f
+            JOIN directories sub ON f.directory_id = sub.id
+            WHERE sub.id = ? OR sub.path LIKE ? || '/%'
+        """, (d_id, d_path)).fetchall()
+
+        for f_id, f_name, f_size, sub_d_id, f_scan_at, sub_path in files:
+            f_exists = cur.execute("""
+                SELECT id FROM curation_events WHERE file_id = ?
+            """, (f_id,)).fetchone()
+            if f_exists:
+                continue
+
+            f_full = f"{sub_path}/{f_name}"
+            f_time = f_scan_at or v_time
+
+            cur.execute("""
+                INSERT INTO curation_events (
+                    batch_id, event_type, created_at, source_path, destination_path,
+                    origin_folder, resource_type, resource_path, file_id, directory_id,
+                    file_size_bytes, finder_tags, details
+                ) VALUES (?, 'verified_baseline_file', ?, ?, ?, ?, 'file', ?, ?, ?, ?, ?, ?)
+            """, (
+                batch_id, f_time, f_full, f_full,
+                d_name, f_full, f_id, sub_d_id,
+                f_size, tags_str, json.dumps({
+                    'baseline_folder': d_name,
+                    'is_backfilled': True
+                })
+            ))
+
+            cur.execute("""
+                INSERT OR IGNORE INTO file_tags (file_id, tag_name, created_at)
+                VALUES (?, ?, ?)
+            """, (f_id, f"baseline:{d_name}", f_time))
+            cur.execute("""
+                INSERT OR IGNORE INTO file_tags (file_id, tag_name, created_at)
+                VALUES (?, ?, ?)
+            """, (f_id, f"curation_batch:{batch_id}", f_time))
+
+            backfilled_files += 1
+
+    conn.commit()
+    conn.close()
+    return {"backfilled_dirs": backfilled_dirs, "backfilled_files": backfilled_files}
+
+
 def view_curation_events_history(db_path: str):
     """Displays chronological history of curation events (merges, relocations, verifications)."""
     if not os.path.exists(db_path):
