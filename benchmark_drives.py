@@ -82,8 +82,12 @@ def get_diskutil_info(mount_point: str) -> Dict[str, str]:
                     info["filesystem"] = line.split(":", 1)[1].strip()
                 elif line.startswith("Volume Name:"):
                     info["volume_name"] = line.split(":", 1)[1].strip()
+            if "timemachine" in proc.stdout.lower() or "com.apple.timemachine" in proc.stdout.lower():
+                info["is_time_machine"] = True
+            else:
+                info["is_time_machine"] = False
     except Exception:
-        pass
+        info["is_time_machine"] = False
 
     return info
 
@@ -188,7 +192,10 @@ def benchmark_volume(mount_point: str, test_size_bytes: int) -> Dict[str, any]:
             result["read_mb_s"] = round((read_bytes / (1024 * 1024)) / read_duration, 1)
 
     except PermissionError:
-        result["status"] = "Read-only / Protected"
+        if info.get("is_time_machine"):
+            result["status"] = "Protected (Time Machine / Read-only)"
+        else:
+            result["status"] = "Protected (FDA Permission Required)"
     except OSError as e:
         if "Read-only file system" in str(e) or e.errno == 30:
             result["status"] = "Read-only volume"
