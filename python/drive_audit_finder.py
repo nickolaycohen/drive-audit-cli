@@ -2450,10 +2450,10 @@ def _sync_directory_tags_to_db(dir_path: Path, tag_entries: list, db_path: str):
         pass
 
 DEFAULT_PRIORITY_DESCRIPTIONS = {
-    "priority 1": "Active & critical personal data (Quicken financial DBs, essential identity & legal documents)",
-    "priority 2": "Systems, developer projects, Ruby/DevKits, user profiles, and PC software binaries",
-    "priority 3": "Archival references, foreign media, downloaded materials, and historical records",
-    "priority 4": "Central media staging depot (photos and home videos awaiting Media Organizer intake)",
+    "priority 1": "Active & critical personal data (Quicken financial DBs, essential identity & legal documents) — Stored ONLY on high-availability storage (Internal HD for iMini) with applicable apps, backed up to iDrive",
+    "priority 2": "Systems, developer projects, profiles, and legacy application archives (e.g. MS Money) — Stored primarily on external storage (LaCie / secondary drives), backed up to iDrive for reference",
+    "priority 3": "Archival references, foreign media, downloaded materials, and historical records — Stored on low-availability external drive, not backed up to iDrive",
+    "priority 4": "Central media staging depot (photos and home videos awaiting Media Organizer intake) — Temporary external storage, no backup",
 }
 
 DEFAULT_LEVEL1_DESCRIPTIONS = {
@@ -2462,6 +2462,8 @@ DEFAULT_LEVEL1_DESCRIPTIONS = {
     ("priority 1", "documents"): "Vital personal identity, legal, medical, and essential personal documentation",
 
     # Priority 2 (Systems, Developer Projects, Profiles & Software)
+    ("priority 2", "data"): "Secondary financial data & application archives (backed up to iDrive for reference)",
+    ("priority 2", "legacy / windows data"): "Legacy Windows application data archives (e.g. MS Money .mny/.mbf, backed up to iDrive for reference)",
     ("priority 2", "adobe font folio"): "Design typography font archives & digital design typefaces",
     ("priority 2", "bak"): "Legacy machine backup archives undergoing triage & deduplication",
     ("priority 2", "camera movies"): "Personal video clips & camera recordings prior to media pipeline intake",
@@ -3087,15 +3089,17 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
             if is_unusable:
                 unusable_file_count += cnt
 
-    # Enforce Rule: All files in Priority 1 must have an applicable app to open them directly.
-    # If not, suggest moving to Priority 2 / Data or Priority 2 / Legacy / Windows Data.
+    # Enforce Rule: All files in Priority 1 must have an applicable app to open them directly,
+    # and Priority 1 is reserved strictly for high-availability internal storage (Internal HD for iMini).
+    # Discontinued formats (like MS Money) belong on external storage (LaCie Priority 2) with iDrive backup.
     if "priority 1" in t_lower and (unusable_file_count > 0 or "discontinued" in detected_app.lower() or "unusable" in detected_app.lower()):
         has_unusable_app = True
         is_match = False
-        suggested_move = "Priority 2 / Data or Priority 2 / Legacy / Windows Data"
+        suggested_move = "Priority 2 / Data or Priority 2 / Legacy / Windows Data (LaCie)"
         match_msg = (
-            f"⚠️ Priority 1 Rule Violation: Files cannot be opened directly ({unusable_file_count}/{total_non_empty} files in discontinued/unusable format)! "
-            f"Priority 1 requires active, directly openable applications. Recommended: Move to Priority 2 / Data or Priority 2 / Legacy / Windows Data"
+            f"⚠️ Storage Policy Violation: Files cannot be opened directly ({unusable_file_count}/{total_non_empty} files in discontinued/unusable format)! "
+            f"Priority 1 is reserved ONLY for high-availability internal storage (Internal HD for iMini) with active applications. "
+            f"Recommended: Move to external storage on LaCie ('Priority 2 / Data' or 'Priority 2 / Legacy / Windows Data', backed up to iDrive for reference)"
         )
     # Check Tier 1 Category Mismatches:
     elif "priority 1" in t_lower:
@@ -3744,11 +3748,13 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     if ft_info.get("has_unusable_app") and "priority 1" in tier_name.lower():
                         p2_loc = next((al for al in active_locs if al["priority_tier"].lower() == "priority 2"), None)
                         print("\n" + "=" * 80)
-                        print("  RECOMMENDED ARCHIVAL RELOCATION (Priority 1 Rule)")
-                        print("  Files in this folder cannot be opened directly and must be archived in Priority 2.")
+                        print("  RECOMMENDED ARCHIVAL RELOCATION (Priority 1 Storage Mandate)")
+                        print("  • Priority 1 Mandate: Reserved ONLY for high-availability internal storage (Internal HD for iMini).")
+                        print("  • Archival Target:    MS Money data belongs on external storage (LaCie Priority 2).")
+                        print("  • Backup Protection:  Priority 2 preserves iDrive backup inclusion for eventual reference.")
                         print("=" * 80)
-                        print("  [1] Move to 'Priority 2 ▸ Data' (Recommended)")
-                        print("  [2] Move to 'Priority 2 ▸ Legacy / Windows Data' (Recommended Archival)")
+                        print("  [1] Move to 'Priority 2 ▸ Data' on LaCie (Recommended)")
+                        print("  [2] Move to 'Priority 2 ▸ Legacy / Windows Data' on LaCie (Recommended Archival)")
                         print("  [3] Choose another custom destination location & category")
                         print("  [c] Cancel move")
                         m_rec_choice = input("\nSelect relocation target [1/2/3/c] (Default: 1): ").strip().lower()
