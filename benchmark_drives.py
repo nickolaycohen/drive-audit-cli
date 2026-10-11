@@ -192,10 +192,37 @@ def benchmark_volume(mount_point: str, test_size_bytes: int) -> Dict[str, any]:
             result["read_mb_s"] = round((read_bytes / (1024 * 1024)) / read_duration, 1)
 
     except PermissionError:
-        if info.get("is_time_machine"):
-            result["status"] = "Protected (Time Machine / Read-only)"
-        else:
-            result["status"] = "Protected (FDA Permission Required)"
+        # If writing is restricted (e.g. APFS Time Machine Backup volume or read-only volume),
+        # attempt an uncached direct read benchmark on an existing sample file if FDA allows reading.
+        sample_file = find_readable_sample_file(mount_point)
+        if sample_file:
+            try:
+                fd_sample = os.open(sample_file, os.O_RDONLY)
+                try:
+                    fcntl.fcntl(fd_sample, F_NOCACHE, 1)
+                except Exception:
+                    pass
+                start_read = time.perf_counter()
+                read_bytes = 0
+                while read_bytes < test_size_bytes:
+                    to_read = min(CHUNK_SIZE, test_size_bytes - read_bytes)
+                    chunk = os.read(fd_sample, to_read)
+                    if not chunk:
+                        break
+                    read_bytes += len(chunk)
+                duration = time.perf_counter() - start_read
+                os.close(fd_sample)
+                if duration > 0 and read_bytes > 0:
+                    result["read_mb_s"] = round((read_bytes / (1024 * 1024)) / duration, 1)
+                    result["status"] = "Protected (Time Machine / Read-Only)" if info.get("is_time_machine") else "Read-Only Volume"
+            except Exception:
+                pass
+
+        if result.get("read_mb_s") is None:
+            if info.get("is_time_machine"):
+                result["status"] = "Protected (Time Machine / FDA Required)"
+            else:
+                result["status"] = "Protected (FDA Permission Required)"
     except OSError as e:
         if "Read-only file system" in str(e) or e.errno == 30:
             result["status"] = "Read-only volume"
@@ -215,6 +242,33 @@ def benchmark_volume(mount_point: str, test_size_bytes: int) -> Dict[str, any]:
                 pass
 
     return result
+
+
+def find_readable_sample_file(mount_point: str, min_size_bytes: int = 1024 * 1024) -> Optional[str]:
+    """Finds an existing readable file on a volume to benchmark read throughput without modifying files."""
+    try:
+        # Check direct files first
+        for entry in os.scandir(mount_point):
+            if entry.is_file(follow_symlinks=False):
+                try:
+                    if entry.stat().st_size >= min_size_bytes:
+                        return entry.path
+                except Exception:
+                    pass
+            elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                try:
+                    for sub in os.scandir(entry.path):
+                        if sub.is_file(follow_symlinks=False):
+                            try:
+                                if sub.stat().st_size >= min_size_bytes:
+                                    return sub.path
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
 
 
 def discover_candidate_volumes() -> List[str]:
@@ -245,7 +299,6 @@ def print_table(results: List[Dict[str, any]]):
     print(f"{'Volume / Mount Point':<26} | {'Media':<6} | {'Interface':<12} | {'Write Speed':<14} | {'Read Speed':<14} | {'Free Space'}")
     print("-" * 96)
 
-    baseline_speed = None
     for r in results:
         vol_label = r["volume_name"]
         if len(vol_label) > 24:
@@ -254,11 +307,18 @@ def print_table(results: List[Dict[str, any]]):
         media = r.get("media_type") or "N/A"
         protocol = r.get("protocol") or "Internal"
 
-        if r["status"] == "OK":
-            w_str = f"{r['write_mb_s']:,} MB/s" if r["write_mb_s"] else "N/A"
-            r_str = f"{r['read_mb_s']:,} MB/s" if r["read_mb_s"] else "N/A"
+        if r.get("write_mb_s") is not None:
+            w_str = f"{r['write_mb_s']:,} MB/s"
+        elif "Time Machine" in r.get("status", "") or "Protected" in r.get("status", ""):
+            w_str = "Write-Protected"
         else:
-            w_str = r["status"]
+            w_str = r.get("status", "N/A")
+
+        if r.get("read_mb_s") is not None:
+            r_str = f"{r['read_mb_s']:,} MB/s"
+        elif "FDA Required" in r.get("status", ""):
+            r_str = "FDA Required"
+        else:
             r_str = "-"
 
         free_str = f"{r['free_gb']:,} GB free" if r.get("free_gb") else "N/A"
@@ -268,8 +328,8 @@ def print_table(results: List[Dict[str, any]]):
     print("=" * 96)
     print("💡 Notes:")
     print(" • Benchmarks use uncompressed pseudo-random blocks with direct I/O to measure hardware throughput.")
-    print(" • NVMe SSDs (e.g. Extreme Pro) deliver ~10x-100x superior random 4K I/O vs mechanical HDDs (LaCie).")
-    print(" • Ideal placement: Active databases (SQLite) on NVMe SSD; archival cold storage on high-capacity HDD.")
+    print(" • Time Machine volumes restrict write operations by default to prevent corruption of backup snapshots.")
+    print(" • NVMe SSDs (e.g. Extreme Pro) deliver ~10x-100x superior random 4K I/O vs mechanical HDDs (LaCie / asd).")
     print("=" * 96 + "\n")
 
 
