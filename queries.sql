@@ -273,7 +273,88 @@ JOIN files f ON f.directory_id = child.id
 GROUP BY parent.id
 ORDER BY SUM(f.size_bytes) DESC
 LIMIT 20;
+-- Storage Priority Tiers and First-Level Folders with Descriptions & Tags
+SELECT 
+    d.id,
+    d.name,
+    d.path,
+    d.description,
+    COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') AS tags,
+    COUNT(f.id) AS indexed_files,
+    ROUND(COALESCE(SUM(f.size_bytes), 0) / 1024.0 / 1024.0, 2) AS total_mb,
+    ROUND(COALESCE(SUM(f.size_bytes), 0) / 1024.0 / 1024.0, 3) AS total_gb
+FROM directories d
+LEFT JOIN directory_tags dt ON d.id = dt.directory_id
+LEFT JOIN directories child 
+  ON child.host_id = d.host_id 
+ AND (child.path = d.path OR SUBSTR(child.path, 1, LENGTH(d.path) + 1) = d.path || '/')
+LEFT JOIN files f ON f.directory_id = child.id
+WHERE d.path IN (
+    '/Volumes/LaCie/Storage/Priority 1',
+    '/Volumes/LaCie/Storage/Priority 2',
+    '/Volumes/LaCie/Storage/Priority 3',
+    '/Volumes/LaCie/Storage/Priority 4'
+) OR (
+    d.path LIKE '/Volumes/LaCie/Storage/Priority %/%'
+    AND d.path NOT LIKE '/Volumes/LaCie/Storage/Priority %/%/%'
+)
+GROUP BY d.id
+ORDER BY d.path;
 
+-- Storage Level-2 Subfolders Curation Progress & Verification Status
+SELECT 
+    d.id,
+    d.name AS folder_name,
+    d.path AS full_path,
+    CASE WHEN d.is_verified = 1 THEN 'Verified ✓' ELSE 'Unverified ⚪' END AS verification_status,
+    d.verified_at,
+    d.description,
+    COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') AS tags,
+    COUNT(f.id) AS file_count,
+    ROUND(COALESCE(SUM(f.size_bytes), 0) / 1024.0 / 1024.0, 2) AS size_mb
+FROM directories d
+LEFT JOIN directory_tags dt ON d.id = dt.directory_id
+LEFT JOIN files f ON f.directory_id = d.id
+WHERE d.path LIKE '/Volumes/LaCie/Storage/Priority %/%/%'
+  AND d.path NOT LIKE '/Volumes/LaCie/Storage/Priority %/%/%/%'
+GROUP BY d.id
+ORDER BY d.path;
 
-select * 
-from directories d 
+-- Priority Location Mappings & Aggregate Storage Overview
+SELECT 
+    pl.id,
+    pl.priority_tier,
+    pl.label,
+    pl.path,
+    pl.is_active,
+    pl.description,
+    COUNT(DISTINCT child.id) AS total_indexed_subfolders,
+    COUNT(f.id) AS total_files,
+    ROUND(COALESCE(SUM(f.size_bytes), 0) / 1024.0 / 1024.0, 2) AS total_mb,
+    ROUND(COALESCE(SUM(f.size_bytes), 0) / 1024.0 / 1024.0 / 1024.0, 3) AS total_gb
+FROM priority_locations pl
+LEFT JOIN directories d ON d.path = pl.path
+LEFT JOIN directories child 
+  ON child.path = pl.path OR child.path LIKE pl.path || '/%'
+LEFT JOIN files f ON f.directory_id = child.id
+GROUP BY pl.id
+ORDER BY pl.priority_tier, pl.id;
+
+-- Priority 1 Dedicated Folders & Storage Inventory (iDrive Candidate Targets)
+SELECT 
+    d.id,
+    d.name AS folder_name,
+    d.path AS full_path,
+    d.description,
+    d.is_verified,
+    COUNT(f.id) AS total_files,
+    ROUND(COALESCE(SUM(f.size_bytes), 0) / 1024.0 / 1024.0, 2) AS size_mb,
+    ROUND(COALESCE(SUM(f.size_bytes), 0) / 1024.0 / 1024.0 / 1024.0, 3) AS size_gb
+FROM directories d
+JOIN priority_locations pl 
+  ON pl.priority_tier = 'priority 1' 
+ AND (d.path = pl.path OR d.path LIKE pl.path || '/%')
+LEFT JOIN files f ON f.directory_id = d.id
+WHERE d.path NOT LIKE pl.path || '/%/%' -- Level-1 categories only
+GROUP BY d.id
+ORDER BY d.path;

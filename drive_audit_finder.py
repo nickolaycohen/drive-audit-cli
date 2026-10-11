@@ -8,9 +8,10 @@ import datetime
 import socket
 import platform
 import plistlib
+import glob
 import subprocess
 import logging
-from collections import deque, defaultdict
+from collections import deque, defaultdict, Counter
 from pathlib import Path
 try:
     import exifread
@@ -66,6 +67,17 @@ FINDER_COLOR_MAP = {
     5: "Yellow",
     6: "Red",
     7: "Orange",
+}
+
+FINDER_COLOR_EMOJI = {
+    0: "⚪",
+    1: "🩶",
+    2: "🟢",
+    3: "🟣",
+    4: "🔵",
+    5: "🟡",
+    6: "🔴",
+    7: "🟠",
 }
 
 PRIORITY_TIER_CONFIG = {
@@ -151,6 +163,48 @@ def get_finder_tags(file_or_dir_path: Path) -> list:
 
     return tags
 
+def get_finder_tags_with_details(file_or_dir_path: Path) -> list:
+    """Extracts macOS Finder tags with raw color codes, color names, and emojis."""
+    results = []
+    if platform.system() != "Darwin":
+        return results
+
+    try:
+        resolved_bytes = str(file_or_dir_path.resolve()).encode('utf-8')
+        raw_plist = None
+        if _libc:
+            buf_size = _getxattr(resolved_bytes, b'com.apple.metadata:_kMDItemUserTags', None, 0, 0, 0)
+            if buf_size > 0:
+                buf = ctypes.create_string_buffer(buf_size)
+                _getxattr(resolved_bytes, b'com.apple.metadata:_kMDItemUserTags', buf, buf_size, 0, 0)
+                raw_plist = buf.raw
+
+        if raw_plist is None:
+            cmd = ["xattr", "-p", "com.apple.metadata:_kMDItemUserTags", str(file_or_dir_path.resolve())]
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode == 0 and res.stdout:
+                try:
+                    raw_plist = res.stdout
+                except Exception:
+                    pass
+
+        if raw_plist:
+            plist_data = plistlib.loads(raw_plist) if isinstance(raw_plist, bytes) else raw_plist
+            for entry in plist_data:
+                parts = entry.split('\n')
+                t_name = parts[0].strip()
+                c_code = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                results.append({
+                    "name": t_name,
+                    "color": c_code,
+                    "color_name": FINDER_COLOR_MAP.get(c_code, "None"),
+                    "emoji": FINDER_COLOR_EMOJI.get(c_code, "⚪")
+                })
+    except Exception:
+        pass
+
+    return results
+
 def derive_folder_tags(folder_path: Path) -> list:
     """Derives Priority Tier tag (with Finder color) and Category tag based on directory path."""
     tags = []
@@ -235,10 +289,19 @@ def init_database(db_path: str) -> sqlite3.Connection:
             created_at TEXT,
             modified_at TEXT,
             scanned_at TEXT NOT NULL,
+            description TEXT,
             FOREIGN KEY (host_id) REFERENCES hosts (id) ON DELETE CASCADE,
             UNIQUE(host_id, path)
         )
     """)
+    cursor.execute("PRAGMA table_info(directories)")
+    col_names = [col[1] for col in cursor.fetchall()]
+    if "description" not in col_names:
+        cursor.execute("ALTER TABLE directories ADD COLUMN description TEXT")
+    if "is_verified" not in col_names:
+        cursor.execute("ALTER TABLE directories ADD COLUMN is_verified INTEGER DEFAULT 0")
+    if "verified_at" not in col_names:
+        cursor.execute("ALTER TABLE directories ADD COLUMN verified_at TEXT")
 
     # 3. Directory Tags Table (Supports both Finder and Manual sources)
     cursor.execute("""
@@ -309,7 +372,21 @@ def init_database(db_path: str) -> sqlite3.Connection:
         )
     """)
 
-    # 8. Performance Indexes
+    # 8. Priority Locations Table (Intermediary level mapping multiple folders per Priority tier)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS priority_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            priority_tier TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            label TEXT,
+            description TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_priority_locations_tier ON priority_locations(priority_tier);")
+
+    # 9. Performance Indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_name_size ON files(name, size_bytes);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_directories_path ON directories(path);")
@@ -1418,32 +1495,1500 @@ def resync_finder_tags_interactive(db_path: str):
     conn.close()
     print(f"\n[Success] Re-synced {synced_tags:,} tags across {synced_dirs:,} directories into SQLite database.")
 
+def _sync_directory_tags_to_db(dir_path: Path, tag_entries: list, db_path: str):
+    """Syncs a directory and its tags to SQLite database."""
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+        host_id = get_or_create_host(cursor)
+        scan_time = datetime.datetime.now().isoformat()
+        res_p = str(dir_path.resolve())
+
+        cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, res_p))
+        row = cursor.fetchone()
+        if not row:
+            d_stat = dir_path.stat()
+            cursor.execute("""
+                INSERT INTO directories (host_id, path, name, created_at, modified_at, scanned_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (host_id, res_p, dir_path.name,
+                  datetime.datetime.fromtimestamp(d_stat.st_ctime).isoformat(),
+                  datetime.datetime.fromtimestamp(d_stat.st_mtime).isoformat(),
+                  scan_time))
+            cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, res_p))
+            row = cursor.fetchone()
+
+        if row:
+            did = row[0]
+            cursor.execute("DELETE FROM directory_tags WHERE directory_id = ? AND source = 'finder'", (did,))
+            for entry in tag_entries:
+                t_name = entry[0] if isinstance(entry, (tuple, list)) else entry.split('\n')[0].strip()
+                if t_name:
+                    cursor.execute("""
+                        INSERT INTO directory_tags (directory_id, tag_name, source, created_at)
+                        VALUES (?, ?, 'finder', ?)
+                        ON CONFLICT(directory_id, tag_name) DO NOTHING
+                    """, (did, t_name.lower(), scan_time))
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+DEFAULT_PRIORITY_DESCRIPTIONS = {
+    "priority 1": "Active & critical personal data (Quicken financial DBs, essential identity & legal documents)",
+    "priority 2": "Systems, developer projects, Ruby/DevKits, user profiles, and PC software binaries",
+    "priority 3": "Archival references, foreign media, downloaded materials, and historical records",
+    "priority 4": "Central media staging depot (photos and home videos awaiting Media Organizer intake)",
+}
+
+DEFAULT_LEVEL1_DESCRIPTIONS = {
+    # Priority 1 (Active & Critical Personal Data)
+    ("priority 1", "data"): "Critical financial & account databases (Quicken .qdf, active tax/financial records)",
+    ("priority 1", "documents"): "Vital personal identity, legal, medical, and essential personal documentation",
+
+    # Priority 2 (Systems, Developer Projects, Profiles & Software)
+    ("priority 2", "adobe font folio"): "Design typography font archives & digital design typefaces",
+    ("priority 2", "bak"): "Legacy machine backup archives undergoing triage & deduplication",
+    ("priority 2", "camera movies"): "Personal video clips & camera recordings prior to media pipeline intake",
+    ("priority 2", "dev"): "Developer source code, repositories, toolchains, scripts, and Ruby/DevKits",
+    ("priority 2", "documents"): "Secondary technical documentation, reference papers, and user guides",
+    ("priority 2", "edu"): "Educational courses, tutorials, textbooks, and professional certifications",
+    ("priority 2", "pc bin"): "Software utilities, system installers, tools, and Windows executables",
+    ("priority 2", "projects"): "Active & historical engineering/consulting project workspaces",
+    ("priority 2", "references"): "Technical reference documentation, vendor manuals, and datasheets",
+    ("priority 2", "saved user profiles"): "Saved Windows/OS user application settings and profile snapshots",
+    ("priority 2", "dmg"): "macOS disk image installers and application packages",
+
+    # Priority 3 (Archival References, Foreign Media & Historic Drops)
+    ("priority 3", "downloaded media"): "Collected external podcasts, internet videos, and web media",
+    ("priority 3", "downloads"): "General staging downloads and historical transfer drops",
+    ("priority 3", "foreign data and media"): "External data dumps, guest files, and non-personal media collections",
+    ("priority 3", "pc bin"): "Legacy PC software archives, system drivers, and redundant installers",
+    ("priority 3", "references"): "General reference material, public domain archives, and e-books",
+
+    # Priority 4 (Media Organizer Intake & Staging Depot)
+    ("priority 4", "03a-movies"): "Digitized home movies and family video footage",
+    ("priority 4", "nonmediafiles"): "Non-media files filtered out from photo/video import archives",
+    ("priority 4", "pictures"): "Central intake depot for family photos awaiting Media Organizer intake",
+    ("priority 4", "tobeimportedtombp personal photolibrary"): "Staged photo batches pending import into macOS Photos library",
+}
+
+def _set_directory_description_in_db(dir_path: Path, description: str | None, db_path: str, is_verified: bool = False):
+    """Sets or updates description and verification columns for a directory in SQLite database."""
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+        host_id = get_or_create_host(cursor)
+        scan_time = datetime.datetime.now().isoformat()
+        res_p = str(dir_path.resolve())
+        verified_val = 1 if is_verified else 0
+        verified_at_val = scan_time if is_verified else None
+
+        cursor.execute("SELECT id FROM directories WHERE host_id = ? AND path = ?", (host_id, res_p))
+        row = cursor.fetchone()
+        if not row:
+            d_stat = dir_path.stat()
+            cursor.execute("""
+                INSERT INTO directories (host_id, path, name, created_at, modified_at, scanned_at, description, is_verified, verified_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (host_id, res_p, dir_path.name,
+                  datetime.datetime.fromtimestamp(d_stat.st_ctime).isoformat(),
+                  datetime.datetime.fromtimestamp(d_stat.st_mtime).isoformat(),
+                  scan_time, description, verified_val, verified_at_val))
+        else:
+            if is_verified:
+                cursor.execute("""
+                    UPDATE directories 
+                    SET description = ?, is_verified = ?, verified_at = ?
+                    WHERE id = ?
+                """, (description, verified_val, verified_at_val, row[0]))
+            else:
+                cursor.execute("UPDATE directories SET description = ? WHERE id = ?", (description, row[0]))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def analyze_folder_content(folder_path: Path, max_depth: int = 3) -> dict:
+    """Fast content profiler for a subfolder to assist the curation wizard."""
+    total_files = 0
+    total_bytes = 0
+    ext_counts = Counter()
+    sample_files = []
+    mtimes = []
+    subfolders = []
+
+    try:
+        for root_dir, dirnames, filenames in os.walk(folder_path):
+            rel_depth = len(Path(root_dir).relative_to(folder_path).parts)
+            if rel_depth >= max_depth:
+                dirnames.clear()
+            else:
+                for d in dirnames:
+                    if not d.startswith('.'):
+                        subfolders.append(d)
+            for f in filenames:
+                if f.startswith('.'):
+                    continue
+                total_files += 1
+                f_path = Path(root_dir) / f
+                try:
+                    stat = f_path.stat()
+                    total_bytes += stat.st_size
+                    mtimes.append(stat.st_mtime)
+                    ext = f_path.suffix.lower()
+                    if ext:
+                        ext_counts[ext] += 1
+                    else:
+                        ext_counts['(no ext)'] += 1
+                    if len(sample_files) < 4:
+                        sample_files.append(f)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    earliest_date = datetime.date.fromtimestamp(min(mtimes)).isoformat() if mtimes else None
+    latest_date = datetime.date.fromtimestamp(max(mtimes)).isoformat() if mtimes else None
+
+    return {
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "ext_counts": ext_counts,
+        "sample_files": sample_files,
+        "earliest_date": earliest_date,
+        "latest_date": latest_date,
+        "subfolder_count": len(subfolders)
+    }
+
+def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name: str, stats: dict) -> str:
+    """Intelligently suggests a concise human-readable description for a folder based on its name and contents."""
+    name_lower = folder_name.lower()
+    total_files = stats.get("total_files", 0)
+    ext_counts = stats.get("ext_counts", Counter())
+    earliest = stats.get("earliest_date")
+    latest = stats.get("latest_date")
+
+    year_str = ""
+    if earliest and latest:
+        y1 = earliest.split("-")[0]
+        y2 = latest.split("-")[0]
+        year_str = f" ({y1}-{y2})" if y1 != y2 else f" ({y1})"
+
+    top_exts = [e for e, _ in ext_counts.most_common(3) if e != '(no ext)']
+    ext_label = f"[{', '.join(top_exts)}]" if top_exts else ""
+
+    # Specific name & signature heuristics
+    if "money" in name_lower or ".mny" in ext_counts or ".mbf" in ext_counts:
+        return f"Microsoft Money financial database & backup archives (.mny, .mbf{year_str})"
+    if "quicken" in name_lower or ".qdf" in ext_counts:
+        return f"Quicken personal financial accounts & tax records (.qdf{year_str})"
+    if "db backup" in name_lower or ".sql" in ext_counts:
+        return f"Database SQL dumps & backup snapshots (.sql{year_str})"
+    if "resume" in name_lower or "cv" in name_lower:
+        return f"Professional resumes, CVs & career application documentation{year_str}"
+    if "kindle" in name_lower or ".azw" in ext_counts or ".mobi" in ext_counts:
+        return f"Amazon Kindle e-books and reading library content{year_str}"
+    if "credit" in name_lower or "report" in name_lower:
+        return f"Credit reports, financial documentation & personal records{year_str}"
+    if "font" in name_lower or ".otf" in ext_counts or ".ttf" in ext_counts:
+        return f"Typography font assets & design typeface archives{year_str}"
+    if "vertexte" in name_lower:
+        return f"Vertex historical workstation setup logs & system archives{year_str}"
+    if "asus" in name_lower:
+        return f"ASUS PC backup archive & migrated system assets{year_str}"
+    if "presario" in name_lower:
+        return f"Compaq Presario historic system backup & personal files{year_str}"
+    if "families" in name_lower or "family" in name_lower:
+        return f"Family vital documentation, certificates & personal records{year_str}"
+
+    # Dominant type heuristics
+    img_count = sum(ext_counts[e] for e in ['.jpg', '.jpeg', '.png', '.heic', '.tif', '.tiff', '.bmp', '.gif', '.nef', '.cr2'] if e in ext_counts)
+    vid_count = sum(ext_counts[e] for e in ['.mov', '.mp4', '.avi', '.m4v', '.wmv', '.mpg', '.mpeg', '.mkv'] if e in ext_counts)
+    code_count = sum(ext_counts[e] for e in ['.py', '.rb', '.js', '.ts', '.html', '.css', '.c', '.h', '.cpp', '.php', '.sh', '.json', '.yml'] if e in ext_counts)
+    doc_count = sum(ext_counts[e] for e in ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt', '.rtf', '.ppt', '.pptx'] if e in ext_counts)
+
+    if total_files > 0:
+        if img_count / total_files >= 0.5:
+            return f"Photo collection & digital image albums ({img_count:,} photos{year_str})"
+        if vid_count / total_files >= 0.5:
+            return f"Video recordings & digital home movie footage ({vid_count:,} clips{year_str})"
+        if code_count / total_files >= 0.5:
+            return f"Developer project source code & repositories {ext_label}{year_str}"
+        if doc_count / total_files >= 0.5:
+            return f"Personal documentation & archived records ({doc_count:,} documents{year_str})"
+
+    if total_files == 0:
+        return f"{folder_name} (Empty folder)"
+
+    return f"{folder_name} archives ({total_files:,} files {ext_label}{year_str})"
+
+
+def get_priority_locations(db_path: str, active_only: bool = True, priority_tier: str | None = None) -> list[dict]:
+    """Retrieves mapped priority locations from SQLite."""
+    if not os.path.exists(db_path):
+        return []
+    try:
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+
+        # Check if empty, auto-seed defaults if /Volumes/LaCie/Storage exists
+        cursor.execute("SELECT COUNT(*) FROM priority_locations")
+        if cursor.fetchone()[0] == 0:
+            now = datetime.datetime.now().isoformat()
+            storage_root = Path("/Volumes/LaCie/Storage")
+            for p_num in range(1, 5):
+                p_name = f"priority {p_num}"
+                p_path = storage_root / f"Priority {p_num}"
+                desc = DEFAULT_PRIORITY_DESCRIPTIONS.get(p_name, "")
+                cursor.execute("""
+                    INSERT OR IGNORE INTO priority_locations (priority_tier, path, label, description, is_active, created_at)
+                    VALUES (?, ?, ?, ?, 1, ?)
+                """, (p_name, str(p_path.resolve()) if p_path.exists() else str(p_path), "LaCie Primary Storage", desc, now))
+            conn.commit()
+
+        query = "SELECT id, priority_tier, path, label, description, is_active, created_at FROM priority_locations WHERE 1=1"
+        params = []
+        if active_only:
+            query += " AND is_active = 1"
+        if priority_tier:
+            query += " AND LOWER(priority_tier) = LOWER(?)"
+            params.append(priority_tier)
+        query += " ORDER BY priority_tier, id"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        results = []
+        for r in rows:
+            results.append({
+                "id": r[0],
+                "priority_tier": r[1],
+                "path": Path(r[2]),
+                "path_str": r[2],
+                "label": r[3] or "",
+                "description": r[4] or "",
+                "is_active": bool(r[5]),
+                "created_at": r[6]
+            })
+        return results
+    except Exception:
+        return []
+
+def add_priority_location(db_path: str, priority_tier: str, path_str: str, label: str = "", description: str = "") -> bool:
+    """Adds a new folder mapping to a Priority tier in SQLite."""
+    try:
+        p = Path(path_str).resolve()
+        if not p.exists():
+            create_choice = input(f"Directory '{p}' does not exist on disk. Create it? [Y/n]: ").strip().lower()
+            if create_choice != 'n':
+                p.mkdir(parents=True, exist_ok=True)
+            else:
+                return False
+
+        tier_clean = priority_tier.lower()
+        tier_info = PRIORITY_TIER_CONFIG.get(tier_clean, {"tag": priority_tier.title(), "color": 0})
+        # Tag the location root with parent Priority color
+        set_finder_tags(p, [(tier_info["tag"], tier_info["color"])])
+        _sync_directory_tags_to_db(p, [(tier_info["tag"], tier_info["color"])], db_path)
+
+        now = datetime.datetime.now().isoformat()
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO priority_locations (priority_tier, path, label, description, is_active, created_at)
+            VALUES (?, ?, ?, ?, 1, ?)
+        """, (tier_clean, str(p), label if label else p.name, description, now))
+        conn.commit()
+        conn.close()
+
+        if description:
+            _set_directory_description_in_db(p, description, db_path, is_verified=True)
+        return True
+    except Exception as e:
+        print(f"[Error] Failed to add priority location: {e}")
+        return False
+
+def manage_priority_locations_interactive(db_path: str):
+    """Sub-menu to list, add, edit, or remove mapped locations across Priority 1-4."""
+    while True:
+        locations = get_priority_locations(db_path, active_only=False)
+        print("\n" + "=" * 80)
+        print("  PRIORITY LEVEL LOCATIONS & STORAGE MAPPINGS  ")
+        print("=" * 80)
+        print(f"{'#':<4} {'Priority Tier':<14} {'Label / Name':<24} {'Active':<8} {'Path'}")
+        print("-" * 80)
+        for idx, loc in enumerate(locations, 1):
+            tier_info = PRIORITY_TIER_CONFIG.get(loc["priority_tier"].lower(), {"color": 0, "color_name": "None"})
+            emoji = FINDER_COLOR_EMOJI.get(tier_info["color"], "⚪")
+            status = "✓ Yes" if loc["is_active"] else "⚪ Disabled"
+            exists_mark = "" if loc["path"].exists() else " ⚠️ (Not Mounted)"
+            print(f"{idx:<4} {emoji} {loc['priority_tier'].title():<12} {loc['label']:<24} {status:<8} {loc['path_str']}{exists_mark}")
+            if loc["description"]:
+                print(f"     ↳ 📝 {loc['description']}")
+        print("-" * 80)
+
+        print("\nActions:")
+        print("  1. Add a new folder location mapping to a Priority level")
+        print("  2. Toggle Active / Inactive status of a location")
+        print("  3. Edit location Label or Description")
+        print("  4. Remove / Unmap a location")
+        print("  5. Return to previous menu")
+
+        choice = input("\nSelect action (1-5): ").strip()
+        if choice == "1":
+            print("\nSelect Priority Tier to map:")
+            for p_num in range(1, 5):
+                p_name = f"priority {p_num}"
+                p_info = PRIORITY_TIER_CONFIG[p_name]
+                p_em = FINDER_COLOR_EMOJI[p_info["color"]]
+                print(f"  {p_num}: {p_em} Priority {p_num} ({p_info['color_name']})")
+            p_in = input("Enter priority number (1-4): ").strip()
+            if p_in not in ['1', '2', '3', '4']:
+                print("Invalid priority.")
+                continue
+            tier_selected = f"priority {p_in}"
+            path_in = input("Enter directory path to map for this Priority level: ").strip().strip('"').strip("'")
+            if not path_in:
+                print("Path cannot be empty.")
+                continue
+            label_in = input("Enter a descriptive label / nickname (e.g. 'Workstation SSD', 'Backup NAS'): ").strip()
+            desc_in = input("Enter optional description / notes for this location: ").strip()
+            if add_priority_location(db_path, tier_selected, path_in, label_in, desc_in):
+                print(f"\n[Success] Mapped '{path_in}' to {tier_selected.title()} ({label_in}).")
+        elif choice == "2":
+            sel = input(f"Enter location number (1-{len(locations)}) to toggle active status: ").strip()
+            if sel.isdigit() and 1 <= int(sel) <= len(locations):
+                loc = locations[int(sel) - 1]
+                new_status = 0 if loc["is_active"] else 1
+                conn = get_db_connection(db_path)
+                conn.execute("UPDATE priority_locations SET is_active = ? WHERE id = ?", (new_status, loc["id"]))
+                conn.commit()
+                conn.close()
+                print(f"\n[Success] Toggled '{loc['label']}' to {'Active' if new_status else 'Inactive'}.")
+        elif choice == "3":
+            sel = input(f"Enter location number (1-{len(locations)}) to edit: ").strip()
+            if sel.isdigit() and 1 <= int(sel) <= len(locations):
+                loc = locations[int(sel) - 1]
+                print(f"\nCurrent Label: {loc['label']}")
+                new_lbl = input("Enter new label (or press Enter to keep): ").strip()
+                print(f"Current Description: {loc['description']}")
+                new_desc = input("Enter new description (or press Enter to keep): ").strip()
+                conn = get_db_connection(db_path)
+                if new_lbl:
+                    conn.execute("UPDATE priority_locations SET label = ? WHERE id = ?", (new_lbl, loc["id"]))
+                if new_desc:
+                    conn.execute("UPDATE priority_locations SET description = ? WHERE id = ?", (new_desc, loc["id"]))
+                conn.commit()
+                conn.close()
+                print("\n[Success] Location updated.")
+        elif choice == "4":
+            sel = input(f"Enter location number (1-{len(locations)}) to unmap / remove: ").strip()
+            if sel.isdigit() and 1 <= int(sel) <= len(locations):
+                loc = locations[int(sel) - 1]
+                confirm_del = input(f"Remove mapping for '{loc['label']}' ({loc['path_str']})? (Folder files will not be deleted) [y/N]: ").strip().lower()
+                if confirm_del == 'y':
+                    conn = get_db_connection(db_path)
+                    conn.execute("DELETE FROM priority_locations WHERE id = ?", (loc["id"],))
+                    conn.commit()
+                    conn.close()
+                    print("\n[Success] Location unmapped.")
+        elif choice == "5":
+            break
+
+def reset_subfolder_tags_and_verification(db_path: str, storage_root: Path | None = None):
+    """
+    Preserves tags, descriptions, and verified status for all registered Priority locations and their level-1 folders.
+    Strips Finder tags and DB tags from all subfolders beneath level 1 (level 2+).
+    Resets verification status (is_verified = 0) on level 2+ subfolders so they can be curated.
+    """
+    print("\n" + "=" * 80)
+    print("  RESET SUBFOLDER TAGS & VERIFICATION STATUS  ")
+    print("=" * 80)
+    print("This action will:")
+    print("  1. PRESERVE tags, colors, and descriptions on all Priority Locations & their Level-1 folders.")
+    print("  2. STRIP all Finder tags on disk from subfolders beneath Level-1 (Level 2+).")
+    print("  3. REMOVE all database tags for subfolders beneath Level-1 in SQLite.")
+    print("  4. RESET verification status (is_verified = 0) so all subfolders are ready for curation.")
+    print("=" * 80)
+
+    confirm = input("\nProceed with resetting subfolder tags across all Priority locations? [y/N]: ").strip().lower()
+    if confirm != 'y':
+        print("\n[Cancelled] Reset aborted.")
+        return
+
+    print("\nProcessing reset across all Priority Locations...")
+    now_iso = datetime.datetime.now().isoformat()
+    if os.path.exists(db_path):
+        conn = get_db_connection(db_path)
+        cursor = conn.cursor()
+
+        locations = get_priority_locations(db_path, active_only=True)
+        if not locations:
+            print("[Notice] No active priority locations mapped.")
+            conn.close()
+            return
+
+        total_cleared_disk = 0
+        total_deleted_dt = 0
+        total_deleted_ft = 0
+        total_reset_dirs = 0
+
+        for loc in locations:
+            loc_path_str = loc["path_str"]
+
+            # Step 1: Ensure Location root and direct Level-1 folders are marked verified = 1
+            cursor.execute("""
+                UPDATE directories 
+                SET is_verified = 1, verified_at = ?
+                WHERE path = ? OR (
+                    path LIKE ? || '/%' AND path NOT LIKE ? || '/%/%'
+                )
+            """, (now_iso, loc_path_str, loc_path_str, loc_path_str))
+
+            # Step 2: Query all level-2+ directories recorded with tags under this location
+            cursor.execute("""
+                SELECT DISTINCT d.path 
+                FROM directories d 
+                JOIN directory_tags dt ON d.id = dt.directory_id
+                WHERE d.path LIKE ? || '/%/%'
+            """, (loc_path_str,))
+            tagged_paths = [r[0] for r in cursor.fetchall()]
+
+            # Step 3: Remove Finder tags on disk
+            for p_str in tagged_paths:
+                p = Path(p_str)
+                if p.exists() and remove_finder_tags(p):
+                    total_cleared_disk += 1
+
+            # Step 4: Clear DB tags
+            cursor.execute("""
+                DELETE FROM directory_tags 
+                WHERE directory_id IN (
+                    SELECT id FROM directories WHERE path LIKE ? || '/%/%'
+                )
+            """, (loc_path_str,))
+            total_deleted_dt += cursor.rowcount
+
+            cursor.execute("""
+                DELETE FROM file_tags 
+                WHERE file_id IN (
+                    SELECT f.id FROM files f 
+                    JOIN directories d ON f.directory_id = d.id 
+                    WHERE d.path LIKE ? || '/%/%'
+                )
+            """, (loc_path_str,))
+            total_deleted_ft += cursor.rowcount
+
+            # Step 5: Reset verification
+            cursor.execute("""
+                UPDATE directories 
+                SET is_verified = 0, verified_at = NULL 
+                WHERE path LIKE ? || '/%/%'
+            """, (loc_path_str,))
+            total_reset_dirs += cursor.rowcount
+
+        conn.commit()
+        conn.close()
+
+        print("\n[Success] Tag & Verification Reset Complete:")
+        print(f"  • Scoped across {len(locations)} active Priority Locations")
+        print(f"  • Cleared Finder tags from {total_cleared_disk:,} folders on disk")
+        print(f"  • Removed {total_deleted_dt:,} directory tags and {total_deleted_ft:,} file tags from SQLite")
+        print(f"  • Reset {total_reset_dirs:,} subfolders to Unverified (ready for Curation Wizard)")
+
+def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, target_l1_dir: Path | None = None):
+    """
+    Sequential Curation Wizard:
+    Steps through Level-1 folders under Priority 1-4 mapped locations, inspects Level-2 subfolders,
+    generates smart suggested descriptions, and prompts for human review & approval.
+    """
+    print("\n" + "=" * 80)
+    print("  SEQUENTIAL STORAGE CURATION WIZARD  ")
+    print("=" * 80)
+    print("This wizard inspects subfolders under each Priority Location & Level-1 category,")
+    print("analyzes their contents, suggests descriptions, and prompts for your approval.")
+    print("Approved folders receive Priority Finder color tags and are marked as verified DB entries.")
+    print("=" * 80)
+
+    # 1. Determine Scope
+    target_l1_folders = []
+    if target_l1_dir:
+        tier_name = target_l1_dir.parent.name
+        loc_label = target_l1_dir.parent.name
+        target_l1_folders = [(tier_name, loc_label, target_l1_dir.parent, target_l1_dir)]
+    else:
+        all_locations = get_priority_locations(db_path, active_only=True)
+        if not all_locations:
+            print("\n[Notice] No active Priority locations mapped. Use 'loc' to map folder locations.")
+            return
+
+        print("\nSelect Curation Scope:")
+        print("  1. All Priority Tiers & Locations sequentially (Priority 1 -> 4) [Default]")
+        print("  2. Priority 1 (Active & Critical Data)")
+        print("  3. Priority 2 (Systems, DEV & Profiles)")
+        print("  4. Priority 3 (Archival References & Foreign Media)")
+        print("  5. Priority 4 (Media Staging & Photos)")
+        print("  6. Return to menu")
+        scope_choice = input("\nSelect option (1-6) [Default: 1]: ").strip()
+
+        if scope_choice == "6":
+            return
+        elif scope_choice == "2":
+            selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 1"]
+        elif scope_choice == "3":
+            selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 2"]
+        elif scope_choice == "4":
+            selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 3"]
+        elif scope_choice == "5":
+            selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 4"]
+        else:
+            selected_locs = all_locations
+
+        for loc in selected_locs:
+            p_dir = loc["path"]
+            if p_dir.exists() and p_dir.is_dir():
+                for sub in sorted(p_dir.iterdir()):
+                    if sub.is_dir() and not sub.name.startswith('.'):
+                        target_l1_folders.append((loc["priority_tier"].title(), loc["label"], p_dir, sub))
+
+    if not target_l1_folders:
+        print("\n[Notice] No Level-1 folders found to curate.")
+        return
+
+    unverified_only = input("\nReview only UNVERIFIED subfolders? [Y/n]: ").strip().lower() != 'n'
+
+    total_curated = 0
+    total_skipped = 0
+
+    conn = get_db_connection(db_path) if os.path.exists(db_path) else None
+
+    for tier_name, loc_label, loc_path, l1_dir in target_l1_folders:
+        tier_clean = tier_name.lower()
+        tier_info = PRIORITY_TIER_CONFIG.get(tier_clean, {"tag": tier_name, "color": 0, "color_name": "None"})
+        tier_emoji = FINDER_COLOR_EMOJI.get(tier_info["color"], "⚪")
+
+        # Get immediate subfolders (Level-2)
+        l2_subdirs = [s for s in sorted(l1_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')]
+        if not l2_subdirs:
+            continue
+
+        print(f"\n" + "#" * 80)
+        print(f"  {tier_emoji} [{tier_name}] ▸ 📍 {loc_label} ▸ {l1_dir.name}  ({len(l2_subdirs)} subfolders to inspect)")
+        print("#" * 80)
+
+        for s_idx, sub_dir in enumerate(l2_subdirs, 1):
+            res_p = str(sub_dir.resolve())
+            is_verified = 0
+            existing_desc = None
+
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT is_verified, description FROM directories WHERE path = ?", (res_p,))
+                row = cursor.fetchone()
+                if row:
+                    is_verified = row[0] or 0
+                    existing_desc = row[1]
+
+            if unverified_only and is_verified == 1:
+                desc_label = f" — \"{existing_desc}\"" if existing_desc else ""
+                print(f"  [{s_idx}/{len(l2_subdirs)}] ✓ Verified: {sub_dir.name}{desc_label} (Skipping)")
+                continue
+
+            # Analyze content
+            stats = analyze_folder_content(sub_dir)
+            suggested_desc = existing_desc if existing_desc else suggest_folder_description(sub_dir.name, l1_dir.name, tier_name, stats)
+
+            # Format stats
+            size_str = format_size(stats["total_bytes"])
+            files_count = stats["total_files"]
+            date_range = f"{stats['earliest_date']} → {stats['latest_date']}" if stats["earliest_date"] else "Unknown dates"
+            top_exts = ", ".join([f"{count} {ext}" for ext, count in stats["ext_counts"].most_common(4)]) if stats["ext_counts"] else "None"
+            samples = ", ".join(stats["sample_files"][:3]) if stats["sample_files"] else "None"
+
+            verified_badge = "✓ Verified" if is_verified == 1 else "⚪ Unverified (Untagged)"
+
+            while True:
+                print("\n" + "-" * 80)
+                print(f"  {tier_emoji} [{tier_name}] ▸ 📍 {loc_label} ▸ {l1_dir.name}  |  Folder {s_idx}/{len(l2_subdirs)}: '{sub_dir.name}'")
+                print("-" * 80)
+                print(f"  • Location:     {loc_label} ({loc_path})")
+                print(f"  • Full Path:    {sub_dir}")
+                print(f"  • Status:       {verified_badge}")
+                print(f"  • Storage:      {size_str} across {files_count:,} files ({stats['subfolder_count']} subfolders)")
+                print(f"  • Date Range:   {date_range}")
+                print(f"  • File Types:   {top_exts}")
+                print(f"  • Sample Files: {samples}")
+                print(f"\n  💡 Suggested Description:")
+                print(f"     \"{suggested_desc}\"")
+                print("\n  Actions:")
+                print("    [a] Approve suggested description & apply tags (Mark Verified ✓)")
+                print("    [e] Edit description, apply tags & verify")
+                print("    [m] Move / Reassign to another Priority tier or parent folder")
+                print("    [s] Skip for now (remain unverified)")
+                print("    [q] Quit wizard and return to menu")
+
+                action = input("\nSelect action [a/e/m/s/q] (Default: a): ").strip().lower()
+                if not action:
+                    action = 'a'
+
+                if action == 'a':
+                    tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
+                    set_finder_tags(sub_dir, tags)
+                    _sync_directory_tags_to_db(sub_dir, tags, db_path)
+                    _set_directory_description_in_db(sub_dir, suggested_desc, db_path, is_verified=True)
+                    print(f"\n[Success] ✓ Approved & verified '{sub_dir.name}'. Tags & description saved.")
+                    total_curated += 1
+                    break
+                elif action == 'e':
+                    print(f"\nCurrent suggestion: {suggested_desc}")
+                    custom_desc = input("Enter custom description (or press Enter to keep suggestion): ").strip()
+                    final_desc = custom_desc if custom_desc else suggested_desc
+                    tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
+                    set_finder_tags(sub_dir, tags)
+                    _sync_directory_tags_to_db(sub_dir, tags, db_path)
+                    _set_directory_description_in_db(sub_dir, final_desc, db_path, is_verified=True)
+                    print(f"\n[Success] ✓ Custom description approved & verified for '{sub_dir.name}'.")
+                    total_curated += 1
+                    break
+                elif action == 'm':
+                    active_locs = get_priority_locations(db_path, active_only=True)
+                    print("\nSelect Target Location for move:")
+                    for l_idx, al in enumerate(active_locs, 1):
+                        p_info = PRIORITY_TIER_CONFIG.get(al["priority_tier"].lower(), {"color": 0})
+                        p_em = FINDER_COLOR_EMOJI.get(p_info["color"], "⚪")
+                        print(f"  {l_idx}: {p_em} {al['priority_tier'].title()} - {al['label']} ({al['path_str']})")
+                    l_sel = input(f"Select location (1-{len(active_locs)}) or 'c' to cancel: ").strip()
+                    if not l_sel.isdigit() or int(l_sel) < 1 or int(l_sel) > len(active_locs):
+                        print("Move cancelled.")
+                        continue
+                    
+                    target_loc = active_locs[int(l_sel) - 1]
+                    target_tier_dir = target_loc["path"]
+                    target_l1_subdirs = [s for s in sorted(target_tier_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')]
+                    print(f"\nSelect target category in {target_loc['label']}:")
+                    for t_idx, tl1 in enumerate(target_l1_subdirs, 1):
+                        print(f"  {t_idx}: {tl1.name}")
+                    tl1_sel = input(f"Select category (1-{len(target_l1_subdirs)}) or 'c' to cancel: ").strip()
+                    if not tl1_sel.isdigit() or int(tl1_sel) < 1 or int(tl1_sel) > len(target_l1_subdirs):
+                        print("Move cancelled.")
+                        continue
+                    
+                    target_l1_dest = target_l1_subdirs[int(tl1_sel) - 1]
+                    target_dest_path = target_l1_dest / sub_dir.name
+                    if target_dest_path.exists():
+                        print(f"\n[Error] Destination '{target_dest_path}' already exists!")
+                        continue
+
+                    confirm_m = input(f"Move '{sub_dir.name}' to '{target_dest_path}'? [y/N]: ").strip().lower()
+                    if confirm_m == 'y':
+                        shutil.move(str(sub_dir), str(target_dest_path))
+                        if os.path.exists(db_path):
+                            c_conn = get_db_connection(db_path)
+                            c_cur = c_conn.cursor()
+                            old_p = str(sub_dir.resolve())
+                            new_p = str(target_dest_path.resolve())
+                            c_cur.execute("""
+                                UPDATE directories
+                                SET path = ? || SUBSTR(path, LENGTH(?) + 1)
+                                WHERE path = ? OR path LIKE ? || '/%'
+                            """, (new_p, old_p, old_p, old_p))
+                            c_conn.commit()
+                            c_conn.close()
+
+                        new_tier_info = PRIORITY_TIER_CONFIG[target_loc["priority_tier"].lower()]
+                        new_tags = [(new_tier_info["tag"], new_tier_info["color"]), (target_l1_dest.name, 0), (sub_dir.name, 0)]
+                        set_finder_tags(target_dest_path, new_tags)
+                        _sync_directory_tags_to_db(target_dest_path, new_tags, db_path)
+                        _set_directory_description_in_db(target_dest_path, suggested_desc, db_path, is_verified=True)
+                        print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' under {target_loc['label']} / {target_l1_dest.name}.")
+                        total_curated += 1
+                        break
+                elif action == 's':
+                    print(f"\n[Skipped] '{sub_dir.name}' left unverified.")
+                    total_skipped += 1
+                    break
+                elif action == 'q':
+                    if conn:
+                        conn.close()
+                    print("\n" + "=" * 80)
+                    print("CURATION WIZARD SUMMARY")
+                    print("=" * 80)
+                    print(f"  • Verified in this session: {total_curated}")
+                    print(f"  • Skipped unverified:       {total_skipped}")
+                    print("Progress saved in SQLite. You can resume any time!")
+                    print("=" * 80)
+                    return
+                else:
+                    print("\n[Error] Invalid choice.")
+
+    if conn:
+        conn.close()
+
+    print("\n" + "=" * 80)
+    print("CURATION WIZARD COMPLETED")
+    print("=" * 80)
+    print(f"  • Newly Verified Folders:   {total_curated}")
+    print(f"  • Skipped Unverified:       {total_skipped}")
+    print("=" * 80)
+
+
+def _inspect_and_edit_single_folder(item: dict, storage_root: Path, db_path: str):
+
+    """Sub-menu to edit a single level-1 folder's tags, color, description, or reassign its Priority tier."""
+    folder_path = item["path"]
+    while True:
+        finder_details = get_finder_tags_with_details(folder_path)
+        print("\n" + "=" * 65)
+        print(f"FOLDER INSPECTION & TAGGING: {item['name']}")
+        print("=" * 65)
+        print(f"  • Path:         {folder_path}")
+        print(f"  • Parent Tier:  {item['parent_tier']} ({item['tier_color_name']})")
+        desc_val = item.get("description")
+        print(f"  • Description:  {desc_val if desc_val else 'None (stored in SQLite DB)'}")
+        
+        if item["size_bytes"] is not None and item["file_count"] is not None:
+            print(f"  • DB Storage:   {format_size(item['size_bytes'])} across {item['file_count']:,} indexed files")
+
+        if finder_details:
+            tag_desc = ", ".join([f"{t['emoji']} {t['name']} ({t['color_name']})" for t in finder_details])
+            print(f"  • Finder Tags:  {tag_desc}")
+        else:
+            print(f"  • Finder Tags:  ⚪ None (Untagged)")
+
+        if item.get("db_tags"):
+            print(f"  • SQLite Tags:  {', '.join(item['db_tags'])}")
+
+        print("\nActions:")
+        print("  1. Apply standard Priority tags (Priority tier with color + folder name tag)")
+        print("  2. Add / Edit folder description (Stored in SQLite database)")
+        print("  3. Custom tag & Finder color (Add/edit custom tag and pick color)")
+        print("  4. Move / Reassign to a different Priority Tier (e.g., Priority 2 -> Priority 3)")
+        print("  5. Propagate current tags to all subfolders in this subtree")
+        print("  6. Remove / Clear all tags from this folder")
+        print("  7. Launch Curation Wizard on this folder's subdirectories (Scan & Triage)")
+        print("  8. Return to folder list")
+
+        sub_choice = input("\nSelect action (1-8): ").strip()
+
+        if sub_choice == "1":
+            tier_info = PRIORITY_TIER_CONFIG.get(item["parent_tier"].lower(), {"tag": item["parent_tier"], "color": item["tier_color"]})
+            tags_to_apply = [(tier_info["tag"], tier_info["color"]), (item["name"], 0)]
+            set_finder_tags(folder_path, tags_to_apply)
+            _sync_directory_tags_to_db(folder_path, tags_to_apply, db_path)
+            item["finder_details"] = get_finder_tags_with_details(folder_path)
+            item["db_tags"] = [t[0].lower() for t in tags_to_apply]
+            print(f"\n[Success] Standard tags applied: {tags_to_apply}")
+        elif sub_choice == "2":
+            cur_desc = item.get("description") or ""
+            print(f"\nCurrent description: {cur_desc if cur_desc else '(empty)'}")
+            new_desc = input("Enter new folder description (or press Enter to keep current): ").strip()
+            if new_desc:
+                _set_directory_description_in_db(folder_path, new_desc, db_path)
+                item["description"] = new_desc
+                print(f"\n[Success] Folder description saved to SQLite.")
+            elif new_desc == "" and cur_desc:
+                clear_desc = input("Clear existing description? [y/N]: ").strip().lower()
+                if clear_desc == 'y':
+                    _set_directory_description_in_db(folder_path, None, db_path)
+                    item["description"] = None
+                    print(f"\n[Success] Folder description cleared.")
+        elif sub_choice == "3":
+            tag_name = input(f"Enter custom tag name [Default: {item['name']}]: ").strip()
+            tag_name = tag_name if tag_name else item["name"]
+
+            print("\nSelect Finder Color:")
+            for code, color_name in FINDER_COLOR_MAP.items():
+                emoji = FINDER_COLOR_EMOJI.get(code, "⚪")
+                print(f"  {code}: {emoji} {color_name}")
+            c_input = input(f"Enter color number (0-7) [Default: {item['tier_color']}]: ").strip()
+            color_code = int(c_input) if c_input.isdigit() and 0 <= int(c_input) <= 7 else item["tier_color"]
+
+            new_tags = [(tag_name, color_code)]
+            add_parent = input(f"Also keep parent Priority tag '{item['parent_tier']}'? [Y/n]: ").strip().lower()
+            if add_parent != 'n':
+                new_tags.append((item["parent_tier"], item["tier_color"]))
+
+            set_finder_tags(folder_path, new_tags)
+            _sync_directory_tags_to_db(folder_path, new_tags, db_path)
+            item["finder_details"] = get_finder_tags_with_details(folder_path)
+            item["db_tags"] = [t[0].lower() for t in new_tags]
+            print(f"\n[Success] Custom tags applied: {new_tags}")
+        elif sub_choice == "4":
+            print("\nSelect Target Priority Tier:")
+            for p_num in range(1, 5):
+                p_name = f"Priority {p_num}"
+                p_info = PRIORITY_TIER_CONFIG[p_name.lower()]
+                p_emoji = FINDER_COLOR_EMOJI[p_info["color"]]
+                marker = " (Current)" if p_name == item["parent_tier"] else ""
+                print(f"  {p_num}: {p_emoji} {p_name} ({p_info['color_name']}){marker}")
+
+            p_sel = input("Enter target priority number (1-4) or 'c' to cancel: ").strip()
+            if not p_sel.isdigit() or int(p_sel) not in [1, 2, 3, 4]:
+                print("Cancelled.")
+                continue
+
+            target_p_name = f"Priority {p_sel}"
+            if target_p_name == item["parent_tier"]:
+                print("\n[Notice] Folder is already in this Priority tier.")
+                continue
+
+            target_parent_dir = storage_root / target_p_name
+            target_dest_path = target_parent_dir / item["name"]
+
+            if target_dest_path.exists():
+                print(f"\n[Warning] Destination '{target_dest_path}' already exists! Cannot move.")
+                continue
+
+            confirm_move = input(f"\nAre you sure you want to MOVE '{folder_path}' to '{target_dest_path}'? [y/N]: ").strip().lower()
+            if confirm_move == 'y':
+                target_parent_dir.mkdir(exist_ok=True)
+                shutil.move(str(folder_path), str(target_dest_path))
+                print(f"\n[Success] Moved directory to '{target_dest_path}'.")
+
+                new_tier_info = PRIORITY_TIER_CONFIG[target_p_name.lower()]
+                new_tags = [(new_tier_info["tag"], new_tier_info["color"]), (item["name"], 0)]
+                set_finder_tags(target_dest_path, new_tags)
+
+                if os.path.exists(db_path):
+                    conn = get_db_connection(db_path)
+                    cursor = conn.cursor()
+                    old_path_str = str(folder_path.resolve())
+                    new_path_str = str(target_dest_path.resolve())
+                    cursor.execute("""
+                        UPDATE directories
+                        SET path = ? || SUBSTR(path, LENGTH(?) + 1)
+                        WHERE path = ? OR path LIKE ? || '/%'
+                    """, (new_path_str, old_path_str, old_path_str, old_path_str))
+                    conn.commit()
+                    conn.close()
+                    print("[Success] Synchronized updated paths in SQLite database.")
+
+                item["path"] = target_dest_path
+                item["parent_tier"] = target_p_name
+                item["tier_color"] = new_tier_info["color"]
+                item["tier_color_name"] = new_tier_info["color_name"]
+                item["tier_emoji"] = FINDER_COLOR_EMOJI[new_tier_info["color"]]
+                item["finder_details"] = get_finder_tags_with_details(target_dest_path)
+                folder_path = target_dest_path
+        elif sub_choice == "5":
+            confirm_prop = input(f"\nPropagate tags recursively to all subfolders of '{item['name']}'? [y/N]: ").strip().lower()
+            if confirm_prop == 'y':
+                tier_info = PRIORITY_TIER_CONFIG.get(item["parent_tier"].lower(), {"tag": item["parent_tier"], "color": item["tier_color"]})
+                tags_to_prop = [(tier_info["tag"], tier_info["color"]), (item["name"], 0)]
+                count_prop = 0
+                for root_dir, dirnames, _ in os.walk(folder_path):
+                    for d in dirnames:
+                        sub_p = Path(root_dir) / d
+                        set_finder_tags(sub_p, tags_to_prop)
+                        _sync_directory_tags_to_db(sub_p, tags_to_prop, db_path)
+                        count_prop += 1
+                print(f"\n[Success] Propagated tags across {count_prop:,} subdirectories.")
+        elif sub_choice == "6":
+            confirm_clear = input(f"\nClear all Finder & DB tags from '{item['name']}'? [y/N]: ").strip().lower()
+            if confirm_clear == 'y':
+                remove_finder_tags(folder_path)
+                if os.path.exists(db_path):
+                    conn = get_db_connection(db_path)
+                    cursor = conn.cursor()
+                    res_p = str(folder_path.resolve())
+                    cursor.execute("SELECT id FROM directories WHERE path = ?", (res_p,))
+                    row = cursor.fetchone()
+                    if row:
+                        cursor.execute("DELETE FROM directory_tags WHERE directory_id = ?", (row[0],))
+                        conn.commit()
+                    conn.close()
+                item["finder_details"] = []
+                item["db_tags"] = []
+                print("\n[Success] All tags removed.")
+        elif sub_choice == "7":
+            curation_wizard_interactive(db_path, storage_root, target_l1_dir=folder_path)
+        elif sub_choice == "8":
+            break
+        else:
+            print("\n[Error] Invalid choice.")
+
+def get_idrive_backup_sets() -> dict:
+    """Discovers and parses iDrive backup sets from IDriveforMac application support plist files.
+    Returns dict with keys:
+      'main': list of paths from backupReferenceFile.plist
+      'network': list of paths from NetworkDriveBackupSet.plist
+      'local': list of paths from localBackupReferenceFile.plist
+      'all': set of all normalized backed-up paths
+      'account_dir': str path to user's IDrive account directory
+    """
+    base_dir = os.path.expanduser('~/Library/Application Support/IDriveforMac')
+    results = {'main': [], 'network': [], 'local': [], 'all': set(), 'account_dir': None}
+    if not os.path.isdir(base_dir):
+        return results
+
+    # Locate account directories
+    account_dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d)) and "@" in d]
+    if account_dirs:
+        results['account_dir'] = account_dirs[0]
+
+    # Main online backup set
+    for p in glob.glob(f'{base_dir}/**/backupReferenceFile.plist', recursive=True):
+        try:
+            with open(p, 'rb') as f:
+                items = plistlib.load(f)
+                if isinstance(items, list):
+                    results['main'].extend(items)
+                    results['all'].update([os.path.normpath(i) for i in items])
+        except Exception:
+            pass
+
+    # Network / External drive backup set
+    for p in glob.glob(f'{base_dir}/**/NetworkDriveBackupSet.plist', recursive=True):
+        try:
+            with open(p, 'rb') as f:
+                items = plistlib.load(f)
+                if isinstance(items, list):
+                    results['network'].extend(items)
+                    results['all'].update([os.path.normpath(i) for i in items])
+        except Exception:
+            pass
+
+    # Local backup set
+    for p in glob.glob(f'{base_dir}/**/localBackupReferenceFile.plist', recursive=True):
+        try:
+            with open(p, 'rb') as f:
+                items = plistlib.load(f)
+                if isinstance(items, list):
+                    results['local'].extend(items)
+                    results['all'].update([os.path.normpath(i) for i in items])
+        except Exception:
+            pass
+
+    results['main'] = sorted(list(set(results['main'])))
+    results['network'] = sorted(list(set(results['network'])))
+    results['local'] = sorted(list(set(results['local'])))
+    return results
+
+def check_idrive_backup_coverage(folder_path: str | Path, backup_items: set) -> tuple[bool, str]:
+    """Checks whether folder_path or any of its parent folders are covered in backup_items."""
+    p_norm = os.path.normpath(str(folder_path))
+    for b in backup_items:
+        b_norm = os.path.normpath(b)
+        if p_norm == b_norm:
+            return True, f"Direct Match ({b})"
+        if p_norm.startswith(b_norm + os.sep):
+            return True, f"Covered by Parent ({b})"
+    # Check if children are in backup items (partial coverage)
+    child_matches = [b for b in backup_items if b.startswith(p_norm + os.sep)]
+    if child_matches:
+        return False, f"Partial Match ({len(child_matches)} sub-items backed up)"
+    return False, "Not in iDrive backup set"
+
+def add_folder_to_idrive_backup_set(folder_path: str | Path) -> tuple[bool, str]:
+    """Safely adds a folder path to the appropriate iDrive backup set plist file."""
+    norm_p = os.path.normpath(str(folder_path))
+    if not os.path.exists(norm_p):
+        return False, f"Path does not exist on disk: {norm_p}"
+
+    base_dir = os.path.expanduser('~/Library/Application Support/IDriveforMac')
+    account_dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d)) and "@" in d] if os.path.isdir(base_dir) else []
+    if not account_dirs:
+        return False, "Could not locate iDrive account folder in Application Support."
+
+    acc_dir = account_dirs[0]
+    # External volumes (/Volumes/...) belong to NetworkDriveBackupSet.plist in IDrive for Mac
+    if norm_p.startswith("/Volumes/"):
+        target_plist = os.path.join(acc_dir, "NetworkDriveBackupSet.plist")
+        set_name = "Network / External Drive Backup Set"
+    else:
+        target_plist = os.path.join(acc_dir, "backupReferenceFile.plist")
+        set_name = "Main Backup Set"
+
+    try:
+        current_items = []
+        if os.path.exists(target_plist):
+            bak_path = f"{target_plist}.bak.{int(time.time())}"
+            shutil.copy2(target_plist, bak_path)
+            with open(target_plist, 'rb') as f:
+                data = plistlib.load(f)
+                if isinstance(data, list):
+                    current_items = list(data)
+
+        if norm_p in current_items:
+            return True, f"Already present in {set_name}."
+
+        current_items.append(norm_p)
+        with open(target_plist, 'wb') as f:
+            plistlib.dump(current_items, f, fmt=plistlib.FMT_XML)
+
+        return True, f"Successfully added to {set_name} ({target_plist})."
+    except Exception as e:
+        return False, f"Failed to update iDrive plist: {e}"
+
+def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1"):
+    """Interactively audits Priority 1 folders (or all priorities) against active iDrive backup sets."""
+    print("\n" + "=" * 85)
+    print("  iDRIVE BACKUP INCLUSION AUDIT & VERIFICATION")
+    print("=" * 85)
+
+    backup_info = get_idrive_backup_sets()
+    all_backup_items = backup_info["all"]
+    account_dir = backup_info.get("account_dir")
+
+    print(f"  • iDrive Account Directory:  {account_dir if account_dir else 'Not found'}")
+    print(f"  • Main Backup Set:           {len(backup_info['main'])} folders configured")
+    print(f"  • External/Network Drives:   {len(backup_info['network'])} folders configured")
+    print(f"  • Total Backed Up Items:     {len(all_backup_items)} items")
+
+    # Check if IDrive app is running
+    idrive_running = False
+    try:
+        proc = subprocess.run(["pgrep", "-f", "/Applications/IDrive.app"], capture_output=True, text=True)
+        idrive_running = (proc.returncode == 0)
+    except Exception:
+        pass
+    status_icon = "🟢 Running" if idrive_running else "⚪ Not Running"
+    print(f"  • IDrive Client Process:     {status_icon}")
+
+    locations = get_priority_locations(db_path, active_only=True)
+    if target_tier:
+        locations = [l for l in locations if l["priority_tier"].lower() == target_tier.lower()]
+
+    if not locations:
+        print(f"\n[Notice] No active locations found matching '{target_tier}'.")
+        input("\nPress Enter to return...")
+        return
+
+    conn = get_db_connection(db_path) if os.path.exists(db_path) else None
+    cursor = conn.cursor() if conn else None
+
+    audit_rows = []
+    missing_paths = []
+
+    for loc in locations:
+        loc_path = loc["path"]
+        loc_label = loc["label"]
+        tier = loc["priority_tier"].title()
+
+        # Check the location root itself
+        loc_covered, loc_reason = check_idrive_backup_coverage(loc_path, all_backup_items)
+        audit_rows.append({
+            "is_root": True,
+            "tier": tier,
+            "label": loc_label,
+            "path": loc_path,
+            "name": f"📍 [ROOT] {loc_label}",
+            "covered": loc_covered,
+            "reason": loc_reason,
+            "size_bytes": None,
+            "file_count": None
+        })
+        if not loc_covered:
+            missing_paths.append(loc_path)
+
+        # Check level-1 categories under this location
+        if loc_path.exists():
+            for sub in sorted(loc_path.iterdir()):
+                if sub.is_dir() and not sub.name.startswith('.'):
+                    sub_covered, sub_reason = check_idrive_backup_coverage(sub, all_backup_items)
+                    fc, sb = None, None
+                    if cursor:
+                        res_p = str(sub.resolve())
+                        cursor.execute("""
+                            SELECT COUNT(f.id), COALESCE(SUM(f.size_bytes), 0)
+                            FROM directories d
+                            LEFT JOIN files f ON d.id = f.directory_id
+                            WHERE d.path = ? OR d.path LIKE ? || '/%'
+                        """, (res_p, res_p))
+                        row = cursor.fetchone()
+                        if row and row[0] is not None and row[0] > 0:
+                            fc, sb = row[0], row[1]
+                    audit_rows.append({
+                        "is_root": False,
+                        "tier": tier,
+                        "label": loc_label,
+                        "path": sub,
+                        "name": sub.name,
+                        "covered": sub_covered,
+                        "reason": sub_reason,
+                        "size_bytes": sb,
+                        "file_count": fc
+                    })
+                    if not sub_covered and not loc_covered:
+                        missing_paths.append(sub)
+
+    if conn:
+        conn.close()
+
+    print("\n" + "=" * 98)
+    print(f"  BACKUP VERIFICATION RESULTS: {target_tier.upper()}")
+    print("=" * 98)
+    print(f"{'#':<4} {'Priority Tier':<14} {'Target Folder':<32} {'Size / Files':<18} {'iDrive Status'}")
+    print("-" * 98)
+
+    missing_count = 0
+    covered_count = 0
+
+    for idx, row in enumerate(audit_rows, 1):
+        if row["size_bytes"] is not None and row["file_count"] is not None:
+            sz_str = f"{format_size(row['size_bytes'])} ({row['file_count']:,})"
+        else:
+            sz_str = "--"
+
+        if row["covered"]:
+            covered_count += 1
+            status_str = f"✅ INCLUDED ({row['reason']})"
+        else:
+            missing_count += 1
+            status_str = f"❌ MISSING ({row['reason']})"
+
+        name_display = row["name"]
+        if row["is_root"]:
+            name_display = f"📍 {name_display[:28]}"
+
+        print(f"{idx:<4} {row['tier']:<14} {name_display:<32} {sz_str:<18} {status_str}")
+        print(f"     ↳ Path: {row['path']}")
+
+    print("-" * 98)
+    print(f"Summary: {covered_count} covered in iDrive, {missing_count} MISSING from backup list.")
+
+    if missing_count > 0:
+        print("\n⚠️  ACTION REQUIRED: Priority 1 folders are NOT currently backed up to iDrive!")
+    else:
+        print("\n✅ All Priority 1 folders are confirmed in the iDrive backup set!")
+
+    while True:
+        print("\nOptions:")
+        print("  1. Add missing Priority 1 location root to iDrive backup set (.plist)")
+        print("  2. Add missing individual level-1 category folders to iDrive backup set (.plist)")
+        print("  3. View current active items in iDrive backup sets (All 14 items)")
+        print("  4. View step-by-step instructions for adding folders in iDrive Desktop GUI")
+        print("  5. Return to Tagging Review menu")
+
+        act = input("\nSelect option (1-5): ").strip()
+        if act == "1":
+            root_targets = [r["path"] for r in audit_rows if r["is_root"] and not r["covered"]]
+            if not root_targets:
+                print("\n[Notice] All location roots are already covered in iDrive.")
+                continue
+            for r_p in root_targets:
+                confirm = input(f"Add '{r_p}' to iDrive Backup Set? [y/N]: ").strip().lower()
+                if confirm == 'y':
+                    ok, msg = add_folder_to_idrive_backup_set(r_p)
+                    print(f"  • {r_p}: {'[Success]' if ok else '[Error]'} {msg}")
+            print("\n[Important] If IDrive is currently running, quit and reopen IDrive to reload the backup set.")
+        elif act == "2":
+            sub_targets = [r["path"] for r in audit_rows if not r["is_root"] and not r["covered"]]
+            if not sub_targets:
+                print("\n[Notice] All category folders are already covered in iDrive.")
+                continue
+            for s_p in sub_targets:
+                confirm = input(f"Add '{s_p}' to iDrive Backup Set? [y/N]: ").strip().lower()
+                if confirm == 'y':
+                    ok, msg = add_folder_to_idrive_backup_set(s_p)
+                    print(f"  • {s_p}: {'[Success]' if ok else '[Error]'} {msg}")
+            print("\n[Important] If IDrive is currently running, quit and reopen IDrive to reload the backup set.")
+        elif act == "3":
+            print("\n--- CURRENT iDRIVE BACKUP SET ---")
+            print("Main Online Backup Set (Local):")
+            for m in backup_info["main"]:
+                print(f"  • {m}")
+            print("\nExternal / Network Drives Backup Set:")
+            for n in backup_info["network"]:
+                print(f"  • {n}")
+        elif act == "4":
+            print("\n" + "=" * 65)
+            print("  HOW TO ADD PRIORITY 1 FOLDERS IN iDRIVE DESKTOP GUI")
+            print("=" * 65)
+            print("1. Open the IDrive application on your Mac.")
+            print("2. Navigate to the 'Backup' tab on the left sidebar.")
+            print("3. Click 'Change...' or browse down the folder tree.")
+            print("4. Expand 'Volumes' -> 'LaCie' -> 'Storage'.")
+            print("5. Check the box for 'Priority 1' (or 'Data' and 'Documents').")
+            print("6. Click 'Save' / 'Apply'.")
+            print("7. Run 'audit_idrive_backup_interactive' here to confirm coverage!")
+            print("=" * 65)
+        elif act == "5":
+            break
+        else:
+            print("[Error] Invalid choice.")
+
+def tag_review_priority_folders_interactive(db_path: str):
+    """Interactive review and editing of level-1 folders across all mapped Priority locations."""
+    print("\n" + "=" * 70)
+    print("  TAGGING REVIEW & MANAGEMENT (Priority Locations & Level-1 Folders)")
+    print("=" * 70)
+
+    while True:
+        locations = get_priority_locations(db_path, active_only=True)
+        if not locations:
+            # Seed defaults
+            get_priority_locations(db_path, active_only=True)
+            locations = get_priority_locations(db_path, active_only=True)
+
+        tier_map = defaultdict(list)
+        for loc in locations:
+            t_num = 99
+            for part in loc["priority_tier"].split():
+                if part.isdigit():
+                    t_num = int(part)
+            tier_map[t_num].append(loc)
+
+        priority_tier_desc = {}
+        level1_items = []
+        conn = get_db_connection(db_path) if os.path.exists(db_path) else None
+        cursor = conn.cursor() if conn else None
+
+        for p_num in sorted(tier_map.keys()):
+            tier_name = f"Priority {p_num}"
+            tier_clean = f"priority {p_num}"
+            tier_info = PRIORITY_TIER_CONFIG.get(tier_clean, {"tag": tier_name, "color": 0, "color_name": "None"})
+            tier_color_emoji = FINDER_COLOR_EMOJI.get(tier_info["color"], "⚪")
+
+            loc_list = tier_map[p_num]
+            # Get tier description from primary location or defaults
+            for loc in loc_list:
+                if cursor and loc["path"].exists():
+                    res_p = str(loc["path"].resolve())
+                    cursor.execute("SELECT description FROM directories WHERE path = ?", (res_p,))
+                    desc_row = cursor.fetchone()
+                    if desc_row and desc_row[0]:
+                        priority_tier_desc[tier_name] = desc_row[0]
+                        break
+            if tier_name not in priority_tier_desc:
+                def_desc = DEFAULT_PRIORITY_DESCRIPTIONS.get(tier_clean, "")
+                priority_tier_desc[tier_name] = def_desc
+
+            for loc in loc_list:
+                loc_path = loc["path"]
+                loc_label = loc["label"]
+                if not loc_path.exists():
+                    continue
+
+                sub_dirs = [s for s in sorted(loc_path.iterdir()) if s.is_dir() and not s.name.startswith('.')]
+                for s_dir in sub_dirs:
+                    finder_details = get_finder_tags_with_details(s_dir)
+                    file_count = None
+                    size_bytes = None
+                    db_tags = []
+                    folder_desc = None
+                    if cursor:
+                        res_p = str(s_dir.resolve())
+                        cursor.execute("""
+                            SELECT COUNT(f.id), COALESCE(SUM(f.size_bytes), 0)
+                            FROM directories d
+                            LEFT JOIN files f ON d.id = f.directory_id
+                            WHERE d.path = ? OR d.path LIKE ? || '/%'
+                        """, (res_p, res_p))
+                        row = cursor.fetchone()
+                        if row and row[0] is not None and row[0] > 0:
+                            file_count, size_bytes = row[0], row[1]
+                        
+                        cursor.execute("""
+                            SELECT dt.tag_name
+                            FROM directory_tags dt
+                            JOIN directories d ON dt.directory_id = d.id
+                            WHERE d.path = ?
+                        """, (res_p,))
+                        db_tags = [r[0] for r in cursor.fetchall()]
+
+                        cursor.execute("SELECT description FROM directories WHERE path = ?", (res_p,))
+                        d_row = cursor.fetchone()
+                        if d_row and d_row[0]:
+                            folder_desc = d_row[0]
+                        else:
+                            def_l1_desc = DEFAULT_LEVEL1_DESCRIPTIONS.get((tier_clean, s_dir.name.lower()))
+                            if def_l1_desc:
+                                _set_directory_description_in_db(s_dir, def_l1_desc, db_path)
+                                folder_desc = def_l1_desc
+
+                    level1_items.append({
+                        "path": s_dir,
+                        "name": s_dir.name,
+                        "parent_tier": tier_name,
+                        "loc_label": loc_label,
+                        "loc_path": loc_path,
+                        "tier_color": tier_info["color"],
+                        "tier_color_name": tier_info["color_name"],
+                        "tier_emoji": tier_color_emoji,
+                        "finder_details": finder_details,
+                        "file_count": file_count,
+                        "size_bytes": size_bytes,
+                        "db_tags": db_tags,
+                        "description": folder_desc
+                    })
+
+        if conn:
+            conn.close()
+
+        # Check iDrive backup sets
+        idrive_info = get_idrive_backup_sets()
+        all_backup_items = idrive_info["all"]
+
+        print("\n" + "=" * 98)
+        print("  STORAGE LEVEL-1 FOLDERS & PRIORITY LOCATIONS REVIEW")
+        print("=" * 98)
+        print(f"{'#':<4} {'Parent Tier':<14} {'Folder Name':<32} {'Size / Files':<18} {'Finder Color & Tags'}")
+        print("-" * 98)
+
+        curr_tier = None
+        curr_loc = None
+        for idx, item in enumerate(level1_items, 1):
+            if item["parent_tier"] != curr_tier:
+                curr_tier = item["parent_tier"]
+                curr_loc = None
+                t_desc = priority_tier_desc.get(curr_tier, "")
+                desc_label = f" — \"{t_desc}\"" if t_desc else ""
+                print(f"\n{item['tier_emoji']} [{curr_tier}] ({item['tier_color_name']}){desc_label}")
+
+                # If Priority 1, check if all mapped locations & items are in iDrive
+                if curr_tier.lower() == "priority 1":
+                    p1_missing = [it for it in level1_items if it["parent_tier"].lower() == "priority 1" and not check_idrive_backup_coverage(it["path"], all_backup_items)[0]]
+                    if p1_missing:
+                        print("  ⚠️  Notice: Priority 1 folders are NOT confirmed in iDrive backup set! Type 'idrive' to review & fix.")
+                    else:
+                        print("  ☁️  iDrive Status: All Priority 1 folders are confirmed in the active backup set.")
+
+            loc_key = (item["loc_label"], str(item["loc_path"]))
+            if loc_key != curr_loc:
+                curr_loc = loc_key
+                print(f"  📍 Location: {item['loc_label']} ({item['loc_path']})")
+
+            if item["size_bytes"] is not None and item["file_count"] is not None:
+                size_str = f"{format_size(item['size_bytes'])} ({item['file_count']:,})"
+            else:
+                size_str = "--"
+
+            if not item["finder_details"]:
+                tag_display = "⚪ Untagged ⚠️"
+            else:
+                tag_parts = []
+                for td in item["finder_details"]:
+                    c_emoji = td["emoji"]
+                    t_name = td["name"]
+                    if td["color"] > 0:
+                        tag_parts.append(f"{c_emoji} {td['color_name']}: {t_name}")
+                    else:
+                        tag_parts.append(f"{t_name}")
+                tag_display = " | ".join(tag_parts)
+
+            # For Priority 1, append iDrive coverage badge
+            if item["parent_tier"].lower() == "priority 1":
+                is_cov, _ = check_idrive_backup_coverage(item["path"], all_backup_items)
+                idrive_badge = " [☁️ iDrive: ✅]" if is_cov else " [☁️ iDrive: ❌ Missing]"
+                tag_display += idrive_badge
+
+            print(f"{idx:<4} {item['parent_tier']:<14} {item['name']:<32} {size_str:<18} {tag_display}")
+            if item.get("description"):
+                print(f"     ↳ 📝 {item['description']}")
+
+        print("-" * 98)
+        print(f"Total Folders: {len(level1_items)}")
+        print("\nOptions:")
+        print(f"  • Enter folder number (1-{len(level1_items)}) to inspect & edit tags / color / description / tier")
+        print("  • 'loc' - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)")
+        print("  • 'idrive' - Audit iDrive backup inclusion (Check Priority 1 folders in iDrive backup set)")
+        print("  • 'w' - Launch Sequential Curation Wizard (Triage subfolders across locations)")
+        print("  • 'p1'-'p4' - Edit description of a top-level Priority tier (Priority 1-4)")
+        print("  • 'a' - Auto-tag untagged folders with parent Priority & category")
+        print("  • 'reset-tags' - Reset subfolder tags & verification (Preserve level-1, clear level-2+ tags)")
+        print("  • 'r' - Refresh view from filesystem")
+        print("  • 'b' - Return to main menu")
+
+        action_choice = input("\nSelect option or folder number: ").strip().lower()
+
+        if action_choice == 'b':
+            break
+        elif action_choice == 'r':
+            continue
+        elif action_choice == 'idrive':
+            audit_idrive_backup_interactive(db_path, "priority 1")
+            continue
+        elif action_choice == 'loc':
+            manage_priority_locations_interactive(db_path)
+            continue
+        elif action_choice == 'w':
+            curation_wizard_interactive(db_path)
+            continue
+        elif action_choice == 'reset-tags':
+            reset_subfolder_tags_and_verification(db_path)
+            continue
+        elif action_choice in ['p1', 'p2', 'p3', 'p4']:
+            p_num = action_choice[1]
+            p_target_name = f"Priority {p_num}"
+            cur_p_desc = priority_tier_desc.get(p_target_name, "")
+            print(f"\n--- EDIT DESCRIPTION FOR TOP-LEVEL {p_target_name} ---")
+            print(f"Current description: {cur_p_desc if cur_p_desc else '(empty)'}")
+            new_p_desc = input(f"Enter new description for {p_target_name} (or Enter to keep): ").strip()
+            if new_p_desc:
+                # Update across mapped locations for this tier
+                for loc in tier_map.get(int(p_num), []):
+                    if loc["path"].exists():
+                        _set_directory_description_in_db(loc["path"], new_p_desc, db_path)
+                priority_tier_desc[p_target_name] = new_p_desc
+                print(f"\n[Success] Updated description for {p_target_name} in SQLite database.")
+            continue
+        elif action_choice == 'a':
+            untagged = [it for it in level1_items if not it["finder_details"] or not any(it["parent_tier"].lower() in td["name"].lower() for td in it["finder_details"])]
+            if not untagged:
+                print("\n[Notice] All level-1 folders already possess their parent Priority tags!")
+                continue
+
+            print(f"\nFound {len(untagged)} folders needing standard Priority tags:")
+            for u in untagged:
+                print(f"  • [{u['parent_tier']}] {u['name']} -> {u['tier_emoji']} {u['parent_tier']} ({u['tier_color_name']}) + '{u['name']}'")
+
+            confirm_a = input("\nApply tags to these folders in Finder and SQLite? [y/N]: ").strip().lower()
+            if confirm_a == 'y':
+                for u in untagged:
+                    tags_to_apply = [(u["parent_tier"], u["tier_color"]), (u["name"], 0)]
+                    set_finder_tags(u["path"], tags_to_apply)
+                    _sync_directory_tags_to_db(u["path"], tags_to_apply, db_path)
+                print(f"\n[Success] Standard Priority tags applied to {len(untagged)} folders.")
+            continue
+        elif action_choice.isdigit():
+            idx_sel = int(action_choice)
+            if idx_sel < 1 or idx_sel > len(level1_items):
+                print(f"\n[Error] Invalid folder number. Choose between 1 and {len(level1_items)}.")
+                continue
+
+            sel_item = level1_items[idx_sel - 1]
+            _inspect_and_edit_single_folder(sel_item, sel_item["loc_path"], db_path)
+        else:
+            print("\n[Error] Invalid choice.")
+
+
 def tag_manager_interactive(db_path: str):
     """Submenu for auto-tagging, manual tagging, tag clearing, and Finder-to-DB sync."""
     while True:
         print("\n" + "=" * 55)
         print("  FOLDER TAGGING & FINDER SYNC MANAGER  ")
         print("=" * 55)
-        print("1. Auto-tag Storage tree by Priority & Category (Finder Colors + DB Sync)")
-        print("2. Manually tag a directory (Custom text & Finder color)")
-        print("3. Remove / clear tags from a directory")
-        print("4. Re-sync Finder tags from disk into SQLite Database")
-        print("5. Return to main menu")
+        print("1. Review & manage Priority level-1 folders (Finder colors, tags & tier reassign)")
+        print("2. Auto-tag Storage tree by Priority & Category (Finder Colors + DB Sync)")
+        print("3. Manually tag a directory (Custom text & Finder color)")
+        print("4. Remove / clear tags from a directory")
+        print("5. Re-sync Finder tags from disk into SQLite Database")
+        print("6. Return to main menu")
 
-        choice = input("\nSelect option (1-5): ").strip()
+        choice = input("\nSelect option (1-6): ").strip()
 
         if choice == "1":
-            auto_tag_priority_tree_interactive(db_path)
+            tag_review_priority_folders_interactive(db_path)
         elif choice == "2":
-            manual_tag_directory_interactive(db_path)
+            auto_tag_priority_tree_interactive(db_path)
         elif choice == "3":
-            clear_tags_directory_interactive(db_path)
+            manual_tag_directory_interactive(db_path)
         elif choice == "4":
-            resync_finder_tags_interactive(db_path)
+            clear_tags_directory_interactive(db_path)
         elif choice == "5":
+            resync_finder_tags_interactive(db_path)
+        elif choice == "6":
             break
         else:
             print("\n[Error] Invalid option.")
+
 
 def list_all_tags(db_path: str):
     """Lists all detected Finder tags and manual tags across folders and files."""
@@ -2145,44 +3690,47 @@ def main():
 
     while True:
         print("\n" + "=" * 45)
-        print("  DRIVE AUDIT & FINDER TAG MANAGER  ")
+        print("  DRIVE AUDIT & STORAGE ORCHESTRATOR  ")
         print("=" * 45)
-        print("1. Scan & index directory (Read-only catalog & tag sync)")
-        print("2. View hosts & storage overview")
-        print("3. View top-level folder scans report")
-        print("4. Generate report of largest files")
-        print("5. Prune deleted records from DB (Sync with disk)")
-        print("6. List all active tags (Directory & File)")
-        print("7. Tag & sync folders (Priority Tiers, Finder Colors & DB)")
-        print("8. Search files by tag (Finder & Manual)")
-        print("9. Segregate non-media files from folder (On-demand migration)")
-        print("10. Detect & clean duplicate files (Interactive duplicate resolver)")
-        print("11. Exit")
+        print("1. Tagging Review, Curation Wizard & Subfolder Triage")
+        print("2. Scan & index directory (Read-only catalog & tag sync)")
+        print("3. View hosts & storage overview")
+        print("4. View top-level folder scans report")
+        print("5. Generate report of largest files")
+        print("6. Prune deleted records from DB (Sync with disk)")
+        print("7. List all active tags (Directory & File)")
+        print("8. Tag & sync folders (Priority Tiers, Finder Colors & DB)")
+        print("9. Search files by tag (Finder & Manual)")
+        print("10. Segregate non-media files from folder (On-demand migration)")
+        print("11. Detect & clean duplicate files (Interactive duplicate resolver)")
+        print("12. Exit")
 
-        choice = input("\nSelect option (1-11): ").strip()
+        choice = input("\nSelect option (1-12): ").strip()
 
         if choice == "1":
-            audit_directory_interactive(db_file)
+            tag_review_priority_folders_interactive(db_file)
         elif choice == "2":
-            show_hosts_summary(db_file)
+            audit_directory_interactive(db_file)
         elif choice == "3":
-            generate_top_level_scans_report(db_file)
+            show_hosts_summary(db_file)
         elif choice == "4":
-            generate_largest_files_report(db_file)
+            generate_top_level_scans_report(db_file)
         elif choice == "5":
-            prune_missing_records(db_file)
+            generate_largest_files_report(db_file)
         elif choice == "6":
-            list_all_tags(db_file)
+            prune_missing_records(db_file)
         elif choice == "7":
-            tag_manager_interactive(db_file)
+            list_all_tags(db_file)
         elif choice == "8":
-            search_files_by_tag(db_file)
+            tag_manager_interactive(db_file)
         elif choice == "9":
-            migrate_non_media_interactive(db_file)
+            search_files_by_tag(db_file)
         elif choice == "10":
-            detect_and_resolve_duplicates_interactive(db_file)
+            migrate_non_media_interactive(db_file)
         elif choice == "11":
-            print("\nExiting Drive Audit Manager. Goodbye!")
+            detect_and_resolve_duplicates_interactive(db_file)
+        elif choice == "12":
+            print("\nExiting Storage Orchestrator. Goodbye!")
             break
         else:
             print("\n[Error] Invalid option.")
