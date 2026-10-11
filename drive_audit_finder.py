@@ -991,22 +991,76 @@ def show_hosts_summary(db_path: str):
     rows = cursor.fetchall()
     conn.close()
 
-    print("\n" + "=" * 75)
-    print("INDEXED HOSTS OVERVIEW")
-    print("=" * 75)
-    print(f"{'Hostname':<20} | {'OS':<10} | {'IP Address':<15} | {'Files':<8} | {'Total Size (GB)'}")
-    print("-" * 75)
+    print("\n" + "=" * 78)
+    print("                           INDEXED HOSTS OVERVIEW                             ")
+    print("=" * 78)
+    print(f"{'Hostname':<26} | {'OS':<10} | {'IP Address':<15} | {'Files':<8} | {'Total Size (GB)'}")
+    print("-" * 78)
     for host, os_name, ip, count, size in rows:
         gb = (size or 0) / (1024**3)
-    print("=" * 75)
+        h_str = host or "Unknown"
+        os_str = os_name or "N/A"
+        ip_str = ip or "N/A"
+        cnt_str = f"{count:,}" if count else "0"
+        print(f"{h_str:<26} | {os_str:<10} | {ip_str:<15} | {cnt_str:<8} | {gb:.2f} GB")
+    print("=" * 78)
 
-    bench_prompt = input("\nRun live drive performance & I/O benchmark across mounted volumes? (y/N): ").strip().lower()
-    if bench_prompt == 'y':
-        try:
-            import benchmark_drives
-            benchmark_drives.run_benchmark_interactive()
-        except ImportError:
-            print("\n[Notice] benchmark_drives.py not found in working directory.")
+    # Check Drive Benchmarks in Database vs Mounted Drives
+    try:
+        import benchmark_drives
+        mounted_vols = set(benchmark_drives.discover_candidate_volumes())
+        saved_benchmarks = benchmark_drives.get_saved_benchmarks(db_path)
+        saved_vol_map = {b["mount_point"]: b for b in saved_benchmarks}
+        saved_vols = set(saved_vol_map.keys())
+
+        # Determine differences between currently mounted drives and DB
+        new_untested_drives = mounted_vols - saved_vols
+        missing_drives = saved_vols - mounted_vols
+
+        if saved_benchmarks:
+            print("\n" + "=" * 96)
+            print("                 SAVED STORAGE DRIVES PERFORMANCE BENCHMARK                    ")
+            print("                       (Stored Results from Database)                          ")
+            print("=" * 96)
+            print(f"{'Volume / Mount Point':<26} | {'Media':<6} | {'Interface':<12} | {'Write Speed':<14} | {'Read Speed':<14} | {'Last Tested'}")
+            print("-" * 96)
+            for b in saved_benchmarks:
+                vol_label = b.get("volume_name") or os.path.basename(b["mount_point"]) or "Root"
+                if len(vol_label) > 24:
+                    vol_label = vol_label[:21] + "..."
+                media = b.get("media_type") or "N/A"
+                protocol = b.get("protocol") or "Internal"
+                if b.get("status") == "OK":
+                    w_str = f"{b['write_mb_s']} MB/s" if b.get('write_mb_s') else "N/A"
+                    r_str = f"{b['read_mb_s']} MB/s" if b.get('read_mb_s') else "N/A"
+                else:
+                    w_str = b.get("status") or "Error"
+                    r_str = "-"
+                b_date = b.get("benchmark_at", "")[:19].replace("T", " ") if b.get("benchmark_at") else "N/A"
+                unmounted_flag = " (Unmounted)" if b["mount_point"] not in mounted_vols else ""
+                print(f"{vol_label:<26} | {media:<6} | {protocol:<12} | {w_str:<14} | {r_str:<14} | {b_date}{unmounted_flag}")
+            print("=" * 96)
+
+            if new_untested_drives:
+                new_str = ", ".join(sorted(new_untested_drives))
+                print(f"\n⚠️ Notice: Current mounted drives differ from saved database!")
+                print(f"   New untested volume(s) detected: {new_str}")
+                run_new = input("\nRun benchmark to test new drives and update DB? (y/N): ").strip().lower()
+                if run_new == 'y':
+                    benchmark_drives.run_benchmark_interactive(db_path=db_path)
+            else:
+                on_demand = input("\nPress Enter to return, or enter 'r' to re-run live benchmark on demand: ").strip().lower()
+                if on_demand == 'r':
+                    benchmark_drives.run_benchmark_interactive(db_path=db_path)
+
+        else:
+            print("\n[Notice] No drive performance benchmark saved in database.")
+            run_init = input("Run initial drive performance & I/O benchmark now? (y/N): ").strip().lower()
+            if run_init == 'y':
+                benchmark_drives.run_benchmark_interactive(db_path=db_path)
+
+    except ImportError:
+        pass
 
 def generate_top_level_scans_report(db_path: str):
     """Generates a detailed breakdown report for each top-level scanned root folder."""

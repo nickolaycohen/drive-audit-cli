@@ -22,6 +22,8 @@ import argparse
 import subprocess
 import json
 import shutil
+import sqlite3
+import datetime
 from typing import Dict, List, Optional, Tuple
 
 # macOS fcntl command to disable Unified Buffer Cache (UBC)
@@ -264,8 +266,112 @@ def print_table(results: List[Dict[str, any]]):
     print("=" * 96 + "\n")
 
 
-def run_benchmark_interactive(default_quick: bool = False):
+def get_default_db_path() -> Optional[str]:
+    """Finds drive_audit.db in current working directory or standard storage locations."""
+    candidates = [
+        "drive_audit.db",
+        os.path.expanduser("~/dev/drive-audit-cli/drive_audit.db"),
+        "/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return None
+
+
+def init_benchmark_table(conn: sqlite3.Connection):
+    """Ensures drive_benchmarks table exists in SQLite database."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS drive_benchmarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mount_point TEXT UNIQUE,
+            volume_name TEXT,
+            device_node TEXT,
+            protocol TEXT,
+            media_type TEXT,
+            total_gb REAL,
+            free_gb REAL,
+            test_size_mb REAL,
+            write_mb_s REAL,
+            read_mb_s REAL,
+            status TEXT,
+            benchmark_at TEXT
+        )
+    """)
+    conn.commit()
+
+
+def save_benchmark_results_to_db(db_path: str, results: List[Dict[str, any]]) -> bool:
+    """Saves or updates benchmark results for volumes in SQLite."""
+    if not db_path or not os.path.exists(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        init_benchmark_table(conn)
+        cursor = conn.cursor()
+        now = datetime.datetime.now().isoformat()
+        for r in results:
+            cursor.execute("""
+                INSERT INTO drive_benchmarks (
+                    mount_point, volume_name, device_node, protocol, media_type,
+                    total_gb, free_gb, test_size_mb, write_mb_s, read_mb_s, status, benchmark_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mount_point) DO UPDATE SET
+                    volume_name = excluded.volume_name,
+                    device_node = excluded.device_node,
+                    protocol = excluded.protocol,
+                    media_type = excluded.media_type,
+                    total_gb = excluded.total_gb,
+                    free_gb = excluded.free_gb,
+                    test_size_mb = excluded.test_size_mb,
+                    write_mb_s = excluded.write_mb_s,
+                    read_mb_s = excluded.read_mb_s,
+                    status = excluded.status,
+                    benchmark_at = excluded.benchmark_at
+            """, (
+                r.get("mount_point"),
+                r.get("volume_name"),
+                r.get("device_node"),
+                r.get("protocol"),
+                r.get("media_type"),
+                r.get("total_gb"),
+                r.get("free_gb"),
+                r.get("test_size_mb"),
+                r.get("write_mb_s"),
+                r.get("read_mb_s"),
+                r.get("status"),
+                now
+            ))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[Warning] Failed to persist benchmark results to DB: {e}")
+        return False
+
+
+def get_saved_benchmarks(db_path: str) -> List[Dict[str, any]]:
+    """Loads previously saved benchmark results from SQLite."""
+    if not db_path or not os.path.exists(db_path):
+        return []
+    try:
+        conn = sqlite3.connect(db_path)
+        init_benchmark_table(conn)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM drive_benchmarks ORDER BY mount_point")
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def run_benchmark_interactive(default_quick: bool = False, db_path: Optional[str] = None):
     """Interactive helper designed to be called directly or from the main orchestrator."""
+    active_db = db_path or get_default_db_path()
+
     print("\n" + "=" * 60)
     print("      STORAGE PERFORMANCE & DIRECT I/O BENCHMARK      ")
     print("=" * 60)
@@ -303,6 +409,10 @@ def run_benchmark_interactive(default_quick: bool = False):
 
     print_table(results)
 
+    if active_db:
+        if save_benchmark_results_to_db(active_db, results):
+            print(f"[Success] Benchmark results saved to database ({active_db})")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Direct I/O Storage Performance Benchmark for macOS")
@@ -311,11 +421,13 @@ def main():
     parser.add_argument("--quick", "-q", action="store_true", help="Quick mode (64 MB payload)")
     parser.add_argument("--interactive", "-i", action="store_true", help="Run interactive menu")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+    parser.add_argument("--db", type=str, help="SQLite database path to persist benchmark results")
 
     args = parser.parse_args()
+    db_target = args.db or get_default_db_path()
 
     if args.interactive:
-        run_benchmark_interactive()
+        run_benchmark_interactive(db_path=db_target)
         return
 
     size_mb = 64 if args.quick else args.size_mb
@@ -343,6 +455,9 @@ def main():
                 print(f" Done! (Write: {res['write_mb_s']} MB/s | Read: {res['read_mb_s']} MB/s)")
             else:
                 print(f" {res['status']}")
+
+    if db_target:
+        save_benchmark_results_to_db(db_target, results)
 
     if args.json:
         print(json.dumps(results, indent=2))
