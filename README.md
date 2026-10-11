@@ -162,7 +162,7 @@ Upon launch, you will be presented with the main menu:
 =============================================
   DRIVE AUDIT & STORAGE ORCHESTRATOR  
 =============================================
-1. Tagging Review / Management (View & edit Priority level-1 folders)
+1. Tagging Review, Curation Wizard & Subfolder Triage
 2. Scan & index directory (Read-only catalog & tag sync)
 3. View hosts & storage overview
 4. View top-level folder scans report
@@ -178,7 +178,124 @@ Upon launch, you will be presented with the main menu:
 
 ---
 
-## Menu Options & Usage
+## 🧭 Interactive Prompt Trees & Submenus Reference
+
+The orchestrator operates as an interactive, human-in-the-loop governance console. Below is the complete reference of all submenus, prompt shortcuts, and decision gates available within the CLI:
+
+### 1. Option 1: Tagging Review & Management Menu
+```text
+Options:
+  • 1-N        - Select folder number to inspect & edit tags / color / description / tier
+  • 'loc'      - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)
+  • 'idrive'   - Audit iDrive backup inclusion (Check Priority 1 folders in iDrive backup set)
+  • 'w'        - Launch Sequential Curation Wizard (Triage subfolders across locations)
+  • 'p1'-'p4'  - Edit description of a top-level Priority tier (Priority 1-4)
+  • 'a'        - Auto-tag untagged folders with parent Priority & category
+  • 'reset-tags' - Reset subfolder tags & verification (Preserve level-1, clear level-2+ tags)
+  • 'r'        - Refresh view from filesystem
+  • 'b'        - Return to main menu
+```
+
+### 2. Location Manager Menu (`loc` in Option 1)
+```text
+Actions:
+  1. Add a new folder location mapping to a Priority level (Enter path, label, description)
+  2. Toggle Active / Inactive status of a location (For unmounted or seasonal drives)
+  3. Edit location Label or Description (Stored in SQLite priority_locations table)
+  4. Remove / Unmap a location (Safely removes mapping without deleting files)
+  5. Return to previous menu
+```
+
+### 3. Folder Inspection & Action Submenu (`1-N` in Option 1)
+```text
+Actions:
+  1. Apply standard Priority tags (Priority tier with color + folder name tag)
+  2. Add / Edit folder description (Stored in SQLite database)
+  3. Custom tag & Finder color (Add/edit custom tag and pick color)
+  4. Move / Reassign to a different Priority Tier (e.g., Priority 2 -> Priority 3)
+  5. Propagate current tags to all subfolders in this subtree
+  6. Remove / Clear all tags from this folder (Finder extended attributes & DB)
+  7. Launch Curation Wizard on this folder's subdirectories (Scan & Triage)
+  8. Return to folder list
+```
+
+### 4. Sequential Curation Wizard Decision Gate (`w` in Option 1)
+```text
+Prompts:
+  [a] Approve & Verify
+      ↳ Applies parent Priority Finder color tag + category tags
+      ↳ Saves intelligent/approved description to SQLite
+      ↳ Sets is_verified = 1 and verified_at timestamp
+  [e] Edit Description Manually
+      ↳ Customize folder description before applying tags and verification
+  [m] Move / Reassign Tier
+      ↳ Relocate folder to another Priority tier, mapped location, or parent category
+  [s] Skip Folder
+      ↳ Leaves folder unverified and untagged for later triage
+  [q] Quit Wizard
+      ↳ Safely exits with all verified progress persisted in SQLite
+```
+
+### 5. iDrive Backup Verification Wizard (`idrive` in Option 1)
+```text
+Options:
+  1. Add missing Priority 1 location root to iDrive backup set (.plist)
+  2. Add missing individual level-1 category folders to iDrive backup set (.plist)
+  3. View current active items in iDrive backup sets (Main online & External sets)
+  4. View step-by-step instructions for adding folders in iDrive Desktop GUI
+  5. Return to Tagging Review menu
+```
+
+### 6. Reset Subfolder Tags & Verification Confirmation (`reset-tags` in Option 1)
+```text
+Confirmation Prompt:
+  Proceed with resetting subfolder tags across all Priority locations? [y/N]:
+  ↳ Preserves tags, colors, and descriptions on location roots & Level-1 folders
+  ↳ Strips Finder color tags from Level-2+ subfolders
+  ↳ Removes DB tags from Level-2+ subfolders in SQLite
+  ↳ Resets is_verified = 0 on subfolders to re-enable fresh curation
+```
+
+### 7. Tag Manager Submenu (Option 8 from Main Menu)
+```text
+Tag Manager Options:
+  1. Auto-tag storage directory tree by Priority & Category
+     ↳ Scope 1: Recursive (All subfolders inherit Priority Tier & Category tags)
+     ↳ Scope 2: Top 2 levels only (Priority tier folder & direct category folders)
+  2. Manually tag a specific directory (Pick from 7 macOS Finder colors + custom label)
+  3. Remove tags from a directory (Strips Finder extended attributes and DB tags)
+  4. Re-sync Finder tags from disk into database (Bulk refresh)
+  5. Return to main menu
+```
+
+### 8. Non-Media Migration Prompts (Option 10 from Main Menu)
+```text
+Prompts:
+  • Enter directory to audit & clean: [/Volumes/LaCie/Storage/Priority 4/Pictures]
+  • Enter non-media destination directory: [Default: <source>/NonMediaFiles]
+  • Purge legacy thumbnail caches (Thumbs.db, .picasa.ini, *.pal, *.pmp)? [y/N]
+  • Confirm moving non-media files to segregated folder? [y/N]
+  • Prune empty folders left behind in media tree? [Y/n]
+```
+
+### 9. Duplicate File Cleanup Prompts (Option 11 from Main Menu)
+```text
+Scope Selection:
+  1. Clean duplicates OUTSIDE primary Storage only (Recommended - protects repository)
+  2. Full deduplication (Keep best copy in Storage, delete all redundant copies)
+
+Review Mode:
+  1. Batch Review (Preview summary table + single confirmation gate)
+  2. Step-by-Step Interactive (Inspect and confirm each duplicate group individually)
+
+Confirmation:
+  • Confirm and execute deletion of duplicate files? [y/N]
+  • Prune empty folders left behind? [Y/n]
+```
+
+---
+
+## Detailed Menu Descriptions & Technical Architecture
 
 ### 1. Tagging Review, Curation Wizard & Subfolder Triage
 Inspects mapped storage locations across Priority tiers (`Priority 1` through `Priority 4`) and provides an interactive overview and curation engine:
