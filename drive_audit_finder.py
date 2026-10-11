@@ -35,7 +35,7 @@ DEFAULT_FILE_EXTENSIONS = [
     # Financial & Accounting (Critical proprietary formats)
     (".mny", "Financial Data", "Microsoft Money Account Database", "Microsoft Money", "MoneyDance / Banktivity / Parallels Windows", 1),
     (".mbf", "Financial Data", "Microsoft Money Backup Archive", "Microsoft Money", "MoneyDance / Parallels Windows", 1),
-    (".lrd", "Financial Data", "Microsoft Money Lock / Report Definition", "Microsoft Money", "Microsoft Money", 1),
+    (".lrd", "Financial Data", "Microsoft Money Lock / Report Definition", "Microsoft Money", "MoneyDance / Banktivity / Parallels Windows", 1),
     (".ofx", "Financial Data", "Open Financial Exchange Transaction Data", "Financial / Banking Software", "Banktivity / MoneyDance / Excel", 1),
     (".qfx", "Financial Data", "Quicken Financial Exchange Data", "Quicken", "Quicken for Mac / Banktivity", 1),
     (".qdf", "Financial Data", "Quicken Financial Database", "Quicken", "Quicken for Mac / Parallels Windows", 1),
@@ -2434,6 +2434,66 @@ def _set_directory_description_in_db(dir_path: Path, description: str | None, db
     except Exception:
         pass
 
+def _rename_directory_on_disk_and_db(old_dir: Path, new_name: str, db_path: str) -> tuple[bool, Path, str]:
+    """
+    Safely renames a directory on disk, updates all SQLite directory and tag records,
+    and synchronizes macOS Finder tags. Returns (success, new_path, error_message).
+    """
+    if not old_dir.exists():
+        return False, old_dir, f"Source directory '{old_dir}' does not exist on disk."
+
+    new_dir = old_dir.parent / new_name
+    if new_dir.resolve() == old_dir.resolve():
+        return True, old_dir, "Name unchanged."
+
+    if new_dir.exists():
+        return False, old_dir, f"Destination directory '{new_dir}' already exists on disk."
+
+    try:
+        old_p = str(old_dir.resolve())
+        old_name = old_dir.name
+
+        # Read current Finder tags before moving
+        cur_ftags = get_finder_tags_with_details(old_dir)
+
+        # Rename on disk
+        shutil.move(str(old_dir), str(new_dir))
+        new_p = str(new_dir.resolve())
+
+        # Update SQLite
+        if os.path.exists(db_path):
+            conn = get_db_connection(db_path)
+            cur = conn.cursor()
+            # Update directory path and all child paths
+            cur.execute("""
+                UPDATE directories
+                SET path = ? || SUBSTR(path, LENGTH(?) + 1)
+                WHERE path = ? OR path LIKE ? || '/%'
+            """, (new_p, old_p, old_p, old_p))
+            # Update directory name itself
+            cur.execute("UPDATE directories SET name = ? WHERE path = ?", (new_name, new_p))
+            # Update directory tags matching the old folder name
+            cur.execute("""
+                UPDATE directory_tags
+                SET tag_name = ?
+                WHERE tag_name = ? AND directory_id IN (SELECT id FROM directories WHERE path = ?)
+            """, (new_name, old_name, new_p))
+            conn.commit()
+            conn.close()
+
+        # Update Finder tags on disk: replace old folder name tag with new name
+        if cur_ftags:
+            updated_tags = []
+            for t in cur_ftags:
+                t_name = new_name if t["name"] == old_name else t["name"]
+                updated_tags.append((t_name, t["color"]))
+            set_finder_tags(new_dir, updated_tags)
+            _sync_directory_tags_to_db(new_dir, updated_tags, db_path)
+
+        return True, new_dir, ""
+    except Exception as e:
+        return False, old_dir, str(e)
+
 def analyze_folder_content(folder_path: Path, max_depth: int = 3) -> dict:
     """Fast content profiler for a subfolder to assist the curation wizard."""
     total_files = 0
@@ -2570,7 +2630,10 @@ def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_nam
     if app_weights:
         top_app, _ = app_weights.most_common(1)[0]
         mac_alt = app_mac_map.get(top_app)
-        detected_app = f"{top_app} (Mac: {mac_alt})" if mac_alt else top_app
+        if mac_alt and mac_alt.strip().lower() != top_app.strip().lower():
+            detected_app = f"{top_app} (Mac: {mac_alt})"
+        else:
+            detected_app = top_app
 
     # Category analysis and verification
     cat_weights = Counter()
@@ -3114,12 +3177,13 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 print(f"     \"{suggested_desc}\"")
                 print("\n  Actions:")
                 print(f"    [a] Approve description & attach app ('{detected_app}') (Mark Verified ✓)")
-                print("    [e] Edit description or required app, apply tags & verify")
+                print("    [e] Edit folder name, description or attached app, apply tags & verify")
+                print("    [r] Rename folder on disk & database")
                 print("    [m] Move / Reassign to another Priority tier or parent folder")
                 print("    [s] Skip for now (remain unverified)")
                 print("    [q] Quit wizard and return to menu")
 
-                action = input("\nSelect action [a/e/m/s/q] (Default: a): ").strip().lower()
+                action = input("\nSelect action [a/e/r/m/s/q] (Default: a): ").strip().lower()
                 if not action:
                     action = 'a'
 
@@ -3132,21 +3196,47 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     total_curated += 1
                     break
                 elif action == 'e':
-                    print(f"\nCurrent suggestion: {suggested_desc}")
+                    print(f"\nCurrent folder name: '{sub_dir.name}'")
+                    new_fname = input(f"Enter new folder name (or press Enter to keep '{sub_dir.name}'): ").strip()
+
+                    print(f"\nCurrent description: \"{suggested_desc}\"")
                     custom_desc = input("Enter custom description (or press Enter to keep suggestion): ").strip()
                     final_desc = custom_desc if custom_desc else suggested_desc
 
-                    print(f"\nCurrent app needed: {detected_app}")
-                    custom_app = input(f"Enter required app (or press Enter to keep '{detected_app}'): ").strip()
+                    print(f"\nCurrent attached app: '{detected_app}'")
+                    custom_app = input(f"Enter attached app (or press Enter to keep '{detected_app}'): ").strip()
                     final_app = custom_app if custom_app else detected_app
+
+                    if new_fname and new_fname != sub_dir.name:
+                        renamed_ok, new_renamed_path, rename_err = _rename_directory_on_disk_and_db(sub_dir, new_fname, db_path)
+                        if renamed_ok:
+                            print(f"[Success] Renamed folder to '{new_fname}'.")
+                            sub_dir = new_renamed_path
+                        else:
+                            print(f"[Error] Failed to rename folder: {rename_err}. Keeping original name.")
 
                     tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
                     set_finder_tags(sub_dir, tags)
                     _sync_directory_tags_to_db(sub_dir, tags, db_path)
                     _set_directory_description_in_db(sub_dir, final_desc, db_path, is_verified=True, app_needed=final_app)
-                    print(f"\n[Success] ✓ Custom description & app '{final_app}' approved & verified for '{sub_dir.name}'.")
+                    print(f"\n[Success] ✓ Folder '{sub_dir.name}', description & attached app '{final_app}' approved & verified.")
                     total_curated += 1
                     break
+                elif action == 'r':
+                    print(f"\nCurrent folder name: '{sub_dir.name}'")
+                    new_fname = input(f"Enter new folder name (or press Enter to cancel): ").strip()
+                    if not new_fname or new_fname == sub_dir.name:
+                        print("Rename cancelled.")
+                        continue
+                    renamed_ok, new_renamed_path, rename_err = _rename_directory_on_disk_and_db(sub_dir, new_fname, db_path)
+                    if renamed_ok:
+                        print(f"\n[Success] Renamed folder on disk and SQLite: '{sub_dir.name}' -> '{new_fname}'")
+                        sub_dir = new_renamed_path
+                        suggested_desc = suggest_folder_description(sub_dir.name, l1_dir.name, tier_name, stats, ft_info)
+                        continue
+                    else:
+                        print(f"\n[Error] Failed to rename folder: {rename_err}")
+                        continue
                 elif action == 'm':
                     active_locs = get_priority_locations(db_path, active_only=True)
                     print("\nSelect Target Location for move:")
