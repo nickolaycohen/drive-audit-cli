@@ -1957,8 +1957,27 @@ def generate_curation_verification_report(db_path: str):
                     pend_count = len(partially_curated)
                     tot_pend_subs = sum(r[10] for r in partially_curated)
                     print(f"\n⚠️  {pend_count} Partially Curated folder(s) detected with {tot_pend_subs:,} pending subfolder(s).")
-                    rescan_ans = input("Would you like to rescan these folders from disk to reconcile changes & refresh the view? [Y/n]: ").strip().lower()
-                    if rescan_ans in ("", "y", "yes"):
+                    print("  Note: A disk rescan only re-indexes physical files — it does not curate pending subfolders.")
+                    print("  [v] Approve & verify all pending internal subfolders across these curated sets")
+                    print("  [r] Rescan folders from disk to pick up physical filesystem changes")
+                    print("  [Enter] Continue to view folder details")
+                    sub_action = input("\nSelect action [v/r/Enter] (Default: Enter): ").strip().lower()
+                    if sub_action in ("v", "verify"):
+                        scan_now = datetime.datetime.now().isoformat()
+                        updated_total = 0
+                        for r_p in partially_curated:
+                            d_path_p = r_p[2]
+                            d_app_p = r_p[5]
+                            cursor.execute("""
+                                UPDATE directories
+                                SET is_verified = 1, verified_at = ?, app_needed = COALESCE(app_needed, ?)
+                                WHERE path LIKE ? || '/%' AND is_verified = 0
+                            """, (scan_now, d_app_p, d_path_p))
+                            updated_total += cursor.rowcount
+                        conn.commit()
+                        print(f"\n[Success] ✓ Marked {updated_total} pending subfolders as verified across curated sets!\n")
+                        continue
+                    elif sub_action in ("r", "rescan"):
                         paths_to_rescan = [r[2] for r in partially_curated]
                         roots_to_rescan = get_minimal_scan_roots(paths_to_rescan)
                         if roots_to_rescan:
@@ -2080,8 +2099,22 @@ def generate_curation_verification_report(db_path: str):
                                         print(f"    ⏳ {disp_pname:<24} {ps_f:,} files ({format_size(ps_b)}) 📍 {ps_path}")
 
                             print("#" * 90)
-                            drill_act = input("\n[e] Edit folder description or attached app, or press Enter to return: ").strip().lower()
-                            if drill_act == 'e':
+                            act_opts = ["[e] Edit description or app"]
+                            if pend_cnt > 0:
+                                act_opts.append(f"[v] Mark all {pend_cnt} pending subfolders as verified (Curate subtree)")
+                            prompt_str = f"\nSelect action ({', '.join(act_opts)}) or press Enter to return: "
+                            drill_act = input(prompt_str).strip().lower()
+                            if drill_act == 'v' and pend_cnt > 0:
+                                scan_now = datetime.datetime.now().isoformat()
+                                cursor.execute("""
+                                    UPDATE directories
+                                    SET is_verified = 1, verified_at = ?, app_needed = COALESCE(app_needed, ?)
+                                    WHERE path LIKE ? || '/%' AND is_verified = 0
+                                """, (scan_now, dapp, dpath))
+                                conn.commit()
+                                print(f"\n[Success] ✓ Marked {cursor.rowcount} pending subfolders under '{dname}' as verified!")
+                                break
+                            elif drill_act == 'e':
                                 print(f"\nCurrent description: \"{ddesc or '(none)'}\"")
                                 new_desc = input("Enter new description (or Enter to keep): ").strip()
                                 print(f"Current attached app: \"{dapp or '(none)'}\"")
@@ -5016,6 +5049,21 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     _sync_directory_tags_to_db(sub_dir, tags, db_path)
                     _set_directory_description_in_db(sub_dir, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
                     print(f"\n[Success] ✓ Approved & verified '{sub_dir.name}'. Tags, description & app '{detected_app}' saved.")
+                    if child_subdirs:
+                        apply_sub = input(f"Mark all {len(child_subdirs)} internal subfolder(s) under '{sub_dir.name}' as verified too? [Y/n] (Default: Y): ").strip().lower()
+                        if apply_sub in ("", "y", "yes"):
+                            scan_now = datetime.datetime.now().isoformat()
+                            c_p = str(sub_dir.resolve())
+                            if conn:
+                                cur_sub = conn.cursor()
+                                cur_sub.execute("""
+                                    UPDATE directories
+                                    SET is_verified = 1, verified_at = ?, app_needed = COALESCE(app_needed, ?)
+                                    WHERE path LIKE ? || '/%' AND is_verified = 0
+                                """, (scan_now, detected_app, c_p))
+                                conn.commit()
+                                if cur_sub.rowcount > 0:
+                                    print(f"  ↳ ✓ Marked {cur_sub.rowcount} internal subfolder(s) under '{sub_dir.name}' as verified.")
                     total_curated += 1
                     curr_idx += 1
                     break
@@ -5052,6 +5100,21 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     _sync_directory_tags_to_db(sub_dir, tags, db_path)
                     _set_directory_description_in_db(sub_dir, final_desc, db_path, is_verified=True, app_needed=final_app)
                     print(f"\n[Success] ✓ Folder '{sub_dir.name}', description & attached app '{final_app}' approved & verified.")
+                    if child_subdirs:
+                        apply_sub = input(f"Mark all {len(child_subdirs)} internal subfolder(s) under '{sub_dir.name}' as verified too? [Y/n] (Default: Y): ").strip().lower()
+                        if apply_sub in ("", "y", "yes"):
+                            scan_now = datetime.datetime.now().isoformat()
+                            c_p = str(sub_dir.resolve())
+                            if conn:
+                                cur_sub = conn.cursor()
+                                cur_sub.execute("""
+                                    UPDATE directories
+                                    SET is_verified = 1, verified_at = ?, app_needed = COALESCE(app_needed, ?)
+                                    WHERE path LIKE ? || '/%' AND is_verified = 0
+                                """, (scan_now, final_app, c_p))
+                                conn.commit()
+                                if cur_sub.rowcount > 0:
+                                    print(f"  ↳ ✓ Marked {cur_sub.rowcount} internal subfolder(s) under '{sub_dir.name}' as verified.")
                     total_curated += 1
                     curr_idx += 1
                     break
