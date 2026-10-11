@@ -3,6 +3,7 @@ import re
 import sys
 import csv
 import json
+import uuid
 import time
 import shutil
 import sqlite3
@@ -4552,10 +4553,359 @@ def execute_folder_merge_and_cleanup(sub_dir: Path, overlap: dict, db_path: str)
             print(f"  ✓ Logged {len(merged_records)} resources into 'curation_events' table (Batch ID: {batch_id})")
             print(f"  ✓ Applied Finder tags and SQLite provenance tags ('merged_from:{sub_dir.name}')")
 
+
         return True
     except Exception as e:
         print(f"\n[Error] Merge and cleanup failed: {e}")
         return False
+
+
+def extract_file_types_interactive(sub_dir: Path, db_path: str, stats: dict | None = None, ft_info: dict | None = None) -> bool:
+    """
+    Extracts and segregates specific file types (e.g. .doc, .pdf, scripts, code, etc.)
+    from a multi-source folder into a dedicated subfolder while strictly preserving
+    the nested directory hierarchy. Synchronizes SQLite records and provenance events.
+    """
+    sub_dir = Path(sub_dir).resolve()
+    if not sub_dir.exists() or not sub_dir.is_dir():
+        print(f"\n[Error] Directory '{sub_dir}' does not exist.")
+        return False
+
+    print(f"\nAnalyzing file structure in '{sub_dir.name}'...")
+    files_by_ext = defaultdict(list)
+    total_scan_files = 0
+    total_scan_bytes = 0
+
+    for root, dirs, filenames in os.walk(sub_dir):
+        # Ignore hidden directories
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for fn in filenames:
+            if fn.startswith('.'):
+                continue
+            fp = Path(root) / fn
+            try:
+                sz = fp.stat().st_size
+                ext = fp.suffix.lower() if fp.suffix else '(no ext)'
+                rel = fp.relative_to(sub_dir)
+                files_by_ext[ext].append((fp, sz, rel))
+                total_scan_files += 1
+                total_scan_bytes += sz
+            except Exception:
+                pass
+
+    if not files_by_ext:
+        print(f"\n[Notice] No files found in '{sub_dir.name}' to extract.")
+        return False
+
+    # Look up extension metadata from SQLite catalog
+    ext_descriptions = {}
+    if os.path.exists(db_path):
+        try:
+            conn = get_db_connection(db_path)
+            cur = conn.cursor()
+            exts_to_query = [e for e in files_by_ext.keys() if e != '(no ext)']
+            if exts_to_query:
+                placeholders = ",".join("?" for _ in exts_to_query)
+                cur.execute(f"SELECT extension, description, category FROM file_extensions WHERE extension IN ({placeholders})", exts_to_query)
+                for row in cur.fetchall():
+                    ext_descriptions[row[0].lower()] = (row[1], row[2])
+            conn.close()
+        except Exception:
+            pass
+
+    sorted_exts = sorted(files_by_ext.keys(), key=lambda e: (len(files_by_ext[e]), sum(x[1] for x in files_by_ext[e])), reverse=True)
+
+    print("\n" + "=" * 80)
+    print(f"  📂 EXTRACT & SEGREGATE FILE TYPES FROM: '{sub_dir.name}'")
+    print("=" * 80)
+    print(f"  • Folder Path:    {sub_dir}")
+    print(f"  • Total Content:  {total_scan_files:,} files ({format_size(total_scan_bytes)}) across {len(files_by_ext)} distinct file types")
+    print("-" * 80)
+    print("  Ranked File Types:")
+
+    for idx, ext in enumerate(sorted_exts, 1):
+        flist = files_by_ext[ext]
+        f_cnt = len(flist)
+        f_bytes = sum(x[1] for x in flist)
+        desc, cat = ext_descriptions.get(ext, (f"{ext.upper().lstrip('.')} File" if ext != '(no ext)' else "Extensionless / Mystery File", "Other"))
+        print(f"    {idx:>2}. {ext:<12} ({desc}) — {f_cnt:,} files ({format_size(f_bytes)})")
+
+    print("-" * 80)
+    print("  Selection Options:")
+    print("    • Number(s):       e.g., '1' (Top type) or '1, 2'")
+    print("    • Extension(s):    e.g., '.doc', 'doc, docx', '.pdf'")
+    print("    • Category:        'docs' (Documents: .doc, .docx, .pdf, .rtf, .txt, .odt, .pages)")
+    print("                       'code' (Source Code: .rb, .py, .js, .c, .h, .sh, etc.)")
+    print("                       'data' (Database & Data: .sql, .csv, .json, .xml, etc.)")
+    print("                       'media' (Images & Audio/Video)")
+    print("    • 'c' to Cancel")
+
+    top_choice = "1"
+    top_ext = sorted_exts[0]
+    choice = input(f"\nSelect file type to extract [Default: {top_choice} - {top_ext}]: ").strip().lower()
+    if not choice:
+        choice = top_choice
+    if choice == 'c':
+        print("\n[Cancelled] Extraction aborted.")
+        return False
+
+    CATEGORY_EXT_MAP = {
+        'docs': {'.doc', '.docx', '.rtf', '.odt', '.pdf', '.txt', '.pages', '.wpd', '.wps'},
+        'doc': {'.doc', '.docx', '.rtf', '.odt', '.pdf', '.txt', '.pages', '.wpd', '.wps'},
+        'documents': {'.doc', '.docx', '.rtf', '.odt', '.pdf', '.txt', '.pages', '.wpd', '.wps'},
+        'code': {'.rb', '.py', '.js', '.ts', '.c', '.cpp', '.h', '.hpp', '.java', '.go', '.rs', '.php', '.sh', '.pl', '.html', '.css', '.bat'},
+        'scripts': {'.rb', '.py', '.sh', '.pl', '.bat', '.ps1'},
+        'data': {'.sql', '.csv', '.tsv', '.json', '.xml', '.yaml', '.yml', '.db', '.sqlite', '.sqlite3', '.mdb', '.accdb'},
+        'db': {'.sql', '.csv', '.tsv', '.json', '.xml', '.yaml', '.yml', '.db', '.sqlite', '.sqlite3', '.mdb', '.accdb'},
+        'media': {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.mp4', '.mov', '.avi', '.mkv', '.mp3', '.wav', '.flac'}
+    }
+
+    target_exts = set()
+    if choice in CATEGORY_EXT_MAP:
+        cat_set = CATEGORY_EXT_MAP[choice]
+        target_exts = {e for e in files_by_ext.keys() if e in cat_set}
+        if not target_exts:
+            print(f"\n[Notice] No files found matching category '{choice}'.")
+            return False
+    else:
+        parts = [p.strip() for p in choice.replace(';', ',').split(',') if p.strip()]
+        all_numeric = True
+        for p in parts:
+            if not p.isdigit():
+                all_numeric = False
+                break
+        if all_numeric:
+            for p in parts:
+                idx = int(p)
+                if 1 <= idx <= len(sorted_exts):
+                    target_exts.add(sorted_exts[idx - 1])
+                else:
+                    print(f"\n[Error] Invalid index '{idx}'. Range is 1 to {len(sorted_exts)}.")
+                    return False
+        else:
+            for p in parts:
+                norm = p if p.startswith('.') else f".{p}"
+                found = False
+                for e in files_by_ext.keys():
+                    if e.lower() == norm.lower():
+                        target_exts.add(e)
+                        found = True
+                if not found:
+                    print(f"[Warning] Extension '{norm}' not present in this folder.")
+
+    if not target_exts:
+        print("\n[Error] No valid file types selected.")
+        return False
+
+    if any(e in ('.doc', '.docx', '.rtf', '.odt', '.pages', '.pdf', '.wpd') for e in target_exts):
+        default_subfolder = "Documents"
+    elif any(e in ('.sql', '.db', '.sqlite', '.sqlite3', '.mdb') for e in target_exts):
+        default_subfolder = "Database"
+    elif any(e in ('.rb', '.py', '.js', '.c', '.cpp', '.java', '.sh') for e in target_exts):
+        default_subfolder = "Source_Code"
+    elif any(e in ('.jpg', '.jpeg', '.png', '.gif', '.raw', '.heic') for e in target_exts):
+        default_subfolder = "Images"
+    elif len(target_exts) == 1:
+        ext_clean = list(target_exts)[0].lstrip('.')
+        default_subfolder = f"{ext_clean.upper()}_Files" if ext_clean else "Extracted_Files"
+    else:
+        default_subfolder = "Extracted_Files"
+
+    print(f"\nSelected File Type(s): {', '.join(sorted(target_exts))}")
+    dest_input = input(f"Enter target subfolder name or path [Default: '{default_subfolder}' inside '{sub_dir.name}']: ").strip().strip('"').strip("'")
+    if not dest_input:
+        target_dir = (sub_dir / default_subfolder).resolve()
+    elif dest_input.startswith('/'):
+        target_dir = Path(dest_input).resolve()
+    else:
+        target_dir = (sub_dir / dest_input).resolve()
+
+    if target_dir == sub_dir:
+        print("\n[Error] Target destination cannot be the source folder itself.")
+        return False
+
+    to_move = []
+    for ext in target_exts:
+        for fp, sz, rel in files_by_ext[ext]:
+            if target_dir in fp.parents or fp == target_dir:
+                continue
+            dest_fp = target_dir / rel
+            to_move.append((fp, sz, rel, dest_fp))
+
+    if not to_move:
+        print(f"\n[Notice] No files to move (matching files may already be in '{target_dir}').")
+        return False
+
+    total_move_bytes = sum(x[1] for x in to_move)
+    print("\n" + "=" * 80)
+    print("  EXTRACTION & SEGREGATION PREVIEW")
+    print("=" * 80)
+    print(f"  • Source Folder:    {sub_dir}")
+    print(f"  • Selected Type(s): {', '.join(sorted(target_exts))}")
+    print(f"  • Files to Move:    {len(to_move):,} files ({format_size(total_move_bytes)})")
+    print(f"  • Destination:      {target_dir}")
+    print(f"  • Structure:        Folder hierarchy PRESERVED relative to '{sub_dir.name}'")
+    print(f"    ↳ Example: '{to_move[0][2]}' → '{to_move[0][3].relative_to(target_dir.parent if target_dir.parent != target_dir else target_dir)}'")
+    print("=" * 80)
+
+    confirm = input(f"\nProceed with moving {len(to_move):,} files into '{target_dir.name}'? [y/N]: ").strip().lower()
+    if confirm not in ('y', 'yes'):
+        print("\n[Cancelled] Extraction aborted.")
+        return False
+
+    print(f"\nExecuting extraction to '{target_dir}'...")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    moved_count = 0
+    moved_bytes = 0
+    errors = []
+
+    batch_id = f"extract_{uuid.uuid4().hex[:8]}"
+    now_iso = datetime.datetime.now().isoformat()
+
+    conn = get_db_connection(db_path) if os.path.exists(db_path) else None
+    cur = conn.cursor() if conn else None
+    if cur:
+        ensure_curation_events_table(cur)
+
+    host_id = 1
+    if cur:
+        try:
+            cur.execute("SELECT host_id FROM directories WHERE path = ?", (str(sub_dir),))
+            hr = cur.fetchone()
+            if hr:
+                host_id = hr[0]
+        except Exception:
+            pass
+
+    dir_id_cache = {}
+
+    for fp, sz, rel, dest_fp in to_move:
+        try:
+            dest_fp.parent.mkdir(parents=True, exist_ok=True)
+            if dest_fp.exists() and dest_fp.resolve() != fp.resolve():
+                base_stem = dest_fp.stem
+                suf = dest_fp.suffix
+                c = 1
+                while dest_fp.exists():
+                    dest_fp = dest_fp.parent / f"{base_stem}_{c}{suf}"
+                    c += 1
+
+            shutil.move(str(fp), str(dest_fp))
+            moved_count += 1
+            moved_bytes += sz
+
+            if cur:
+                dest_parent_str = str(dest_fp.parent.resolve())
+                if dest_parent_str not in dir_id_cache:
+                    cur.execute("SELECT id FROM directories WHERE path = ?", (dest_parent_str,))
+                    drow = cur.fetchone()
+                    if drow:
+                        dir_id_cache[dest_parent_str] = drow[0]
+                    else:
+                        cur.execute("""
+                            INSERT INTO directories (host_id, path, name, scanned_at, is_verified)
+                            VALUES (?, ?, ?, ?, 0)
+                        """, (host_id, dest_parent_str, dest_fp.parent.name, now_iso))
+                        dir_id_cache[dest_parent_str] = cur.lastrowid
+                new_dir_id = dir_id_cache[dest_parent_str]
+
+                old_parent_str = str(fp.parent.resolve())
+                cur.execute("SELECT id FROM directories WHERE path = ?", (old_parent_str,))
+                old_drow = cur.fetchone()
+                file_id = None
+                if old_drow:
+                    old_dir_id = old_drow[0]
+                    cur.execute("SELECT id FROM files WHERE directory_id = ? AND name = ?", (old_dir_id, fp.name))
+                    frow = cur.fetchone()
+                    if frow:
+                        file_id = frow[0]
+                        cur.execute("UPDATE files SET directory_id = ?, name = ? WHERE id = ?", (new_dir_id, dest_fp.name, file_id))
+
+                cur.execute("""
+                    INSERT INTO curation_events (
+                        batch_id, event_type, created_at, source_path, destination_path,
+                        origin_folder, resource_type, resource_path, file_id, directory_id,
+                        file_size_bytes, details
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    batch_id, "extract_segregate", now_iso,
+                    str(fp), str(dest_fp),
+                    sub_dir.name, "file", str(dest_fp),
+                    file_id, new_dir_id, sz,
+                    json.dumps({"ext": dest_fp.suffix.lower(), "preserved_relative_path": str(rel)})
+                ))
+        except Exception as e:
+            errors.append(f"{fp.name} -> {e}")
+
+    # Prune empty directories in source sub_dir
+    pruned_dirs = 0
+    for root, dirs, files in os.walk(sub_dir, topdown=False):
+        rp = Path(root)
+        if rp != sub_dir and target_dir not in rp.parents and rp != target_dir:
+            try:
+                if not any(rp.iterdir()):
+                    rp.rmdir()
+                    pruned_dirs += 1
+                    if cur:
+                        cur.execute("DELETE FROM directories WHERE path = ?", (str(rp.resolve()),))
+            except Exception:
+                pass
+
+    if cur:
+        # Directory-level event
+        cur.execute("""
+            INSERT INTO curation_events (
+                batch_id, event_type, created_at, source_path, destination_path,
+                origin_folder, resource_type, resource_path, directory_id,
+                file_size_bytes, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            batch_id, "extract_folder_created", now_iso,
+            str(sub_dir), str(target_dir),
+            sub_dir.name, "directory", str(target_dir),
+            dir_id_cache.get(str(target_dir.resolve())),
+            moved_bytes,
+            json.dumps({"extracted_exts": sorted(list(target_exts)), "files_moved": moved_count, "empty_dirs_pruned": pruned_dirs})
+        ))
+        conn.commit()
+
+    print("\n" + "=" * 80)
+    print(f"[Success] ✓ Extraction & Segregation Complete!")
+    print(f"  • Files moved:                  {moved_count:,} ({format_size(moved_bytes)})")
+    print(f"  • Destination folder:           {target_dir}")
+    print(f"  • Folder structure:             Preserved")
+    if pruned_dirs > 0:
+        print(f"  • Empty directories pruned:     {pruned_dirs}")
+    if errors:
+        print(f"  • Errors encountered:           {len(errors)}")
+        for err in errors[:5]:
+            print(f"    - {err}")
+    print("=" * 80)
+
+    # Optional prompt to verify / tag the newly created subfolder
+    tag_new = input(f"\nDo you want to mark the newly extracted '{target_dir.name}' as Verified? [y/N]: ").strip().lower()
+    if tag_new in ('y', 'yes'):
+        new_stats = analyze_folder_content(target_dir)
+        new_ft = identify_folder_filetypes_and_apps(db_path, new_stats["ext_counts"], sub_dir.name, "")
+        new_app = new_ft.get("app_needed") or "General Viewer"
+        new_desc = f"{target_dir.name} extracted from {sub_dir.name}"
+        custom_desc = input(f"Enter description [Default: '{new_desc}']: ").strip()
+        if custom_desc:
+            new_desc = custom_desc
+        if cur:
+            now_v = datetime.datetime.now().isoformat()
+            cur.execute("""
+                UPDATE directories
+                SET is_verified = 1, verified_at = ?, description = ?, app_needed = ?
+                WHERE path = ?
+            """, (now_v, new_desc, new_app, str(target_dir.resolve())))
+            conn.commit()
+            print(f"[Success] ✓ '{target_dir.name}' marked as Verified with app '{new_app}'.")
+
+    if conn:
+        conn.close()
+
+    return True
 
 
 def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, target_l1_dir: Path | None = None):
@@ -4928,6 +5278,9 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     {"key": "e", "label": "Edit folder name, description or attached app, apply tags & verify"},
                     {"key": "r", "label": "Rename folder on disk & database"},
                 ])
+                if files_count > 0:
+                    mixed_badge = " (Recommended: Mixed sources detected)" if (len(ft_info.get("app_groups", [])) > 1 or len(stats["ext_counts"]) > 2) else ""
+                    base_actions.append({"key": "x", "label": f"Extract & segregate file types into subfolder (Preserve folder structure){mixed_badge}"})
                 if mystery_files:
                     base_actions.append({"key": "i", "label": f"Inspect & analyze {len(mystery_files)} mystery / extensionless files (Magic signatures & hex dump)"})
                 if ft_info.get("has_unusable_app") and "priority 1" in tier_name.lower():
@@ -5293,6 +5646,22 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         files_count = stats["total_files"]
                         top_exts = ft_info["file_types_formatted"]
                         samples = ", ".join(stats["sample_files"][:3]) if stats["sample_files"] else "None"
+                    continue
+                elif action == 'x' and files_count > 0:
+                    did_extract = extract_file_types_interactive(sub_dir, db_path, stats, ft_info)
+                    if did_extract:
+                        stats = analyze_folder_content(sub_dir)
+                        ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], curr_parent.name, tier_name)
+                        if not existing_app:
+                            detected_app = ft_info.get("app_needed")
+                        if not existing_desc:
+                            suggested_desc = suggest_folder_description(sub_dir.name, curr_parent.name, tier_name, stats, ft_info)
+                        size_str = format_size(stats["total_bytes"])
+                        files_count = stats["total_files"]
+                        date_range = f"{stats['earliest_date']} → {stats['latest_date']}" if stats["earliest_date"] else "Unknown dates"
+                        top_exts = ft_info["file_types_formatted"]
+                        samples = ", ".join(stats["sample_files"][:3]) if stats["sample_files"] else "None"
+                        child_subdirs = [s for s in sorted(sub_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')] if sub_dir.exists() and sub_dir.is_dir() else []
                     continue
                 elif action == 's':
                     print(f"\n[Skipped] '{sub_dir.name}' left unverified.")
@@ -6529,7 +6898,22 @@ def prune_missing_records(db_path: str):
     print("=" * 65)
 
 def migrate_non_media_interactive(db_path: str):
-    """Interactively segregates non-media files from a media directory to a NonMediaFiles destination while preserving folder structure."""
+    """Interactively segregates non-media files or extracts specific file types while preserving folder structure."""
+    print("\n--- FILE SEGREGATION & EXTRACTION ---")
+    print("  1. Extract specific file types (.doc, .pdf, code, etc.) into subfolder (Preserve folder structure)")
+    print("  2. Segregate non-media files from media folder (Keep media, move docs/others)")
+    seg_mode = input("Select mode (1-2) [Default: 1]: ").strip()
+    if seg_mode == "1" or not seg_mode:
+        last_dir = get_app_setting(db_path, "last_scanned_dir")
+        p_msg = f"Enter folder to extract from [Default: {last_dir}]: " if (last_dir and os.path.exists(last_dir)) else "Enter folder to extract from: "
+        s_in = input(p_msg).strip().strip('"').strip("'")
+        s_path = s_in if s_in else (last_dir if last_dir and os.path.exists(last_dir) else "")
+        if not s_path or not os.path.isdir(s_path):
+            print(f"\n[Error] Invalid directory '{s_path}'.")
+            return
+        extract_file_types_interactive(Path(s_path), db_path)
+        return
+
     print("\n--- SEGREGATE NON-MEDIA FILES ---")
     last_dir = get_app_setting(db_path, "last_scanned_dir")
     if last_dir and os.path.exists(last_dir):
@@ -7129,7 +7513,7 @@ def main():
             {"key": "7", "label": "List all active tags (Directory & File)"},
             {"key": "8", "label": "Tag & sync folders (Priority Tiers, Finder Colors & DB)"},
             {"key": "9", "label": "Search files by tag (Finder & Manual)"},
-            {"key": "10", "label": "Segregate non-media files from folder (On-demand migration)"},
+            {"key": "10", "label": "Extract & segregate file types / non-media files (Preserve folder structure)"},
             {"key": "11", "label": "Detect & clean duplicate files (Interactive duplicate resolver)"},
             {"key": "12", "label": "View Curation & Verification Report (Approved vs Unapproved folders)"},
             {"key": "13", "label": "Exit"}
