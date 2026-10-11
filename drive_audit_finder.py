@@ -33,9 +33,9 @@ EXTENSION_MAP = {
 # Comprehensive File Extension Catalog with Category, Description and Default/macOS Applications
 DEFAULT_FILE_EXTENSIONS = [
     # Financial & Accounting (Critical proprietary formats)
-    (".mny", "Financial Data", "Microsoft Money Account Database", "Microsoft Money", "MoneyDance / Banktivity / Parallels Windows", 1),
-    (".mbf", "Financial Data", "Microsoft Money Backup Archive", "Microsoft Money", "MoneyDance / Parallels Windows", 1),
-    (".lrd", "Financial Data", "Microsoft Money Lock / Report Definition", "Microsoft Money", "MoneyDance / Banktivity / Parallels Windows", 1),
+    (".mny", "Financial Data", "Microsoft Money DB (Discontinued format)", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
+    (".mbf", "Financial Data", "Microsoft Money Backup Archive (Discontinued format)", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
+    (".lrd", "Financial Data", "Microsoft Money Lock/Report Definition (Discontinued format)", "Windows Microsoft Money (Discontinued)", "Archival Backup Only (Unusable on Mac/PC without legacy Windows VM)", 1),
     (".ofx", "Financial Data", "Open Financial Exchange Transaction Data", "Financial / Banking Software", "Banktivity / MoneyDance / Excel", 1),
     (".qfx", "Financial Data", "Quicken Financial Exchange Data", "Quicken", "Quicken for Mac / Banktivity", 1),
     (".qdf", "Financial Data", "Quicken Financial Database", "Quicken", "Quicken for Mac / Parallels Windows", 1),
@@ -2718,7 +2718,7 @@ def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name:
         app = ft_info.get("app_needed", "")
         if "Microsoft Money" in app or top_cat == "Financial Data":
             if "money" in name_lower or ".mny" in ext_counts or ".mbf" in ext_counts:
-                return f"Microsoft Money financial database & backup archives (.mny, .mbf{year_str})"
+                return f"Discontinued Microsoft Money financial archives & backups (.mny, .mbf{year_str}) — Archival backup only (unusable without legacy Windows VM)"
             return f"Financial account databases & transaction records{year_str}"
         if "Quicken" in app:
             return f"Quicken personal financial accounts & tax records (.qdf{year_str})"
@@ -2733,7 +2733,7 @@ def suggest_folder_description(folder_name: str, parent_l1_name: str, tier_name:
 
     # Specific name & signature heuristics
     if "money" in name_lower or ".mny" in ext_counts or ".mbf" in ext_counts:
-        return f"Microsoft Money financial database & backup archives (.mny, .mbf{year_str})"
+        return f"Discontinued Microsoft Money financial archives & backups (.mny, .mbf{year_str}) — Archival backup only (unusable without legacy Windows VM)"
     if "quicken" in name_lower or ".qdf" in ext_counts:
         return f"Quicken personal financial accounts & tax records (.qdf{year_str})"
     if "db backup" in name_lower or ".sql" in ext_counts:
