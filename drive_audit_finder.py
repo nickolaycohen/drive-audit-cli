@@ -2264,6 +2264,12 @@ def _inspect_and_edit_single_folder(item: dict, storage_root: Path, db_path: str
         if item.get("db_tags"):
             print(f"  • SQLite Tags:  {', '.join(item['db_tags'])}")
 
+        # Check iDrive status for this folder
+        b_info = get_idrive_backup_sets()
+        is_cov, cov_reason = check_idrive_backup_coverage(folder_path, b_info.get("all", set()))
+        cov_icon = "✅ Included" if is_cov else "❌ Missing"
+        print(f"  • iDrive Backup: {cov_icon} ({cov_reason})")
+
         print("\nActions:")
         print("  1. Apply standard Priority tags (Priority tier with color + folder name tag)")
         print("  2. Add / Edit folder description (Stored in SQLite database)")
@@ -2272,9 +2278,10 @@ def _inspect_and_edit_single_folder(item: dict, storage_root: Path, db_path: str
         print("  5. Propagate current tags to all subfolders in this subtree")
         print("  6. Remove / Clear all tags from this folder")
         print("  7. Launch Curation Wizard on this folder's subdirectories (Scan & Triage)")
-        print("  8. Return to folder list")
+        print("  8. Add / Sync this folder to iDrive backup set (.plist)")
+        print("  9. Return to folder list")
 
-        sub_choice = input("\nSelect action (1-8): ").strip()
+        sub_choice = input("\nSelect action (1-9): ").strip()
 
         if sub_choice == "1":
             tier_info = PRIORITY_TIER_CONFIG.get(item["parent_tier"].lower(), {"tag": item["parent_tier"], "color": item["tier_color"]})
@@ -2409,6 +2416,13 @@ def _inspect_and_edit_single_folder(item: dict, storage_root: Path, db_path: str
         elif sub_choice == "7":
             curation_wizard_interactive(db_path, storage_root, target_l1_dir=folder_path)
         elif sub_choice == "8":
+            confirm_idrive = input(f"\nAdd '{folder_path}' to iDrive Backup Set? [y/N]: ").strip().lower()
+            if confirm_idrive == 'y':
+                ok, msg = add_folder_to_idrive_backup_set(folder_path)
+                print(f"\n{'[Success]' if ok else '[Error]'} {msg}")
+                if ok:
+                    print("[Important] If IDrive is currently running, quit and reopen IDrive to reload the backup set.")
+        elif sub_choice == "9":
             break
         else:
             print("\n[Error] Invalid choice.")
@@ -2526,8 +2540,8 @@ def add_folder_to_idrive_backup_set(folder_path: str | Path) -> tuple[bool, str]
     except Exception as e:
         return False, f"Failed to update iDrive plist: {e}"
 
-def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1"):
-    """Interactively audits Priority 1 folders (or all priorities) against active iDrive backup sets."""
+def audit_idrive_backup_interactive(db_path: str, target_tiers: list | str | None = None):
+    """Interactively audits Priority 1 and/or Priority 2 folders against active iDrive backup sets."""
     print("\n" + "=" * 85)
     print("  iDRIVE BACKUP INCLUSION AUDIT & VERIFICATION")
     print("=" * 85)
@@ -2551,12 +2565,33 @@ def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1
     status_icon = "🟢 Running" if idrive_running else "⚪ Not Running"
     print(f"  • IDrive Client Process:     {status_icon}")
 
+    selected_tiers = ["priority 1", "priority 2"]
+    if target_tiers is None:
+        print("\nSelect Priority Tiers to Audit:")
+        print("  1. Priority 1 & Priority 2 (Active Personal & Systems/Dev Targets) [Default]")
+        print("  2. Priority 1 only (Critical active personal data)")
+        print("  3. Priority 2 only (Systems, Dev, User Profiles, References)")
+        print("  4. All Mapped Locations (Priority 1-4)")
+        sc = input("Choice [1-4, default: 1]: ").strip()
+        if sc == "2":
+            selected_tiers = ["priority 1"]
+        elif sc == "3":
+            selected_tiers = ["priority 2"]
+        elif sc == "4":
+            selected_tiers = None
+        else:
+            selected_tiers = ["priority 1", "priority 2"]
+    elif isinstance(target_tiers, str):
+        selected_tiers = [target_tiers.lower()]
+    elif isinstance(target_tiers, list):
+        selected_tiers = [t.lower() for t in target_tiers]
+
     locations = get_priority_locations(db_path, active_only=True)
-    if target_tier:
-        locations = [l for l in locations if l["priority_tier"].lower() == target_tier.lower()]
+    if selected_tiers is not None:
+        locations = [l for l in locations if l["priority_tier"].lower() in selected_tiers]
 
     if not locations:
-        print(f"\n[Notice] No active locations found matching '{target_tier}'.")
+        print(f"\n[Notice] No active locations found matching selected scope.")
         input("\nPress Enter to return...")
         return
 
@@ -2564,7 +2599,6 @@ def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1
     cursor = conn.cursor() if conn else None
 
     audit_rows = []
-    missing_paths = []
 
     for loc in locations:
         loc_path = loc["path"]
@@ -2584,8 +2618,6 @@ def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1
             "size_bytes": None,
             "file_count": None
         })
-        if not loc_covered:
-            missing_paths.append(loc_path)
 
         # Check level-1 categories under this location
         if loc_path.exists():
@@ -2615,14 +2647,13 @@ def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1
                         "size_bytes": sb,
                         "file_count": fc
                     })
-                    if not sub_covered and not loc_covered:
-                        missing_paths.append(sub)
 
     if conn:
         conn.close()
 
+    title_scope = " & ".join([t.upper() for t in selected_tiers]) if selected_tiers else "ALL PRIORITY TIERS"
     print("\n" + "=" * 98)
-    print(f"  BACKUP VERIFICATION RESULTS: {target_tier.upper()}")
+    print(f"  BACKUP VERIFICATION RESULTS: {title_scope}")
     print("=" * 98)
     print(f"{'#':<4} {'Priority Tier':<14} {'Target Folder':<32} {'Size / Files':<18} {'iDrive Status'}")
     print("-" * 98)
@@ -2630,7 +2661,15 @@ def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1
     missing_count = 0
     covered_count = 0
 
+    curr_t = None
     for idx, row in enumerate(audit_rows, 1):
+        if row["tier"] != curr_t:
+            curr_t = row["tier"]
+            t_clean = curr_t.lower()
+            t_conf = PRIORITY_TIER_CONFIG.get(t_clean, {"color": 0})
+            t_em = FINDER_COLOR_EMOJI.get(t_conf["color"], "⚪")
+            print(f"\n{t_em} [{curr_t}]")
+
         if row["size_bytes"] is not None and row["file_count"] is not None:
             sz_str = f"{format_size(row['size_bytes'])} ({row['file_count']:,})"
         else:
@@ -2654,40 +2693,55 @@ def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1
     print(f"Summary: {covered_count} covered in iDrive, {missing_count} MISSING from backup list.")
 
     if missing_count > 0:
-        print("\n⚠️  ACTION REQUIRED: Priority 1 folders are NOT currently backed up to iDrive!")
+        print(f"\n⚠️  ACTION REQUIRED: {missing_count} folder(s) in {title_scope} are NOT currently backed up to iDrive!")
     else:
-        print("\n✅ All Priority 1 folders are confirmed in the iDrive backup set!")
+        print(f"\n✅ All folders in {title_scope} are confirmed in the active iDrive backup set!")
 
     while True:
         print("\nOptions:")
-        print("  1. Add missing Priority 1 location root to iDrive backup set (.plist)")
-        print("  2. Add missing individual level-1 category folders to iDrive backup set (.plist)")
-        print("  3. View current active items in iDrive backup sets (All 14 items)")
+        print("  1. Add missing Location Root(s) to iDrive backup set (.plist)")
+        print("  2. Select individual Category Folders to add to iDrive backup set (.plist)")
+        print("  3. View current active items in iDrive backup sets (Main online & External sets)")
         print("  4. View step-by-step instructions for adding folders in iDrive Desktop GUI")
         print("  5. Return to Tagging Review menu")
 
         act = input("\nSelect option (1-5): ").strip()
         if act == "1":
-            root_targets = [r["path"] for r in audit_rows if r["is_root"] and not r["covered"]]
+            root_targets = [r for r in audit_rows if r["is_root"] and not r["covered"]]
             if not root_targets:
-                print("\n[Notice] All location roots are already covered in iDrive.")
+                print("\n[Notice] All location roots in this scope are already covered in iDrive.")
                 continue
-            for r_p in root_targets:
-                confirm = input(f"Add '{r_p}' to iDrive Backup Set? [y/N]: ").strip().lower()
+            for r_item in root_targets:
+                r_p = r_item["path"]
+                confirm = input(f"Add [{r_item['tier']}] '{r_p}' to iDrive Backup Set? [y/N]: ").strip().lower()
                 if confirm == 'y':
                     ok, msg = add_folder_to_idrive_backup_set(r_p)
-                    print(f"  • {r_p}: {'[Success]' if ok else '[Error]'} {msg}")
+                    print(f"  • [{r_item['tier']}] {r_p}: {'[Success]' if ok else '[Error]'} {msg}")
             print("\n[Important] If IDrive is currently running, quit and reopen IDrive to reload the backup set.")
         elif act == "2":
-            sub_targets = [r["path"] for r in audit_rows if not r["is_root"] and not r["covered"]]
+            sub_targets = [r for r in audit_rows if not r["is_root"] and not r["covered"]]
             if not sub_targets:
-                print("\n[Notice] All category folders are already covered in iDrive.")
+                print("\n[Notice] All category folders in this scope are already covered in iDrive.")
                 continue
-            for s_p in sub_targets:
-                confirm = input(f"Add '{s_p}' to iDrive Backup Set? [y/N]: ").strip().lower()
-                if confirm == 'y':
-                    ok, msg = add_folder_to_idrive_backup_set(s_p)
-                    print(f"  • {s_p}: {'[Success]' if ok else '[Error]'} {msg}")
+            print("\nMissing Category Folders:")
+            for s_idx, st in enumerate(sub_targets, 1):
+                print(f"  {s_idx}. [{st['tier']}] {st['name']} ({st['path']})")
+            sel_s = input(f"\nEnter folder numbers to add (e.g. '1, 2', 'all', or 'c' to cancel): ").strip().lower()
+            if sel_s == 'c' or not sel_s:
+                continue
+            chosen = []
+            if sel_s == 'all':
+                chosen = sub_targets
+            else:
+                for part in sel_s.replace(' ', ',').split(','):
+                    if part.isdigit() and 1 <= int(part) <= len(sub_targets):
+                        chosen.append(sub_targets[int(part) - 1])
+            if not chosen:
+                print("No valid folders selected.")
+                continue
+            for ch in chosen:
+                ok, msg = add_folder_to_idrive_backup_set(ch["path"])
+                print(f"  • [{ch['tier']}] {ch['name']}: {'[Success]' if ok else '[Error]'} {msg}")
             print("\n[Important] If IDrive is currently running, quit and reopen IDrive to reload the backup set.")
         elif act == "3":
             print("\n--- CURRENT iDRIVE BACKUP SET ---")
@@ -2699,13 +2753,13 @@ def audit_idrive_backup_interactive(db_path: str, target_tier: str = "priority 1
                 print(f"  • {n}")
         elif act == "4":
             print("\n" + "=" * 65)
-            print("  HOW TO ADD PRIORITY 1 FOLDERS IN iDRIVE DESKTOP GUI")
+            print("  HOW TO ADD PRIORITY 1 & 2 FOLDERS IN iDRIVE DESKTOP GUI")
             print("=" * 65)
             print("1. Open the IDrive application on your Mac.")
             print("2. Navigate to the 'Backup' tab on the left sidebar.")
             print("3. Click 'Change...' or browse down the folder tree.")
             print("4. Expand 'Volumes' -> 'LaCie' -> 'Storage'.")
-            print("5. Check the box for 'Priority 1' (or 'Data' and 'Documents').")
+            print("5. Check the box for 'Priority 1' and 'Priority 2' (or individual subfolders).")
             print("6. Click 'Save' / 'Apply'.")
             print("7. Run 'audit_idrive_backup_interactive' here to confirm coverage!")
             print("=" * 65)
@@ -2842,13 +2896,13 @@ def tag_review_priority_folders_interactive(db_path: str):
                 desc_label = f" — \"{t_desc}\"" if t_desc else ""
                 print(f"\n{item['tier_emoji']} [{curr_tier}] ({item['tier_color_name']}){desc_label}")
 
-                # If Priority 1, check if all mapped locations & items are in iDrive
-                if curr_tier.lower() == "priority 1":
-                    p1_missing = [it for it in level1_items if it["parent_tier"].lower() == "priority 1" and not check_idrive_backup_coverage(it["path"], all_backup_items)[0]]
-                    if p1_missing:
-                        print("  ⚠️  Notice: Priority 1 folders are NOT confirmed in iDrive backup set! Type 'idrive' to review & fix.")
+                # If Priority 1 or Priority 2, check if all mapped locations & items are in iDrive
+                if curr_tier.lower() in ["priority 1", "priority 2"]:
+                    tier_missing = [it for it in level1_items if it["parent_tier"].lower() == curr_tier.lower() and not check_idrive_backup_coverage(it["path"], all_backup_items)[0]]
+                    if tier_missing:
+                        print(f"  ⚠️  Notice: {curr_tier} folders are NOT confirmed in iDrive backup set! Type 'idrive' to review & fix.")
                     else:
-                        print("  ☁️  iDrive Status: All Priority 1 folders are confirmed in the active backup set.")
+                        print(f"  ☁️  iDrive Status: All {curr_tier} folders are confirmed in the active backup set.")
 
             loc_key = (item["loc_label"], str(item["loc_path"]))
             if loc_key != curr_loc:
@@ -2873,8 +2927,8 @@ def tag_review_priority_folders_interactive(db_path: str):
                         tag_parts.append(f"{t_name}")
                 tag_display = " | ".join(tag_parts)
 
-            # For Priority 1, append iDrive coverage badge
-            if item["parent_tier"].lower() == "priority 1":
+            # For Priority 1 & Priority 2, append iDrive coverage badge
+            if item["parent_tier"].lower() in ["priority 1", "priority 2"]:
                 is_cov, _ = check_idrive_backup_coverage(item["path"], all_backup_items)
                 idrive_badge = " [☁️ iDrive: ✅]" if is_cov else " [☁️ iDrive: ❌ Missing]"
                 tag_display += idrive_badge
@@ -2888,7 +2942,7 @@ def tag_review_priority_folders_interactive(db_path: str):
         print("\nOptions:")
         print(f"  • Enter folder number (1-{len(level1_items)}) to inspect & edit tags / color / description / tier")
         print("  • 'loc' - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)")
-        print("  • 'idrive' - Audit iDrive backup inclusion (Check Priority 1 folders in iDrive backup set)")
+        print("  • 'idrive' - Audit iDrive backup inclusion (Check Priority 1 & 2 folders in iDrive)")
         print("  • 'w' - Launch Sequential Curation Wizard (Triage subfolders across locations)")
         print("  • 'p1'-'p4' - Edit description of a top-level Priority tier (Priority 1-4)")
         print("  • 'a' - Auto-tag untagged folders with parent Priority & category")
@@ -2903,7 +2957,7 @@ def tag_review_priority_folders_interactive(db_path: str):
         elif action_choice == 'r':
             continue
         elif action_choice == 'idrive':
-            audit_idrive_backup_interactive(db_path, "priority 1")
+            audit_idrive_backup_interactive(db_path, ["priority 1", "priority 2"])
             continue
         elif action_choice == 'loc':
             manage_priority_locations_interactive(db_path)

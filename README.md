@@ -187,7 +187,7 @@ The orchestrator operates as an interactive, human-in-the-loop governance consol
 Options:
   • 1-N        - Select folder number to inspect & edit tags / color / description / tier
   • 'loc'      - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)
-  • 'idrive'   - Audit iDrive backup inclusion (Check Priority 1 folders in iDrive backup set)
+  • 'idrive'   - Audit iDrive backup inclusion (Check Priority 1 & 2 folders in iDrive)
   • 'w'        - Launch Sequential Curation Wizard (Triage subfolders across locations)
   • 'p1'-'p4'  - Edit description of a top-level Priority tier (Priority 1-4)
   • 'a'        - Auto-tag untagged folders with parent Priority & category
@@ -216,7 +216,8 @@ Actions:
   5. Propagate current tags to all subfolders in this subtree
   6. Remove / Clear all tags from this folder (Finder extended attributes & DB)
   7. Launch Curation Wizard on this folder's subdirectories (Scan & Triage)
-  8. Return to folder list
+  8. Add / Sync this folder to iDrive backup set (.plist)
+  9. Return to folder list
 ```
 
 ### 4. Sequential Curation Wizard Decision Gate (`w` in Option 1)
@@ -239,8 +240,8 @@ Prompts:
 ### 5. iDrive Backup Verification Wizard (`idrive` in Option 1)
 ```text
 Options:
-  1. Add missing Priority 1 location root to iDrive backup set (.plist)
-  2. Add missing individual level-1 category folders to iDrive backup set (.plist)
+  1. Add missing Location Root(s) (Priority 1 & 2) to iDrive backup set (.plist)
+  2. Select individual Category Folders to add to iDrive backup set (.plist)
   3. View current active items in iDrive backup sets (Main online & External sets)
   4. View step-by-step instructions for adding folders in iDrive Desktop GUI
   5. Return to Tagging Review menu
@@ -331,9 +332,9 @@ Inspects mapped storage locations across Priority tiers (`Priority 1` through `P
   - **Auto-Repair ('a')**: Scans all level-1 folders and batch-applies standard Priority tags to any untagged directories with a single confirmation.
 - **iDrive Backup Verification ('idrive')**:
   - Directly inspects active macOS iDrive client backup sets (`backupReferenceFile.plist` and `NetworkDriveBackupSet.plist`).
-  - Verifies whether every folder dedicated as **Priority 1** (e.g. `/Volumes/LaCie/Storage/Priority 1`, `Data`, `Documents`, or any mapped location) is actively covered by iDrive.
+  - Verifies whether folders dedicated as **Priority 1** (critical personal data) and **Priority 2** (systems, dev environments, user profiles, reference archives) are actively covered by iDrive.
   - Displays coverage status badges (`[☁️ iDrive: ✅]` vs `[☁️ iDrive: ❌ Missing]`).
-  - Interactively stages missing Priority 1 paths into iDrive's backup sets with automatic timestamped `.bak` copies, or provides step-by-step guidance for adding them in the iDrive Desktop application.
+  - Interactively stages missing Priority 1 and 2 paths (whole location roots or selected category subfolders) into iDrive's backup sets with automatic timestamped `.bak` copies, or provides step-by-step guidance for adding them in the iDrive Desktop application.
 
 ### 2. Scan & Index Directory (Read-only Catalog & Tag Sync)
 Scans a target directory path (e.g., `/Users/username/Pictures` or `/Volumes/ExternalDrive`), indexing all files and subdirectories into SQLite. **Strictly read-only on the filesystem: never moves, alters, or deletes files on disk.**
