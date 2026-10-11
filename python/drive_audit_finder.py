@@ -1419,7 +1419,8 @@ def generate_top_level_scans_report(db_path: str):
             print(f"[Error] Failed to export CSV: {e}")
 
     elif export_choice == "m":
-        filename = "top_level_scans_report.md"
+        os.makedirs("docs", exist_ok=True)
+        filename = "docs/top_level_scans_report.md"
         try:
             with open(filename, "w", encoding="utf-8") as f:
                 f.write(f"# Top-Level Scanned Folders Report\n\n")
@@ -1514,7 +1515,8 @@ def generate_largest_files_report(db_path: str):
             print(f"[Error] Failed to export CSV: {e}")
 
     elif export_choice == "m":
-        filename = "largest_files_report.md"
+        os.makedirs("docs", exist_ok=True)
+        filename = "docs/largest_files_report.md"
         try:
             with open(filename, "w", encoding="utf-8") as f:
                 f.write(f"# Top {len(rows)} Largest Files Report\n\n")
@@ -2004,7 +2006,8 @@ def generate_curation_verification_report(db_path: str):
         elif rep_choice == "5":
             exp_fmt = input("\nExport format [m = Markdown, c = CSV, or enter to cancel]: ").strip().lower()
             if exp_fmt == "m":
-                fname = "curation_status_report.md"
+                os.makedirs("docs", exist_ok=True)
+                fname = "docs/curation_status_report.md"
                 cursor.execute("""
                     WITH approved_dirs AS (
                         SELECT id, name, path, is_verified, verified_at, description, app_needed
