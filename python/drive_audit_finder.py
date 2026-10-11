@@ -4588,20 +4588,55 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
         tier_info = PRIORITY_TIER_CONFIG.get(tier_clean, {"tag": tier_name, "color": 0, "color_name": "None"})
         tier_emoji = FINDER_COLOR_EMOJI.get(tier_info["color"], "⚪")
 
-        # Get immediate subfolders (Level-2)
-        l2_subdirs = [s for s in sorted(l1_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')]
-        if not l2_subdirs:
+        # Navigation stack allows dynamic drill-down (d) and drill-up (u) across directory depth levels
+        curr_parent = l1_dir
+        curr_candidates = [s for s in sorted(curr_parent.iterdir()) if s.is_dir() and not s.name.startswith('.')]
+        if not curr_candidates:
             continue
 
-        print(f"\n" + "#" * 80)
-        print(f"  {tier_emoji} [{tier_name}] ▸ 📍 {loc_label} ▸ {l1_dir.name}  ({len(l2_subdirs)} subfolders to inspect)")
-        print("#" * 80)
+        curr_idx = 0
+        nav_stack = []
+        level_banner_printed = False
 
-        for s_idx, sub_dir in enumerate(l2_subdirs, 1):
+        while curr_parent is not None:
+            if curr_idx >= len(curr_candidates):
+                if nav_stack:
+                    prev_parent = curr_parent
+                    curr_parent, curr_candidates, curr_idx = nav_stack.pop()
+                    curr_idx += 1
+                    level_banner_printed = False
+                    try:
+                        rel_up = curr_parent.resolve().relative_to(loc_path.resolve())
+                        up_crumb = " ▸ ".join(rel_up.parts)
+                    except Exception:
+                        up_crumb = curr_parent.name
+                    print(f"\n↳ ⤴️ Completed inspecting subfolders of '{prev_parent.name}'. Resuming '{up_crumb}' (Folder {curr_idx + 1}/{len(curr_candidates)})")
+                    continue
+                else:
+                    break
+
+            sub_dir = curr_candidates[curr_idx]
+            if not sub_dir.exists() or not sub_dir.is_dir():
+                curr_idx += 1
+                continue
+
+            try:
+                rel_p = curr_parent.resolve().relative_to(loc_path.resolve())
+                breadcrumb_str = " ▸ ".join(rel_p.parts)
+            except Exception:
+                breadcrumb_str = curr_parent.name
+
+            if not level_banner_printed:
+                print(f"\n" + "#" * 80)
+                print(f"  {tier_emoji} [{tier_name}] ▸ 📍 {loc_label} ▸ {breadcrumb_str}  ({len(curr_candidates)} subfolders to inspect)")
+                print("#" * 80)
+                level_banner_printed = True
+
             res_p = str(sub_dir.resolve())
             is_verified = 0
             existing_desc = None
             existing_app = None
+            unverified_sub_count = 0
 
             if conn:
                 cursor = conn.cursor()
@@ -4612,16 +4647,25 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     existing_desc = row[1]
                     existing_app = row[2]
 
+                cursor.execute("SELECT COUNT(id) FROM directories WHERE path LIKE ? || '/%' AND (is_verified = 0 OR is_verified IS NULL)", (res_p,))
+                row_uv = cursor.fetchone()
+                if row_uv:
+                    unverified_sub_count = row_uv[0] or 0
+
+            child_subdirs = [s for s in sorted(sub_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')] if sub_dir.exists() and sub_dir.is_dir() else []
+
             if unverified_only and is_verified == 1:
-                desc_label = f" — \"{existing_desc}\"" if existing_desc else ""
-                print(f"  [{s_idx}/{len(l2_subdirs)}] ✓ Verified: {sub_dir.name}{desc_label} (Skipping)")
-                continue
+                if unverified_sub_count == 0:
+                    desc_label = f" — \"{existing_desc}\"" if existing_desc else ""
+                    print(f"  [{curr_idx + 1}/{len(curr_candidates)}] ✓ Verified: {sub_dir.name}{desc_label} (Skipping)")
+                    curr_idx += 1
+                    continue
 
             # Analyze content & identify file types / required applications
             stats = analyze_folder_content(sub_dir)
-            ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], l1_dir.name, tier_name)
+            ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], curr_parent.name, tier_name)
             detected_app = existing_app if existing_app else ft_info.get("app_needed")
-            suggested_desc = existing_desc if existing_desc else suggest_folder_description(sub_dir.name, l1_dir.name, tier_name, stats, ft_info)
+            suggested_desc = existing_desc if existing_desc else suggest_folder_description(sub_dir.name, curr_parent.name, tier_name, stats, ft_info)
 
             # Format stats
             size_str = format_size(stats["total_bytes"])
@@ -4630,7 +4674,13 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
             top_exts = ft_info["file_types_formatted"]
             samples = ", ".join(stats["sample_files"][:3]) if stats["sample_files"] else "None"
 
-            verified_badge = "✓ Verified" if is_verified == 1 else "⚪ Unverified (Untagged)"
+            if is_verified == 1:
+                if unverified_sub_count > 0:
+                    verified_badge = f"✓ Verified Container (⚠️ {unverified_sub_count} unverified subfolder{'s' if unverified_sub_count != 1 else ''} inside)"
+                else:
+                    verified_badge = "✓ Verified"
+            else:
+                verified_badge = "⚪ Unverified (Untagged)"
 
             while True:
                 # Detect overlap with already verified database folders
@@ -4647,7 +4697,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     mystery_summary = f"{len(mystery_files)} (no ext) detected → " + ", ".join(identified_parts)
 
                 print("\n" + "-" * 80)
-                print(f"  {tier_emoji} [{tier_name}] ▸ 📍 {loc_label} ▸ {l1_dir.name}  |  Folder {s_idx}/{len(l2_subdirs)}: '{sub_dir.name}'")
+                print(f"  {tier_emoji} [{tier_name}] ▸ 📍 {loc_label} ▸ {breadcrumb_str}  |  Folder {curr_idx + 1}/{len(curr_candidates)}: '{sub_dir.name}'")
                 print("-" * 80)
                 print(f"  • Location:       {loc_label} ({loc_path})")
                 print(f"  • Full Path:      {sub_dir}")
@@ -4710,6 +4760,12 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         m_action_lbl = f"Delete redundant duplicate folder (100% duplicate of '{overlap['target_name']}')"
                     base_actions.append({"key": "g", "label": f"{m_action_lbl} (Recommended)"})
 
+                if child_subdirs:
+                    d_badge = " (Recommended: inspect unverified contents)" if (is_verified == 1 and unverified_sub_count > 0) else ""
+                    base_actions.append({"key": "d", "label": f"Drill down into '{sub_dir.name}' (Inspect its {len(child_subdirs)} subfolder{'s' if len(child_subdirs) != 1 else ''} at candidate level){d_badge}"})
+                if nav_stack:
+                    base_actions.append({"key": "u", "label": f"Drill up to '{nav_stack[-1][0].name}' (Return to parent level)"})
+
                 base_actions.extend([
                     {"key": "a", "label": f"Approve description & attach app ('{detected_app}') (Mark Verified ✓)"},
                     {"key": "e", "label": "Edit folder name, description or attached app, apply tags & verify"},
@@ -4736,9 +4792,12 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 elif not ft_info.get("is_match", True):
                     top_key = "m"
                     sorted_actions = sorted(base_actions, key=lambda x: (x["key"] != "m", -w_usage.get(x["key"], 0)))
+                elif is_verified == 1 and child_subdirs and unverified_sub_count > 0:
+                    top_key = "d"
+                    sorted_actions = sorted(base_actions, key=lambda x: (x["key"] != "d", -w_usage.get(x["key"], 0)))
                 else:
                     sorted_actions = sorted(base_actions, key=lambda x: w_usage.get(x["key"], 0), reverse=True)
-                    top_key = sorted_actions[0]["key"] if (w_usage and w_usage.get(sorted_actions[0]["key"], 0) > 0) else "a"
+                    top_key = sorted_actions[0]["key"] if (w_usage and w_usage.get(sorted_actions[0]["key"], 0) > 0) else ("a" if is_verified == 0 else "s")
 
                 print("\n  Actions:")
                 for act in sorted_actions:
@@ -4753,7 +4812,36 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     action = top_key
                 record_menu_usage(db_path, "wizard_action", action, next((a["label"] for a in base_actions if a["key"] == action), ""))
 
-                if action == 'g' and overlap:
+                if action == 'd':
+                    if not child_subdirs:
+                        print(f"\n[Info] '{sub_dir.name}' has no subfolders to drill down into.")
+                        continue
+                    nav_stack.append((curr_parent, curr_candidates, curr_idx))
+                    curr_parent = sub_dir
+                    curr_candidates = child_subdirs
+                    curr_idx = 0
+                    level_banner_printed = False
+                    try:
+                        rel_down = curr_parent.resolve().relative_to(loc_path.resolve())
+                        down_crumb = " ▸ ".join(rel_down.parts)
+                    except Exception:
+                        down_crumb = curr_parent.name
+                    print(f"\n↳ 📂 Drilled down into '{down_crumb}' ({len(child_subdirs)} candidate subfolder{'s' if len(child_subdirs) != 1 else ''} to inspect)")
+                    break
+                elif action == 'u':
+                    if not nav_stack:
+                        print(f"\n[Info] Already at top level for this category. Cannot drill up further.")
+                        continue
+                    curr_parent, curr_candidates, curr_idx = nav_stack.pop()
+                    level_banner_printed = False
+                    try:
+                        rel_up = curr_parent.resolve().relative_to(loc_path.resolve())
+                        up_crumb = " ▸ ".join(rel_up.parts)
+                    except Exception:
+                        up_crumb = curr_parent.name
+                    print(f"\n↳ ⤴️ Drilled up to '{up_crumb}' (Folder {curr_idx + 1}/{len(curr_candidates)}: '{curr_candidates[curr_idx].name}')")
+                    break
+                elif action == 'g' and overlap:
                     print("\n" + "=" * 80)
                     if overlap['diff_count'] > 0:
                         print("  MERGE DIFF FILES & REMOVE DUPLICATE FOLDER")
@@ -4791,6 +4879,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         ok = execute_folder_merge_and_cleanup(sub_dir, overlap, db_path)
                         if ok:
                             total_curated += 1
+                            curr_candidates = [s for s in sorted(curr_parent.iterdir()) if s.is_dir() and not s.name.startswith('.')]
                             break
                         else:
                             continue
@@ -4798,12 +4887,21 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         print("Merge/delete cancelled.")
                         continue
                 elif action == 'a':
-                    tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
+                    rel_p = sub_dir.resolve().relative_to(loc_path.resolve())
+                    tags = [(tier_info["tag"], tier_info["color"])]
+                    seen_tags = {tier_info["tag"]}
+                    for p in rel_p.parts:
+                        clean_p = p.strip()
+                        if clean_p and clean_p not in seen_tags:
+                            seen_tags.add(clean_p)
+                            tags.append((clean_p, 0))
+
                     set_finder_tags(sub_dir, tags)
                     _sync_directory_tags_to_db(sub_dir, tags, db_path)
                     _set_directory_description_in_db(sub_dir, suggested_desc, db_path, is_verified=True, app_needed=detected_app)
                     print(f"\n[Success] ✓ Approved & verified '{sub_dir.name}'. Tags, description & app '{detected_app}' saved.")
                     total_curated += 1
+                    curr_idx += 1
                     break
                 elif action == 'e':
                     print(f"\nCurrent folder name: '{sub_dir.name}'")
@@ -4825,12 +4923,21 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         else:
                             print(f"[Error] Failed to rename folder: {rename_err}. Keeping original name.")
 
-                    tags = [(tier_info["tag"], tier_info["color"]), (l1_dir.name, 0), (sub_dir.name, 0)]
+                    rel_p = sub_dir.resolve().relative_to(loc_path.resolve())
+                    tags = [(tier_info["tag"], tier_info["color"])]
+                    seen_tags = {tier_info["tag"]}
+                    for p in rel_p.parts:
+                        clean_p = p.strip()
+                        if clean_p and clean_p not in seen_tags:
+                            seen_tags.add(clean_p)
+                            tags.append((clean_p, 0))
+
                     set_finder_tags(sub_dir, tags)
                     _sync_directory_tags_to_db(sub_dir, tags, db_path)
                     _set_directory_description_in_db(sub_dir, final_desc, db_path, is_verified=True, app_needed=final_app)
                     print(f"\n[Success] ✓ Folder '{sub_dir.name}', description & attached app '{final_app}' approved & verified.")
                     total_curated += 1
+                    curr_idx += 1
                     break
                 elif action == 'r':
                     print(f"\nCurrent folder name: '{sub_dir.name}'")
@@ -4842,7 +4949,10 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     if renamed_ok:
                         print(f"\n[Success] Renamed folder on disk and SQLite: '{sub_dir.name}' -> '{new_fname}'")
                         sub_dir = new_renamed_path
-                        suggested_desc = suggest_folder_description(sub_dir.name, l1_dir.name, tier_name, stats, ft_info)
+                        curr_candidates = [s for s in sorted(curr_parent.iterdir()) if s.is_dir() and not s.name.startswith('.')]
+                        if sub_dir in curr_candidates:
+                            curr_idx = curr_candidates.index(sub_dir)
+                        suggested_desc = suggest_folder_description(sub_dir.name, curr_parent.name, tier_name, stats, ft_info)
                         continue
                     else:
                         print(f"\n[Error] Failed to rename folder: {rename_err}")
@@ -4895,6 +5005,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                             ok = _handle_custom_relocation_target(path_arg, sub_dir, active_locs, db_path, suggested_desc, detected_app)
                             if ok:
                                 total_curated += 1
+                                curr_candidates = [s for s in sorted(curr_parent.iterdir()) if s.is_dir() and not s.name.startswith('.')]
                                 break
                             else:
                                 continue
@@ -4916,6 +5027,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                             ok = _handle_custom_relocation_target(path_arg, sub_dir, active_locs, db_path, suggested_desc, detected_app)
                             if ok:
                                 total_curated += 1
+                                curr_candidates = [s for s in sorted(curr_parent.iterdir()) if s.is_dir() and not s.name.startswith('.')]
                                 break
                             else:
                                 continue
@@ -5006,6 +5118,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
 
                         print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' → '{target_dest_path.name}' under {target_loc['label']} / {target_cat_name}.")
                         total_curated += 1
+                        curr_candidates = [s for s in sorted(curr_parent.iterdir()) if s.is_dir() and not s.name.startswith('.')]
                         break
                     else:
                         print("Move cancelled.")
@@ -5014,11 +5127,11 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     did_rename = _handle_inspect_mystery_files(sub_dir, mystery_analyses, db_path)
                     if did_rename:
                         stats = analyze_folder_content(sub_dir)
-                        ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], l1_dir.name, tier_name)
+                        ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], curr_parent.name, tier_name)
                         if not existing_app:
                             detected_app = ft_info.get("app_needed")
                         if not existing_desc:
-                            suggested_desc = suggest_folder_description(sub_dir.name, l1_dir.name, tier_name, stats, ft_info)
+                            suggested_desc = suggest_folder_description(sub_dir.name, curr_parent.name, tier_name, stats, ft_info)
                         size_str = format_size(stats["total_bytes"])
                         files_count = stats["total_files"]
                         top_exts = ft_info["file_types_formatted"]
@@ -5027,6 +5140,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 elif action == 's':
                     print(f"\n[Skipped] '{sub_dir.name}' left unverified.")
                     total_skipped += 1
+                    curr_idx += 1
                     break
                 elif action == 'q':
                     if conn:
