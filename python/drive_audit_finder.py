@@ -4587,14 +4587,23 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 if os.path.exists(db_path):
                     with get_db_connection(db_path) as c_db:
                         c_cur = c_db.cursor()
-                        c_cur.execute("SELECT path, name, description, app_needed, total_files, total_bytes FROM directories WHERE is_verified = 1 ORDER BY path")
+                        c_cur.execute("""
+                            SELECT d.path, d.name, d.description, d.app_needed, COUNT(f.id), COALESCE(SUM(f.size_bytes), 0)
+                            FROM directories d
+                            LEFT JOIN files f ON f.directory_id = d.id
+                            WHERE d.is_verified = 1
+                            GROUP BY d.id
+                            ORDER BY d.path
+                        """)
                         verified_rows = c_cur.fetchall()
                     if verified_rows:
                         print(f"\nVerified folders in SQLite ({len(verified_rows)} found):")
                         for v_idx, v_row in enumerate(verified_rows, 1):
                             vp, vname, vdesc, vapp, vfiles, vbytes = v_row
                             v_desc_str = f" — \"{vdesc}\"" if vdesc else ""
-                            print(f"  {v_idx}. {vname} ({format_size(vbytes or 0)}){v_desc_str}")
+                            size_label = f" ({format_size(vbytes)})" if vbytes and vbytes > 0 else ""
+                            files_label = f" [{vfiles} files]" if vfiles and vfiles > 0 else ""
+                            print(f"  {v_idx}. {vname}{files_label}{size_label}{v_desc_str}")
                             print(f"     📍 {vp}")
                         sel = input(f"\nSelect verified folder (1-{len(verified_rows)}) or paste path [Default: 1]: ").strip()
                         if sel.isdigit() and 1 <= int(sel) <= len(verified_rows):
