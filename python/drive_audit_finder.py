@@ -4531,59 +4531,151 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
     print("Approved folders receive Priority Finder color tags and are marked as verified DB entries.")
     print("=" * 80)
 
-    # 1. Determine Scope
+    all_locations = get_priority_locations(db_path, active_only=True)
+    if not all_locations:
+        print("\n[Notice] No active Priority locations mapped. Use 'loc' to map folder locations.")
+        return
+
     target_l1_folders = []
+    target_cand_path = None
+    curation_mode = 'unverified_only'
+
     if target_l1_dir:
         tier_name = target_l1_dir.parent.name
         loc_label = target_l1_dir.parent.name
-        target_l1_folders = [(tier_name, loc_label, target_l1_dir.parent, target_l1_dir)]
+        target_l1_folders = [(tier_name, loc_label, target_l1_dir.parent, target_l1_dir, None)]
     else:
-        all_locations = get_priority_locations(db_path, active_only=True)
-        if not all_locations:
-            print("\n[Notice] No active Priority locations mapped. Use 'loc' to map folder locations.")
-            return
+        print("\nSelect Curation Review Mode:")
+        print("  1. UNVERIFIED subfolders only (Default: focus on new / pending candidates)")
+        print("  2. VERIFIED sets only (Prompt for path of processed set, or browse from DB)")
+        print("  3. ALL folders (Both unverified & verified across scope)")
+        print("  4. Return to menu")
+        mode_input = input("\nSelect mode (1-4) [Default: 1]: ").strip()
 
-        print("\nSelect Curation Scope:")
-        print("  1. All Priority Tiers & Locations sequentially (Priority 1 -> 4) [Default]")
-        print("  2. Priority 1 (Active & Critical Data)")
-        print("  3. Priority 2 (Systems, DEV & Profiles)")
-        print("  4. Priority 3 (Archival References & Foreign Media)")
-        print("  5. Priority 4 (Media Staging & Photos)")
-        print("  6. Return to menu")
-        scope_choice = input("\nSelect option (1-6) [Default: 1]: ").strip()
-
-        if scope_choice == "6":
+        if mode_input == "4":
             return
-        elif scope_choice == "2":
-            selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 1"]
-        elif scope_choice == "3":
-            selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 2"]
-        elif scope_choice == "4":
-            selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 3"]
-        elif scope_choice == "5":
-            selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 4"]
+        elif mode_input == "2":
+            curation_mode = 'verified_only'
+            print("\n" + "-" * 80)
+            print("  REVIEW VERIFIED SETS")
+            print("-" * 80)
+            print("Enter the full path of the processed folder/set to review,")
+            print("or press Enter to browse verified folders from SQLite (or 'a' for all verified).")
+            v_path_input = input("\nEnter path or [Enter to browse / 'a' for all]: ").strip()
+            clean_v_path = v_path_input.strip("\"'").strip()
+
+            if clean_v_path.lower() == 'a':
+                target_cand_path = None
+                curation_mode = 'verified_only'
+            elif clean_v_path:
+                p_obj = Path(clean_v_path).expanduser()
+                if p_obj.exists() and p_obj.is_dir():
+                    target_cand_path = p_obj
+                else:
+                    print(f"\n[Warning] Path '{clean_v_path}' not found on disk. Checking SQLite...")
+                    if os.path.exists(db_path):
+                        with get_db_connection(db_path) as c_db:
+                            c_cur = c_db.cursor()
+                            c_cur.execute("SELECT path FROM directories WHERE path = ? OR path LIKE ?", (clean_v_path, f"%{clean_v_path}%"))
+                            r = c_cur.fetchone()
+                            if r and Path(r[0]).exists():
+                                target_cand_path = Path(r[0])
+                    if not target_cand_path:
+                        print(f"[Error] Folder could not be located. Falling back to all verified sets.")
+            else:
+                # Browse verified folders from SQLite
+                if os.path.exists(db_path):
+                    with get_db_connection(db_path) as c_db:
+                        c_cur = c_db.cursor()
+                        c_cur.execute("SELECT path, name, description, app_needed, total_files, total_bytes FROM directories WHERE is_verified = 1 ORDER BY path")
+                        verified_rows = c_cur.fetchall()
+                    if verified_rows:
+                        print(f"\nVerified folders in SQLite ({len(verified_rows)} found):")
+                        for v_idx, v_row in enumerate(verified_rows, 1):
+                            vp, vname, vdesc, vapp, vfiles, vbytes = v_row
+                            v_desc_str = f" — \"{vdesc}\"" if vdesc else ""
+                            print(f"  {v_idx}. {vname} ({format_size(vbytes or 0)}){v_desc_str}")
+                            print(f"     📍 {vp}")
+                        sel = input(f"\nSelect verified folder (1-{len(verified_rows)}) or paste path [Default: 1]: ").strip()
+                        if sel.isdigit() and 1 <= int(sel) <= len(verified_rows):
+                            target_cand_path = Path(verified_rows[int(sel) - 1][0])
+                        elif sel:
+                            p_obj = Path(sel.strip("\"'")).expanduser()
+                            if p_obj.exists():
+                                target_cand_path = p_obj
+                        else:
+                            target_cand_path = Path(verified_rows[0][0])
+                    else:
+                        print("\n[Notice] No verified folders found in SQLite database yet.")
+        elif mode_input == "3":
+            curation_mode = 'all'
         else:
-            selected_locs = all_locations
+            curation_mode = 'unverified_only'
 
-        for loc in selected_locs:
-            p_dir = loc["path"]
-            if p_dir.exists() and p_dir.is_dir():
-                for sub in sorted(p_dir.iterdir()):
-                    if sub.is_dir() and not sub.name.startswith('.'):
-                        target_l1_folders.append((loc["priority_tier"].title(), loc["label"], p_dir, sub))
+        if target_cand_path and target_cand_path.exists():
+            cand_loc = None
+            for loc in all_locations:
+                try:
+                    if target_cand_path.resolve().is_relative_to(loc["path"].resolve()):
+                        cand_loc = loc
+                        break
+                except Exception:
+                    pass
+
+            if cand_loc:
+                c_tier = cand_loc["priority_tier"].title()
+                c_label = cand_loc["label"]
+                c_loc_path = cand_loc["path"]
+            else:
+                c_tier = "Priority 2"
+                c_label = target_cand_path.parent.name
+                c_loc_path = target_cand_path.parent
+
+            if target_cand_path.parent.resolve() == c_loc_path.resolve():
+                target_l1_folders = [(c_tier, c_label, c_loc_path, target_cand_path, None)]
+            else:
+                target_l1_folders = [(c_tier, c_label, c_loc_path, target_cand_path.parent, target_cand_path)]
+            curation_mode = 'all'
+        else:
+            print("\nSelect Curation Scope:")
+            print("  1. All Priority Tiers & Locations sequentially (Priority 1 -> 4) [Default]")
+            print("  2. Priority 1 (Active & Critical Data)")
+            print("  3. Priority 2 (Systems, DEV & Profiles)")
+            print("  4. Priority 3 (Archival References & Foreign Media)")
+            print("  5. Priority 4 (Media Staging & Photos)")
+            print("  6. Return to menu")
+            scope_choice = input("\nSelect option (1-6) [Default: 1]: ").strip()
+
+            if scope_choice == "6":
+                return
+            elif scope_choice == "2":
+                selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 1"]
+            elif scope_choice == "3":
+                selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 2"]
+            elif scope_choice == "4":
+                selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 3"]
+            elif scope_choice == "5":
+                selected_locs = [l for l in all_locations if l["priority_tier"] == "priority 4"]
+            else:
+                selected_locs = all_locations
+
+            for loc in selected_locs:
+                p_dir = loc["path"]
+                if p_dir.exists() and p_dir.is_dir():
+                    for sub in sorted(p_dir.iterdir()):
+                        if sub.is_dir() and not sub.name.startswith('.'):
+                            target_l1_folders.append((loc["priority_tier"].title(), loc["label"], p_dir, sub, None))
 
     if not target_l1_folders:
-        print("\n[Notice] No Level-1 folders found to curate.")
+        print("\n[Notice] No folders found to curate.")
         return
-
-    unverified_only = input("\nReview only UNVERIFIED subfolders? [Y/n]: ").strip().lower() != 'n'
 
     total_curated = 0
     total_skipped = 0
 
     conn = get_db_connection(db_path) if os.path.exists(db_path) else None
 
-    for tier_name, loc_label, loc_path, l1_dir in target_l1_folders:
+    for tier_name, loc_label, loc_path, l1_dir, initial_cand in target_l1_folders:
         tier_clean = tier_name.lower()
         tier_info = PRIORITY_TIER_CONFIG.get(tier_clean, {"tag": tier_name, "color": 0, "color_name": "None"})
         tier_emoji = FINDER_COLOR_EMOJI.get(tier_info["color"], "⚪")
@@ -4594,7 +4686,11 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
         if not curr_candidates:
             continue
 
-        curr_idx = 0
+        if initial_cand and initial_cand in curr_candidates:
+            curr_idx = curr_candidates.index(initial_cand)
+        else:
+            curr_idx = 0
+
         nav_stack = []
         level_banner_printed = False
 
@@ -4637,6 +4733,7 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
             existing_desc = None
             existing_app = None
             unverified_sub_count = 0
+            verified_sub_count = 0
 
             if conn:
                 cursor = conn.cursor()
@@ -4652,12 +4749,22 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 if row_uv:
                     unverified_sub_count = row_uv[0] or 0
 
+                cursor.execute("SELECT COUNT(id) FROM directories WHERE path LIKE ? || '/%' AND is_verified = 1", (res_p,))
+                row_v = cursor.fetchone()
+                if row_v:
+                    verified_sub_count = row_v[0] or 0
+
             child_subdirs = [s for s in sorted(sub_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')] if sub_dir.exists() and sub_dir.is_dir() else []
 
-            if unverified_only and is_verified == 1:
+            if curation_mode == 'unverified_only' and is_verified == 1:
                 if unverified_sub_count == 0:
                     desc_label = f" — \"{existing_desc}\"" if existing_desc else ""
                     print(f"  [{curr_idx + 1}/{len(curr_candidates)}] ✓ Verified: {sub_dir.name}{desc_label} (Skipping)")
+                    curr_idx += 1
+                    continue
+            elif curation_mode == 'verified_only' and is_verified == 0:
+                if verified_sub_count == 0:
+                    print(f"  [{curr_idx + 1}/{len(curr_candidates)}] ⚪ Unverified: {sub_dir.name} (Skipping)")
                     curr_idx += 1
                     continue
 
