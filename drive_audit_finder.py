@@ -1361,19 +1361,20 @@ def generate_curation_verification_report(db_path: str):
 
         print("=" * 92)
         print("\nOptions:")
-        print("  1. List all Approved / Verified Folders (is_verified = 1)")
-        print("  2. List Unapproved Level-1 / Level-2 Folders Pending Curation (is_verified = 0)")
-        print("  3. Filter Approved / Unapproved by Priority Tier (P1, P2, P3, P4)")
-        print("  4. Export Full Report (Markdown / CSV)")
-        print("  5. Return to previous menu")
+        print("  1. List Approved Folders (is_verified = 1) — [Enter # to inspect folder details & files]")
+        print("  2. List All Approved Files (Detailed file-by-file inventory)")
+        print("  3. List Unapproved Category Folders (is_verified = 0) — [Enter # to inspect pending files]")
+        print("  4. Filter Approved / Unapproved by Priority Tier (P1, P2, P3, P4)")
+        print("  5. Export Full Report (Markdown / CSV with file inventory)")
+        print("  6. Return to previous menu")
 
-        rep_choice = input("\nSelect report option (1-5): ").strip()
+        rep_choice = input("\nSelect report option (1-6): ").strip()
 
-        if rep_choice == "5":
+        if rep_choice == "6":
             break
 
         elif rep_choice == "1":
-            # List Approved Folders
+            # List Approved Folders with drilldown
             cursor.execute("""
                 SELECT 
                     d.id,
@@ -1405,9 +1406,98 @@ def generate_curation_verification_report(db_path: str):
                 if ddesc:
                     print(f"     ↳ 📝 \"{ddesc}\"")
             print("=" * 96)
-            input("\nPress Enter to continue...")
+
+            while True:
+                f_drill = input("\nEnter folder # (1-N) to view contained files & details, or Enter to return: ").strip().lower()
+                if not f_drill:
+                    break
+                if f_drill.isdigit():
+                    f_idx = int(f_drill) - 1
+                    if 0 <= f_idx < len(v_rows):
+                        did, dname, dpath, v_at, ddesc, f_cnt, b_cnt, dtags = v_rows[f_idx]
+                        cursor.execute("""
+                            SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at,
+                                   COALESCE(GROUP_CONCAT(DISTINCT ft.tag_name), '-') as tags
+                            FROM files f
+                            LEFT JOIN file_tags ft ON ft.file_id = f.id
+                            WHERE f.directory_id = ?
+                            GROUP BY f.id
+                            ORDER BY f.size_bytes DESC
+                        """, (did,))
+                        dir_files = cursor.fetchall()
+
+                        cursor.execute("""
+                            SELECT category, COUNT(id), SUM(size_bytes)
+                            FROM files
+                            WHERE directory_id = ?
+                            GROUP BY category
+                            ORDER BY SUM(size_bytes) DESC
+                        """, (did,))
+                        cat_breakdown = cursor.fetchall()
+                        cat_str = " | ".join([f"{c}: {cnt} ({format_size(sb)})" for c, cnt, sb in cat_breakdown]) if cat_breakdown else "No files"
+
+                        v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
+                        print("\n" + "#" * 88)
+                        print(f"  APPROVED FOLDER DETAILS: '{dname}'")
+                        print("#" * 88)
+                        print(f"  • Full Path:       {dpath}")
+                        print(f"  • Status:          ✓ Approved & Verified ({v_date_str})")
+                        print(f"  • Total Storage:   {format_size(b_cnt)} across {f_cnt:,} files")
+                        print(f"  • Folder Tags:     {dtags}")
+                        print(f"  • Categories:      {cat_str}")
+                        if ddesc:
+                            print(f"  • Description:     \"{ddesc}\"")
+                        print("-" * 88)
+                        if dir_files:
+                            print(f"  Contained Files ({len(dir_files)} files):")
+                            print(f"  {'#':<4} {'File Name':<38} {'Category':<10} {'Size':<10} {'Modified Date'}")
+                            print("  " + "-" * 84)
+                            for d_fi, (df_name, df_cat, df_ext, df_sz, df_mod, df_tags) in enumerate(dir_files, 1):
+                                m_str = df_mod.replace("T", " ")[:19] if df_mod else "N/A"
+                                s_str = format_size(df_sz)
+                                disp_name = df_name if len(df_name) <= 36 else df_name[:33] + "..."
+                                print(f"  {d_fi:<4} {disp_name:<38} {df_cat:<10} {s_str:<10} {m_str}")
+                        else:
+                            print("  (Folder contains 0 direct files; nested subdirectories have individual records)")
+                        print("#" * 88)
+                    else:
+                        print(f"[Error] Invalid selection. Choose 1-{len(v_rows)}.")
 
         elif rep_choice == "2":
+            # List All Approved Files
+            cursor.execute("""
+                SELECT 
+                    d.name as folder_name,
+                    d.path as folder_path,
+                    f.name as file_name,
+                    f.category,
+                    f.extension,
+                    f.size_bytes,
+                    f.modified_at,
+                    COALESCE(GROUP_CONCAT(DISTINCT ft.tag_name), '-') as file_tags
+                FROM files f
+                JOIN directories d ON f.directory_id = d.id
+                LEFT JOIN file_tags ft ON ft.file_id = f.id
+                WHERE d.is_verified = 1
+                GROUP BY f.id
+                ORDER BY d.path, f.name
+            """)
+            all_v_files = cursor.fetchall()
+            print("\n" + "=" * 98)
+            print(f"ALL APPROVED FILES ({len(all_v_files)} files across approved folders)")
+            print("=" * 98)
+            print(f"{'#':<4} {'Folder':<22} {'File Name':<34} {'Category':<10} {'Size':<10} {'Modified Date'}")
+            print("-" * 98)
+            for f_i, (f_dname, f_dpath, f_name, f_cat, f_ext, f_sz, f_mod, f_tags) in enumerate(all_v_files, 1):
+                m_str = f_mod.replace("T", " ")[:19] if f_mod else "N/A"
+                s_str = format_size(f_sz)
+                disp_fname = f_name if len(f_name) <= 32 else f_name[:29] + "..."
+                disp_dname = f_dname if len(f_dname) <= 20 else f_dname[:17] + "..."
+                print(f"{f_i:<4} {disp_dname:<22} {disp_fname:<34} {f_cat:<10} {s_str:<10} {m_str}")
+            print("=" * 98)
+            input("\nPress Enter to continue...")
+
+        elif rep_choice == "3":
             # List Unapproved Level-1 / Level-2 Folders Pending Curation
             cursor.execute("""
                 SELECT 
@@ -1438,9 +1528,45 @@ def generate_curation_verification_report(db_path: str):
                 print(f"{idx:<4} {ptier.title():<14} {dname:<28} {stat_str:<22} {dtags}")
                 print(f"     📍 Path: {dpath}")
             print("=" * 96)
-            input("\nPress Enter to continue...")
 
-        elif rep_choice == "3":
+            while True:
+                u_drill = input("\nEnter folder # (1-N) to inspect pending files & details, or Enter to return: ").strip().lower()
+                if not u_drill:
+                    break
+                if u_drill.isdigit():
+                    u_idx = int(u_drill) - 1
+                    if 0 <= u_idx < len(u_rows):
+                        ptier, plbl, did, dname, dpath, f_cnt, b_cnt, dtags = u_rows[u_idx]
+                        cursor.execute("""
+                            SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at
+                            FROM files f
+                            WHERE f.directory_id = ?
+                            ORDER BY f.size_bytes DESC
+                        """, (did,))
+                        u_dir_files = cursor.fetchall()
+                        print("\n" + "#" * 88)
+                        print(f"  PENDING FOLDER DETAILS: '{dname}' ({ptier.title()})")
+                        print("#" * 88)
+                        print(f"  • Full Path:       {dpath}")
+                        print(f"  • Status:          ⚪ Pending Curation / Unapproved")
+                        print(f"  • Storage:         {format_size(b_cnt)} across {f_cnt:,} direct files")
+                        print("-" * 88)
+                        if u_dir_files:
+                            print(f"  Contained Files ({len(u_dir_files)} files):")
+                            print(f"  {'#':<4} {'File Name':<38} {'Category':<10} {'Size':<10} {'Modified Date'}")
+                            print("  " + "-" * 84)
+                            for u_fi, (uf_name, uf_cat, uf_ext, uf_sz, uf_mod) in enumerate(u_dir_files, 1):
+                                m_str = uf_mod.replace("T", " ")[:19] if uf_mod else "N/A"
+                                s_str = format_size(uf_sz)
+                                disp_name = uf_name if len(uf_name) <= 36 else uf_name[:33] + "..."
+                                print(f"  {u_fi:<4} {disp_name:<38} {uf_cat:<10} {s_str:<10} {m_str}")
+                        else:
+                            print("  (Folder contains 0 direct files; content lives in subdirectories)")
+                        print("#" * 88)
+                    else:
+                        print(f"[Error] Invalid selection. Choose 1-{len(u_rows)}.")
+
+        elif rep_choice == "4":
             tier_in = input("\nEnter Priority Tier to filter (1, 2, 3, or 4): ").strip()
             if tier_in in ["1", "2", "3", "4"]:
                 t_filter = f"priority {tier_in}"
@@ -1480,7 +1606,7 @@ def generate_curation_verification_report(db_path: str):
                 print("=" * 90)
                 input("\nPress Enter to continue...")
 
-        elif rep_choice == "4":
+        elif rep_choice == "5":
             exp_fmt = input("\nExport format [m = Markdown, c = CSV, or enter to cancel]: ").strip().lower()
             if exp_fmt == "m":
                 fname = "curation_status_report.md"
@@ -1495,6 +1621,16 @@ def generate_curation_verification_report(db_path: str):
                 all_d = cursor.fetchall()
                 ver_list = [r for r in all_d if r[3] == 1]
                 unver_list = [r for r in all_d if r[3] == 0]
+
+                cursor.execute("""
+                    SELECT d.name as folder_name, f.name, f.category, f.size_bytes, f.modified_at, d.path
+                    FROM files f
+                    JOIN directories d ON f.directory_id = d.id
+                    WHERE d.is_verified = 1
+                    ORDER BY d.path, f.name
+                """)
+                v_files_all = cursor.fetchall()
+
                 with open(fname, "w", encoding="utf-8") as f:
                     f.write("# Storage Curation & Verification Status Report\n\n")
                     f.write(f"**Generated**: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n")
@@ -1508,7 +1644,15 @@ def generate_curation_verification_report(db_path: str):
                         v_str = va.replace("T", " ")[:19] if va else "N/A"
                         desc_str = dd.replace("|", "/") if dd else "-"
                         f.write(f"| {i} | `{dn}` | {fc:,} | {format_size(bc)} | {v_str} | {desc_str} | `{dp}` |\n")
-                    f.write("\n## 2. Unapproved / Pending Folders (`is_verified = 0`)\n\n")
+
+                    f.write(f"\n## 2. Approved Files Inventory ({len(v_files_all):,} files)\n\n")
+                    f.write("| # | Folder | File Name | Category | Size | Modified Date | Path |\n")
+                    f.write("|---|---|---|---|---|---|---|\n")
+                    for fi, (fdn, fn, fcat, fsz, fmod, fdp) in enumerate(v_files_all, 1):
+                        fm_str = fmod.replace("T", " ")[:19] if fmod else "N/A"
+                        f.write(f"| {fi} | `{fdn}` | `{fn}` | `{fcat}` | **{format_size(fsz)}** | {fm_str} | `{fdp}/{fn}` |\n")
+
+                    f.write("\n## 3. Unapproved / Pending Folders (`is_verified = 0`)\n\n")
                     f.write(f"Total unapproved subfolders: **{len(unver_list):,}**\n\n")
                     f.write("| # | Folder Name | Files | Size | Path |\n")
                     f.write("|---|---|---|---|---|\n")
