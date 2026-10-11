@@ -3685,13 +3685,28 @@ def detect_and_resolve_duplicates_interactive(db_path: str):
     if prune_dirs != 'n':
         prune_missing_records(db_path)
 
+def get_orchestrator_db_path() -> str:
+    """Discovers and resolves the active database location across external and local storage."""
+    # 1. Environment variable override
+    env_p = os.environ.get("DRIVE_AUDIT_DB")
+    if env_p and os.path.exists(env_p):
+        return env_p
+    # 2. Canonical external persistent storage on Extreme Pro
+    ext_pro_p = "/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db"
+    if os.path.exists(ext_pro_p):
+        return ext_pro_p
+    # 3. Local symlink or relative file in workspace
+    return "drive_audit.db"
+
 def main():
-    db_file = "drive_audit.db"
+    db_file = get_orchestrator_db_path()
 
     while True:
-        print("\n" + "=" * 45)
-        print("  DRIVE AUDIT & STORAGE ORCHESTRATOR  ")
-        print("=" * 45)
+        print("\n" + "=" * 55)
+        print("        DRIVE AUDIT & STORAGE ORCHESTRATOR        ")
+        print("=" * 55)
+        print(f"  📍 Database: {db_file}")
+        print("=" * 55)
         print("1. Tagging Review, Curation Wizard & Subfolder Triage")
         print("2. Scan & index directory (Read-only catalog & tag sync)")
         print("3. View hosts & storage overview")
