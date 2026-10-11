@@ -1275,11 +1275,17 @@ def generate_curation_verification_report(db_path: str):
         unverified_folders = total_folders - verified_folders
 
         cursor.execute("""
+            WITH verified_roots AS (
+                SELECT id, path FROM directories WHERE is_verified = 1
+            ),
+            approved_dirs AS (
+                SELECT DISTINCT d.id
+                FROM directories d
+                JOIN verified_roots vr ON (d.id = vr.id OR d.path LIKE vr.path || '/%')
+            )
             SELECT COUNT(f.id), COALESCE(SUM(f.size_bytes), 0)
             FROM files f
-            JOIN directories d ON f.directory_id = d.id
-            WHERE d.is_verified = 1
-               OR EXISTS (SELECT 1 FROM directories p WHERE p.is_verified = 1 AND d.path LIKE p.path || '/%')
+            WHERE f.directory_id IN (SELECT id FROM approved_dirs)
         """)
         ver_stats = cursor.fetchone()
         verified_files = ver_stats[0] or 0
@@ -1297,6 +1303,14 @@ def generate_curation_verification_report(db_path: str):
 
         # 2. Fetch Priority Locations Breakdown
         cursor.execute("""
+            WITH verified_roots AS (
+                SELECT id, path FROM directories WHERE is_verified = 1
+            ),
+            approved_dirs AS (
+                SELECT DISTINCT d.id
+                FROM directories d
+                JOIN verified_roots vr ON (d.id = vr.id OR d.path LIKE vr.path || '/%')
+            )
             SELECT 
                 pl.id,
                 pl.priority_tier,
@@ -1306,10 +1320,11 @@ def generate_curation_verification_report(db_path: str):
                 COUNT(DISTINCT CASE WHEN d.is_verified = 1 THEN d.id END) as v_f,
                 COUNT(f.id) as tot_files,
                 COALESCE(SUM(f.size_bytes), 0) as tot_b,
-                COUNT(CASE WHEN d.is_verified = 1 OR EXISTS (SELECT 1 FROM directories p WHERE p.is_verified = 1 AND d.path LIKE p.path || '/%') THEN f.id END) as v_files,
-                COALESCE(SUM(CASE WHEN d.is_verified = 1 OR EXISTS (SELECT 1 FROM directories p WHERE p.is_verified = 1 AND d.path LIKE p.path || '/%') THEN f.size_bytes ELSE 0 END), 0) as v_b
+                COUNT(CASE WHEN ad.id IS NOT NULL THEN f.id END) as v_files,
+                COALESCE(SUM(CASE WHEN ad.id IS NOT NULL THEN f.size_bytes ELSE 0 END), 0) as v_b
             FROM priority_locations pl
             JOIN directories d ON (d.path = pl.path OR d.path LIKE pl.path || '/%')
+            LEFT JOIN approved_dirs ad ON ad.id = d.id
             LEFT JOIN files f ON f.directory_id = d.id
             WHERE pl.is_active = 1
             GROUP BY pl.id
