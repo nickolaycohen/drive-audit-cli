@@ -2419,14 +2419,8 @@ def reset_subfolder_tags_and_verification(db_path: str, storage_root: Path | Non
         for loc in locations:
             loc_path_str = loc["path_str"]
 
-            # Step 1: Ensure Location root and direct Level-1 folders are marked verified = 1
-            cursor.execute("""
-                UPDATE directories 
-                SET is_verified = 1, verified_at = ?
-                WHERE path = ? OR (
-                    path LIKE ? || '/%' AND path NOT LIKE ? || '/%/%'
-                )
-            """, (now_iso, loc_path_str, loc_path_str, loc_path_str))
+            # Step 1: Retain location root configuration without auto-approving uncurated subfolders
+            # (Subfolders remain is_verified = 0 until explicitly approved by the user in the curation wizard)
 
             # Step 2: Query all level-2+ directories recorded with tags under this location
             cursor.execute("""
