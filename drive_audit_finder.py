@@ -825,7 +825,8 @@ def audit_directory_interactive(db_path: str):
                     """, (directory_id, tag, scan_time))
                     dir_tags_count += 1
 
-                # 2. Reconcile deleted files in this directory
+                # 2. Reconcile deleted files in this directory (globally ignore .DS_Store)
+                filenames = [f for f in filenames if f not in (".DS_Store", "._.DS_Store")]
                 current_filenames = set(filenames)
                 cursor.execute("SELECT id, name FROM files WHERE directory_id = ?", (directory_id,))
                 db_file_map = {row[1]: row[0] for row in cursor.fetchall()}
@@ -1324,8 +1325,8 @@ def generate_curation_verification_report(db_path: str):
     cursor = conn.cursor()
 
     while True:
-        # 1. Fetch Global Summary across all indexed data
-        cursor.execute("SELECT COUNT(id), COALESCE(SUM(size_bytes), 0) FROM files")
+        # 1. Fetch Global Summary across all indexed data (Option B: strictly verified files, excluding .DS_Store)
+        cursor.execute("SELECT COUNT(id), COALESCE(SUM(size_bytes), 0) FROM files WHERE name != '.DS_Store'")
         tot_files_row = cursor.fetchone()
         total_files = tot_files_row[0] or 0
         total_bytes = tot_files_row[1] or 0
@@ -1337,18 +1338,12 @@ def generate_curation_verification_report(db_path: str):
         verified_folders = cursor.fetchone()[0] or 0
         unverified_folders = total_folders - verified_folders
 
+        # Option B: Strictly verified files (only files in directories where is_verified = 1)
         cursor.execute("""
-            WITH verified_roots AS (
-                SELECT id, path FROM directories WHERE is_verified = 1
-            ),
-            approved_dirs AS (
-                SELECT DISTINCT d.id
-                FROM directories d
-                JOIN verified_roots vr ON (d.id = vr.id OR d.path LIKE vr.path || '/%')
-            )
             SELECT COUNT(f.id), COALESCE(SUM(f.size_bytes), 0)
             FROM files f
-            WHERE f.directory_id IN (SELECT id FROM approved_dirs)
+            JOIN directories d ON f.directory_id = d.id
+            WHERE d.is_verified = 1 AND f.name != '.DS_Store'
         """)
         ver_stats = cursor.fetchone()
         verified_files = ver_stats[0] or 0
@@ -1364,16 +1359,8 @@ def generate_curation_verification_report(db_path: str):
         filled_len = int(round(bar_len * pct_folders / 100))
         prog_bar = "█" * filled_len + "░" * (bar_len - filled_len)
 
-        # 2. Fetch Priority Locations Breakdown
+        # 2. Fetch Priority Locations Breakdown (Option B: strict verified files vs pending subfolders)
         cursor.execute("""
-            WITH verified_roots AS (
-                SELECT id, path FROM directories WHERE is_verified = 1
-            ),
-            approved_dirs AS (
-                SELECT DISTINCT d.id
-                FROM directories d
-                JOIN verified_roots vr ON (d.id = vr.id OR d.path LIKE vr.path || '/%')
-            )
             SELECT 
                 pl.id,
                 pl.priority_tier,
@@ -1381,13 +1368,12 @@ def generate_curation_verification_report(db_path: str):
                 pl.path,
                 COUNT(DISTINCT d.id) as tot_f,
                 COUNT(DISTINCT CASE WHEN d.is_verified = 1 THEN d.id END) as v_f,
-                COUNT(f.id) as tot_files,
-                COALESCE(SUM(f.size_bytes), 0) as tot_b,
-                COUNT(CASE WHEN ad.id IS NOT NULL THEN f.id END) as v_files,
-                COALESCE(SUM(CASE WHEN ad.id IS NOT NULL THEN f.size_bytes ELSE 0 END), 0) as v_b
+                COUNT(CASE WHEN f.name != '.DS_Store' THEN f.id END) as tot_files,
+                COALESCE(SUM(CASE WHEN f.name != '.DS_Store' THEN f.size_bytes ELSE 0 END), 0) as tot_b,
+                COUNT(CASE WHEN d.is_verified = 1 AND f.name != '.DS_Store' THEN f.id END) as v_files,
+                COALESCE(SUM(CASE WHEN d.is_verified = 1 AND f.name != '.DS_Store' THEN f.size_bytes ELSE 0 END), 0) as v_b
             FROM priority_locations pl
             JOIN directories d ON (d.path = pl.path OR d.path LIKE pl.path || '/%')
-            LEFT JOIN approved_dirs ad ON ad.id = d.id
             LEFT JOIN files f ON f.directory_id = d.id
             WHERE pl.is_active = 1
             GROUP BY pl.id
@@ -1432,49 +1418,73 @@ def generate_curation_verification_report(db_path: str):
             break
 
         elif rep_choice == "1":
-            # List Approved Folders with Subtree Totals & drilldown
+            # List Approved Folders with Option B (Separated Direct vs Subtree Curated Status)
             print("\n⏳ Fetching approved / verified folders... Please wait...")
             cursor.execute("""
+                WITH approved_dirs AS (
+                    SELECT id, path, name, verified_at, description
+                    FROM directories
+                    WHERE is_verified = 1
+                )
                 SELECT 
-                    d.id,
-                    d.name,
-                    d.path,
-                    d.verified_at,
-                    d.description,
-                    (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') AS subtree_files,
-                    (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') AS subtree_bytes,
-                    (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = d.id) AS direct_files,
-                    (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = d.id) AS direct_bytes,
+                    ad.id,
+                    ad.name,
+                    ad.path,
+                    ad.verified_at,
+                    ad.description,
+                    -- Direct files in this approved folder
+                    (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_files,
+                    (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_bytes,
+                    -- Files in verified subfolders under this folder
+                    (SELECT COUNT(f.id) 
+                     FROM directories sub 
+                     JOIN files f ON f.directory_id = sub.id 
+                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_files,
+                    (SELECT COALESCE(SUM(f.size_bytes), 0) 
+                     FROM directories sub 
+                     JOIN files f ON f.directory_id = sub.id 
+                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_bytes,
+                    -- Unverified subfolders count under this folder
+                    (SELECT COUNT(sub.id) 
+                     FROM directories sub 
+                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0) as pending_sub_count,
+                    -- Unverified files & bytes in subfolders
+                    (SELECT COUNT(f.id) 
+                     FROM directories sub 
+                     JOIN files f ON f.directory_id = sub.id 
+                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_files,
+                    (SELECT COALESCE(SUM(f.size_bytes), 0) 
+                     FROM directories sub 
+                     JOIN files f ON f.directory_id = sub.id 
+                     WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_bytes,
                     COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') as tags
-                FROM directories d
-                LEFT JOIN directory_tags dt ON d.id = dt.directory_id
-                WHERE d.is_verified = 1
-                GROUP BY d.id
-                ORDER BY d.path
+                FROM approved_dirs ad
+                LEFT JOIN directory_tags dt ON ad.id = dt.directory_id
+                GROUP BY ad.id
+                ORDER BY ad.path
             """)
             v_rows = cursor.fetchall()
-            print("\n" + "=" * 98)
+            print("\n" + "=" * 106)
             print(f"APPROVED / VERIFIED FOLDERS ({len(v_rows)} folders)")
-            print("=" * 98)
-            print(f"{'#':<4} {'Folder Name':<28} {'Subtree Files / Size':<26} {'Verified Date':<20} {'Tags'}")
-            print("-" * 98)
-            for idx, (did, dname, dpath, v_at, ddesc, sub_cnt, sub_b, dir_cnt, dir_b, dtags) in enumerate(v_rows, 1):
+            print("=" * 106)
+            print(f"{'#':<4} {'Folder Name':<24} {'Status':<22} {'Approved Size':<16} {'Verified Date':<20} {'Tags'}")
+            print("-" * 106)
+            for idx, (did, dname, dpath, v_at, ddesc, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags) in enumerate(v_rows, 1):
+                app_f = df_cnt + vs_cnt
+                app_b = df_b + vs_b
                 v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
-                if sub_cnt > 0:
-                    stat_str = f"{sub_cnt:,} files ({format_size(sub_b)})"
-                elif os.path.exists(dpath):
-                    try:
-                        disk_files = sum(len(fls) for _, _, fls in os.walk(dpath))
-                        stat_str = f"⚠️ Unindexed ({disk_files:,} on disk)" if disk_files > 0 else "0 files (0 B)"
-                    except Exception:
-                        stat_str = "0 files (0 B)"
+                if pend_cnt == 0:
+                    status_badge = "✓ Fully Verified"
                 else:
-                    stat_str = "0 files (0 B)"
-                print(f"{idx:<4} {dname:<28} {stat_str:<26} {v_date_str:<20} {dtags}")
+                    status_badge = "⚠️ Partially Curated"
+                stat_str = f"{app_f:,} files ({format_size(app_b)})"
+                print(f"{idx:<4} {dname:<24} {status_badge:<22} {stat_str:<16} {v_date_str:<20} {dtags}")
                 print(f"     📍 Path: {dpath}")
+                if pend_cnt > 0:
+                    print(f"     ↳ ⏳ Pending Subfolders: {pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})")
                 if ddesc:
                     print(f"     ↳ 📝 \"{ddesc}\"")
-            print("=" * 98)
+            print("=" * 106)
 
             while True:
                 f_drill = input("\nEnter folder # (1-N) to view contained files & details, or Enter to return: ").strip().lower()
@@ -1483,45 +1493,55 @@ def generate_curation_verification_report(db_path: str):
                 if f_drill.isdigit():
                     f_idx = int(f_drill) - 1
                     if 0 <= f_idx < len(v_rows):
-                        did, dname, dpath, v_at, ddesc, sub_cnt, sub_b, dir_cnt, dir_b, dtags = v_rows[f_idx]
+                        did, dname, dpath, v_at, ddesc, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = v_rows[f_idx]
+                        app_f = df_cnt + vs_cnt
+                        app_b = df_b + vs_b
+                        v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
                         
-                        # Category breakdown across folder subtree
+                        # Category breakdown across approved files
                         cursor.execute("""
                             SELECT f.category, COUNT(f.id), SUM(f.size_bytes)
                             FROM directories sub
                             JOIN files f ON f.directory_id = sub.id
-                            WHERE sub.id = ? OR sub.path LIKE ? || '/%'
+                            WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
+                              AND f.name != '.DS_Store'
                             GROUP BY f.category
                             ORDER BY SUM(f.size_bytes) DESC
                         """, (did, dpath))
                         cat_breakdown = cursor.fetchall()
-                        cat_str = " | ".join([f"{c}: {cnt:,} ({format_size(sb)})" for c, cnt, sb in cat_breakdown]) if cat_breakdown else "No indexed files"
+                        cat_str = " | ".join([f"{c}: {cnt:,} ({format_size(sb)})" for c, cnt, sb in cat_breakdown]) if cat_breakdown else "0 approved files"
 
-                        # Fetch files in subtree (up to 100)
+                        # Fetch strictly approved files in folder (up to 100)
                         cursor.execute("""
                             SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at, sub.name as sub_folder
                             FROM directories sub
                             JOIN files f ON f.directory_id = sub.id
-                            WHERE sub.id = ? OR sub.path LIKE ? || '/%'
+                            WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
+                              AND f.name != '.DS_Store'
                             ORDER BY f.size_bytes DESC
                             LIMIT 100
                         """, (did, dpath))
                         dir_files = cursor.fetchall()
 
-                        v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
                         print("\n" + "#" * 90)
                         print(f"  APPROVED FOLDER DETAILS: '{dname}'")
                         print("#" * 90)
-                        print(f"  • Full Path:       {dpath}")
-                        print(f"  • Status:          ✓ Approved & Verified ({v_date_str})")
-                        print(f"  • Subtree Storage: {format_size(sub_b)} across {sub_cnt:,} files ({dir_cnt:,} direct root files)")
-                        print(f"  • Folder Tags:     {dtags}")
-                        print(f"  • Categories:      {cat_str}")
+                        print(f"  • Full Path:         {dpath}")
+                        if pend_cnt == 0:
+                            print(f"  • Status:            ✓ Fully Verified ({v_date_str})")
+                        else:
+                            print(f"  • Status:            ⚠️ Partially Curated ({pend_cnt} unverified subfolders pending triage)")
+                        print(f"  • Approved Storage:  {format_size(app_b)} across {app_f:,} files ({df_cnt:,} direct files, {vs_cnt:,} verified subfolder files)")
+                        if pend_cnt > 0:
+                            print(f"  • Pending Subtree:   {format_size(pend_b)} across {pend_f:,} files in {pend_cnt} unverified subfolders")
+                        print(f"  • Folder Tags:       {dtags}")
+                        print(f"  • Categories:        {cat_str}")
                         if ddesc:
-                            print(f"  • Description:     \"{ddesc}\"")
+                            print(f"  • Description:       \"{ddesc}\"")
                         print("-" * 90)
+
                         if dir_files:
-                            print(f"  Contained Files in Subtree ({len(dir_files)} displayed):")
+                            print(f"  Contained Approved Files ({len(dir_files)} displayed):")
                             print(f"  {'#':<4} {'Subfolder':<22} {'File Name':<34} {'Category':<10} {'Size':<10} {'Modified Date'}")
                             print("  " + "-" * 86)
                             for d_fi, (df_name, df_cat, df_ext, df_sz, df_mod, df_sub) in enumerate(dir_files, 1):
@@ -1530,30 +1550,36 @@ def generate_curation_verification_report(db_path: str):
                                 disp_name = df_name if len(df_name) <= 32 else df_name[:29] + "..."
                                 disp_sub = df_sub if len(df_sub) <= 20 else df_sub[:17] + "..."
                                 print(f"  {d_fi:<4} {disp_sub:<22} {disp_name:<34} {df_cat:<10} {s_str:<10} {m_str}")
-                        elif sub_cnt == 0 and os.path.exists(dpath):
-                            try:
-                                disk_files = sum(len(fls) for _, _, fls in os.walk(dpath))
-                                if disk_files > 0:
-                                    print(f"  ⚠️ Notice: This folder contains {disk_files:,} files on disk that have NOT been scanned into SQLite.")
-                                    print(f"     Run Option 2 ('Scan & index directory') on '{dpath}' to index its contents.")
-                                else:
-                                    print("  (Folder is empty on disk)")
-                            except Exception:
-                                print("  (Folder contains 0 files)")
                         else:
-                            print("  (Folder contains 0 files)")
+                            print("  (Folder contains 0 directly approved files)")
+
+                        if pend_cnt > 0:
+                            cursor.execute("""
+                                SELECT sub.name, sub.path, COUNT(f.id) as cnt, COALESCE(SUM(f.size_bytes), 0) as b
+                                FROM directories sub
+                                LEFT JOIN files f ON f.directory_id = sub.id AND f.name != '.DS_Store'
+                                WHERE sub.path LIKE ? || '/%' AND sub.is_verified = 0
+                                GROUP BY sub.id
+                                ORDER BY b DESC
+                                LIMIT 15
+                            """, (dpath,))
+                            pending_subs = cursor.fetchall()
+                            if pending_subs:
+                                print("-" * 90)
+                                print(f"  Pending Subfolders Awaiting Triage ({len(pending_subs)} displayed of {pend_cnt}):")
+                                for ps_name, ps_path, ps_f, ps_b in pending_subs:
+                                    disp_pname = ps_name if len(ps_name) <= 24 else ps_name[:21] + "..."
+                                    print(f"    ⏳ {disp_pname:<24} {ps_f:,} files ({format_size(ps_b)}) 📍 {ps_path}")
+
                         print("#" * 90)
                     else:
                         print(f"[Error] Invalid selection. Choose 1-{len(v_rows)}.")
 
         elif rep_choice == "2":
-            # List All Approved Files (including files inside subdirectories of approved folders)
-            print("\n⏳ Fetching approved files across verified folder trees... Please wait...")
+            # List All Approved Files (strictly files inside verified directories, excluding .DS_Store)
+            print("\n⏳ Fetching approved files across verified directories... Please wait...")
             t_start = time.time()
             cursor.execute("""
-                WITH approved_dirs AS (
-                    SELECT id, path FROM directories WHERE is_verified = 1
-                )
                 SELECT 
                     d.name as folder_name,
                     d.path as folder_path,
@@ -1563,10 +1589,11 @@ def generate_curation_verification_report(db_path: str):
                     f.size_bytes,
                     f.modified_at,
                     COALESCE(GROUP_CONCAT(DISTINCT ft.tag_name), '-') as file_tags
-                FROM approved_dirs ad
-                JOIN directories d ON (d.id = ad.id OR d.path LIKE ad.path || '/%')
-                JOIN files f ON f.directory_id = d.id
+                FROM files f
+                JOIN directories d ON f.directory_id = d.id
                 LEFT JOIN file_tags ft ON ft.file_id = f.id
+                WHERE d.is_verified = 1
+                  AND f.name != '.DS_Store'
                 GROUP BY f.id
                 ORDER BY d.path, f.name
             """)
@@ -1611,8 +1638,9 @@ def generate_curation_verification_report(db_path: str):
                     ud.id,
                     ud.name,
                     ud.path,
-                    COUNT(f.id) as sub_cnt,
-                    COALESCE(SUM(f.size_bytes), 0) as sub_b,
+                    COUNT(CASE WHEN f.name != '.DS_Store' THEN f.id END) as sub_cnt,
+                    COALESCE(SUM(CASE WHEN f.name != '.DS_Store' THEN f.size_bytes ELSE 0 END), 0) as sub_b,
+                    (SELECT COUNT(f2.id) FROM files f2 WHERE f2.directory_id = ud.id AND f2.name != '.DS_Store') as dir_cnt,
                     COALESCE(GROUP_CONCAT(DISTINCT dt.tag_name), '-') as tags
                 FROM unapproved_dirs ud
                 LEFT JOIN directories sub ON (sub.id = ud.id OR sub.path LIKE ud.path || '/%')
@@ -1647,7 +1675,7 @@ def generate_curation_verification_report(db_path: str):
                             SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at, sub.name as sub_folder
                             FROM directories sub
                             JOIN files f ON f.directory_id = sub.id
-                            WHERE sub.id = ? OR sub.path LIKE ? || '/%'
+                            WHERE (sub.id = ? OR sub.path LIKE ? || '/%') AND f.name != '.DS_Store'
                             ORDER BY f.size_bytes DESC
                             LIMIT 100
                         """, (did, dpath))
@@ -1681,38 +1709,57 @@ def generate_curation_verification_report(db_path: str):
                 print(f"\n⏳ Loading Priority {tier_in} folders... Please wait...")
                 t_filter = f"priority {tier_in}"
                 cursor.execute("""
+                    WITH tier_dirs AS (
+                        SELECT d.id, d.name, d.path, d.is_verified, d.verified_at, d.description
+                        FROM priority_locations pl
+                        JOIN directories d ON (d.path = pl.path OR d.path LIKE pl.path || '/%')
+                        WHERE pl.priority_tier = ? AND pl.is_active = 1
+                    )
                     SELECT 
-                        d.is_verified,
-                        d.name,
-                        d.path,
-                        d.verified_at,
-                        d.description,
-                        (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_cnt,
-                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_b
-                    FROM priority_locations pl
-                    JOIN directories d ON (d.path = pl.path OR d.path LIKE pl.path || '/%')
-                    WHERE pl.priority_tier = ? AND pl.is_active = 1
-                    GROUP BY d.id
-                    ORDER BY d.is_verified DESC, d.path
+                        td.is_verified,
+                        td.name,
+                        td.path,
+                        td.verified_at,
+                        td.description,
+                        (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = td.id AND f.name != '.DS_Store') as dir_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = td.id AND f.name != '.DS_Store') as dir_bytes,
+                        (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.path LIKE td.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.path LIKE td.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_bytes,
+                        (SELECT COUNT(sub.id) FROM directories sub WHERE sub.path LIKE td.path || '/%' AND sub.is_verified = 0) as pend_sub_cnt,
+                        (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.path LIKE td.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pend_sub_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.path LIKE td.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pend_sub_bytes
+                    FROM tier_dirs td
+                    ORDER BY td.is_verified DESC, td.path
                 """, (t_filter,))
                 tier_rows = cursor.fetchall()
                 t_ver = [r for r in tier_rows if r[0] == 1]
                 t_unver = [r for r in tier_rows if r[0] == 0]
-                print("\n" + "=" * 90)
+                print("\n" + "=" * 98)
                 print(f"PRIORITY {tier_in} STATUS: {len(t_ver):,} Approved | {len(t_unver):,} Pending Unapproved")
-                print("=" * 90)
+                print("=" * 98)
                 print(f"\n--- APPROVED FOLDERS ({len(t_ver)}) ---")
-                for idx, (_, dname, dpath, v_at, ddesc, sub_cnt, sub_b) in enumerate(t_ver, 1):
+                for idx, (_, dname, dpath, v_at, ddesc, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b) in enumerate(t_ver, 1):
+                    app_f = df_c + vs_c
+                    app_b = df_b + vs_b
                     v_date = v_at.replace("T", " ")[:19] if v_at else ""
-                    print(f"  [{idx}] {dname} ({sub_cnt:,} files, {format_size(sub_b)}) - {v_date}")
+                    if p_cnt == 0:
+                        status_str = "✓ Fully Verified"
+                    else:
+                        status_str = f"⚠️ Partially Curated"
+                    stat_str = f"{app_f:,} files ({format_size(app_b)})"
+                    print(f"  [{idx}] {dname:<24} {status_str:<22} {stat_str:<16} - {v_date}")
+                    if p_cnt > 0:
+                        print(f"      ↳ ⏳ Pending Subfolders: {p_cnt} folders ({p_f:,} files, {format_size(p_b)})")
                     if ddesc:
                         print(f"      ↳ 📝 \"{ddesc}\"")
                 print(f"\n--- PENDING UNAPPROVED FOLDERS ({min(len(t_unver), 30)} of {len(t_unver):,}) ---")
-                for idx, (_, dname, dpath, _, _, sub_cnt, sub_b) in enumerate(t_unver[:30], 1):
-                    print(f"  [{idx}] {dname} ({sub_cnt:,} files, {format_size(sub_b)}) 📍 {dpath}")
+                for idx, (_, dname, dpath, _, _, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b) in enumerate(t_unver[:30], 1):
+                    tot_f = df_c + vs_c + p_f
+                    tot_b = df_b + vs_b + p_b
+                    print(f"  [{idx}] {dname} ({tot_f:,} files, {format_size(tot_b)}) 📍 {dpath}")
                 if len(t_unver) > 30:
                     print(f"  ... and {len(t_unver) - 30:,} more subfolders pending curation.")
-                print("=" * 90)
+                print("=" * 98)
                 input("\nPress Enter to continue...")
 
         elif rep_choice == "5":
@@ -1720,31 +1767,46 @@ def generate_curation_verification_report(db_path: str):
             if exp_fmt == "m":
                 fname = "curation_status_report.md"
                 cursor.execute("""
-                    SELECT d.id, d.name, d.path, d.is_verified, d.verified_at, d.description,
-                           (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_cnt,
-                           (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_b
-                    FROM directories d
-                    WHERE d.is_verified = 1
-                    ORDER BY d.path
+                    WITH approved_dirs AS (
+                        SELECT id, name, path, is_verified, verified_at, description
+                        FROM directories
+                        WHERE is_verified = 1
+                    )
+                    SELECT 
+                        ad.id,
+                        ad.name,
+                        ad.path,
+                        ad.verified_at,
+                        ad.description,
+                        (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_bytes,
+                        (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_bytes,
+                        (SELECT COUNT(sub.id) FROM directories sub WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0) as pending_sub_folders,
+                        (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_bytes
+                    FROM approved_dirs ad
+                    ORDER BY ad.path
                 """)
                 ver_list = cursor.fetchall()
 
                 cursor.execute("""
-                    WITH approved_dirs AS (
-                        SELECT id, path FROM directories WHERE is_verified = 1
-                    )
                     SELECT d.name as folder_name, f.name, f.category, f.size_bytes, f.modified_at, d.path
-                    FROM approved_dirs ad
-                    JOIN directories d ON (d.id = ad.id OR d.path LIKE ad.path || '/%')
+                    FROM directories d
                     JOIN files f ON f.directory_id = d.id
+                    WHERE d.is_verified = 1 AND f.name != '.DS_Store'
                     ORDER BY d.path, f.name
                 """)
                 v_files_all = cursor.fetchall()
 
                 cursor.execute("""
                     SELECT d.id, d.name, d.path,
-                           (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_cnt,
-                           (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_b
+                           (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE (sub.id = d.id OR sub.path LIKE d.path || '/%') AND f.name != '.DS_Store') as sub_cnt,
+                           (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE (sub.id = d.id OR sub.path LIKE d.path || '/%') AND f.name != '.DS_Store') as sub_b
                     FROM directories d
                     WHERE d.is_verified = 0
                     ORDER BY d.path
@@ -1753,18 +1815,26 @@ def generate_curation_verification_report(db_path: str):
                 unver_list = cursor.fetchall()
 
                 with open(fname, "w", encoding="utf-8") as f:
-                    f.write("# Storage Curation & Verification Status Report\n\n")
+                    f.write("# Storage Curation & Verification Status Report (Option B)\n\n")
                     f.write(f"**Generated**: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n")
                     f.write(f"**Overall Progress**: {pct_folders:.1f}% Approved ({verified_folders:,} / {total_folders:,} folders)\n\n")
                     f.write(f"- **Approved Storage**: {format_size(verified_bytes)} across {verified_files:,} files\n")
                     f.write(f"- **Pending Storage**: {format_size(unverified_bytes)} across {unverified_files:,} files\n\n")
                     f.write("## 1. Approved / Verified Folders (`is_verified = 1`)\n\n")
-                    f.write("| # | Folder Name | Subtree Files | Subtree Size | Verified Date | Description | Path |\n")
-                    f.write("|---|---|---|---|---|---|---|\n")
-                    for i, (_, dn, dp, _, va, dd, fc, bc) in enumerate(ver_list, 1):
+                    f.write("| # | Folder Name | Status | Approved Files | Approved Size | Pending Subfolders | Verified Date | Description | Path |\n")
+                    f.write("|---|---|---|---|---|---|---|---|---|\n")
+                    for i, (_, dn, dp, va, dd, df_c, df_b, vs_c, vs_b, pend_cnt, pend_f, pend_b) in enumerate(ver_list, 1):
                         v_str = va.replace("T", " ")[:19] if va else "N/A"
                         desc_str = dd.replace("|", "/") if dd else "-"
-                        f.write(f"| {i} | `{dn}` | {fc:,} | {format_size(bc)} | {v_str} | {desc_str} | `{dp}` |\n")
+                        app_f = df_c + vs_c
+                        app_b = df_b + vs_b
+                        if pend_cnt == 0:
+                            status_str = "✓ Fully Verified"
+                            pend_str = "-"
+                        else:
+                            status_str = "⚠️ Partially Curated"
+                            pend_str = f"{pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})"
+                        f.write(f"| {i} | `{dn}` | {status_str} | {app_f:,} | {format_size(app_b)} | {pend_str} | {v_str} | {desc_str} | `{dp}` |\n")
 
                     f.write(f"\n## 2. Approved Files Inventory ({len(v_files_all):,} files)\n\n")
                     f.write("| # | Folder | File Name | Category | Size | Modified Date | Path |\n")
@@ -1786,19 +1856,53 @@ def generate_curation_verification_report(db_path: str):
             elif exp_fmt == "c":
                 fname = "curation_status_report.csv"
                 cursor.execute("""
-                    SELECT d.id, d.name, d.path, d.is_verified, d.verified_at, d.description,
-                           (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_cnt,
-                           (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE sub.id = d.id OR sub.path LIKE d.path || '/%') as sub_b
-                    FROM directories d
-                    ORDER BY d.is_verified DESC, d.path
+                    WITH approved_dirs AS (
+                        SELECT id, name, path, is_verified, verified_at, description
+                        FROM directories
+                        WHERE is_verified = 1
+                    )
+                    SELECT 
+                        ad.id,
+                        ad.name,
+                        ad.path,
+                        ad.verified_at,
+                        ad.description,
+                        (SELECT COUNT(f.id) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f WHERE f.directory_id = ad.id AND f.name != '.DS_Store') as dir_bytes,
+                        (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 1 AND f.name != '.DS_Store') as ver_sub_bytes,
+                        (SELECT COUNT(sub.id) FROM directories sub WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0) as pending_sub_folders,
+                        (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_files,
+                        (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id 
+                         WHERE sub.path LIKE ad.path || '/%' AND sub.is_verified = 0 AND f.name != '.DS_Store') as pending_sub_bytes
+                    FROM approved_dirs ad
+                    ORDER BY ad.path
                 """)
-                all_d = cursor.fetchall()
+                ver_rows = cursor.fetchall()
+
+                cursor.execute("""
+                    SELECT d.id, d.name, d.path,
+                           (SELECT COUNT(f.id) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE (sub.id = d.id OR sub.path LIKE d.path || '/%') AND f.name != '.DS_Store') as sub_cnt,
+                           (SELECT COALESCE(SUM(f.size_bytes), 0) FROM directories sub JOIN files f ON f.directory_id = sub.id WHERE (sub.id = d.id OR sub.path LIKE d.path || '/%') AND f.name != '.DS_Store') as sub_b
+                    FROM directories d
+                    WHERE d.is_verified = 0
+                    ORDER BY d.path
+                """)
+                unver_rows = cursor.fetchall()
+
                 with open(fname, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["ID", "Status", "Folder Name", "Path", "Subtree Files Count", "Subtree Size Bytes", "Subtree Size Formatted", "Verified At", "Description"])
-                    for did, dname, dpath, is_v, vat, ddesc, fc, bc in all_d:
-                        status_str = "Approved" if is_v == 1 else "Unapproved"
-                        writer.writerow([did, status_str, dname, dpath, fc, bc, format_size(bc), vat or "", ddesc or ""])
+                    writer.writerow(["ID", "Status", "Folder Name", "Path", "Approved Files", "Approved Size Bytes", "Approved Size Formatted", "Pending Subfolders Count", "Pending Subfolder Files", "Pending Subfolder Size Formatted", "Verified At", "Description"])
+                    for did, dname, dpath, vat, ddesc, df_c, df_b, vs_c, vs_b, p_cnt, p_f, p_b in ver_rows:
+                        status_str = "Fully Verified" if p_cnt == 0 else "Partially Curated"
+                        app_f = df_c + vs_c
+                        app_b = df_b + vs_b
+                        writer.writerow([did, status_str, dname, dpath, app_f, app_b, format_size(app_b), p_cnt, p_f, format_size(p_b), vat or "", ddesc or ""])
+                    for did, dname, dpath, sub_cnt, sub_b in unver_rows:
+                        writer.writerow([did, "Pending / Unapproved", dname, dpath, 0, 0, "0 B", 0, sub_cnt, format_size(sub_b), "", ""])
                 print(f"\n[Success] Full CSV report exported to: {os.path.abspath(fname)}")
                 input("\nPress Enter to continue...")
 
@@ -3728,7 +3832,7 @@ def prune_missing_records(db_path: str):
 
     for fid, fname, dpath in all_files:
         full_path = os.path.join(dpath, fname)
-        if not os.path.exists(full_path):
+        if fname == ".DS_Store" or not os.path.exists(full_path):
             cursor.execute("DELETE FROM files WHERE id = ?", (fid,))
             del_files += 1
 
