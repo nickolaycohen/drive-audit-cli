@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import csv
+import json
 import time
 import shutil
 import sqlite3
@@ -542,13 +543,113 @@ def init_database(db_path: str) -> sqlite3.Connection:
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_usage_count ON menu_option_usage(menu_key, use_count DESC);")
 
-    # 11. Performance Indexes
+    # 11. Curation Events & Provenance Tracking Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS curation_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            source_path TEXT,
+            destination_path TEXT,
+            origin_folder TEXT,
+            resource_type TEXT NOT NULL,
+            resource_path TEXT NOT NULL,
+            file_id INTEGER,
+            directory_id INTEGER,
+            file_size_bytes INTEGER,
+            finder_tags TEXT,
+            details TEXT
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_batch ON curation_events(batch_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_res_path ON curation_events(resource_path);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_dest ON curation_events(destination_path);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_origin ON curation_events(origin_folder);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_file_id ON curation_events(file_id);")
+
+    # 12. Performance Indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_name_size ON files(name, size_bytes);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_directories_path ON directories(path);")
 
     conn.commit()
     return conn
+
+def ensure_curation_events_table(cursor_or_conn):
+    """Ensures curation_events table and indexes exist in SQLite."""
+    cursor = cursor_or_conn.cursor() if hasattr(cursor_or_conn, 'cursor') else cursor_or_conn
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS curation_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            source_path TEXT,
+            destination_path TEXT,
+            origin_folder TEXT,
+            resource_type TEXT NOT NULL,
+            resource_path TEXT NOT NULL,
+            file_id INTEGER,
+            directory_id INTEGER,
+            file_size_bytes INTEGER,
+            finder_tags TEXT,
+            details TEXT
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_batch ON curation_events(batch_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_res_path ON curation_events(resource_path);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_dest ON curation_events(destination_path);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_origin ON curation_events(origin_folder);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_events_file_id ON curation_events(file_id);")
+
+def log_curation_event(
+    db_path: str,
+    batch_id: str,
+    event_type: str,
+    source_path: str | Path | None,
+    destination_path: str | Path | None,
+    origin_folder: str | None,
+    resource_type: str,
+    resource_path: str | Path,
+    file_id: int | None = None,
+    directory_id: int | None = None,
+    file_size_bytes: int | None = None,
+    finder_tags: list | str | None = None,
+    details: str | dict | None = None
+) -> int | None:
+    """Inserts a curation event record into SQLite and returns the inserted row ID."""
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = get_db_connection(db_path)
+        cur = conn.cursor()
+        ensure_curation_events_table(cur)
+
+        now_iso = datetime.datetime.now().isoformat()
+        tags_str = finder_tags if isinstance(finder_tags, str) else (", ".join(t[0] if isinstance(t, tuple) else str(t) for t in finder_tags) if finder_tags else "")
+        details_str = json.dumps(details) if isinstance(details, (dict, list)) else (details or "")
+
+        cur.execute("""
+            INSERT INTO curation_events (
+                batch_id, event_type, created_at, source_path, destination_path,
+                origin_folder, resource_type, resource_path, file_id, directory_id,
+                file_size_bytes, finder_tags, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            batch_id, event_type, now_iso,
+            str(source_path) if source_path else None,
+            str(destination_path) if destination_path else None,
+            origin_folder, resource_type, str(resource_path),
+            file_id, directory_id, file_size_bytes, tags_str, details_str
+        ))
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id
+    except Exception as e:
+        print(f"[Warning] Failed to log curation event: {e}")
+        return None
 
 def _seed_file_extensions(cursor):
     """Populates default file extension dictionary into SQLite if not already present."""
@@ -4233,33 +4334,45 @@ def detect_verified_folder_overlap(sub_dir: Path, db_path: str) -> dict | None:
 def execute_folder_merge_and_cleanup(sub_dir: Path, overlap: dict, db_path: str) -> bool:
     """
     Merges diff/unique files from candidate sub_dir into verified overlap['target_path'].
+    Applies destination and provenance Finder tags to merged files.
+    Logs every resource into curation_events and file_tags for auditability and query differentiation.
     Handles file conflicts by preserving older revisions.
     Once diff files are copied safely, removes candidate sub_dir from disk and SQLite.
     Triggers directory scan on destination to update database index.
     """
     dest_dir = overlap['target_path']
     diff_files = overlap.get('diff_files', [])
+    batch_id = f"curation_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    now_iso = datetime.datetime.now().isoformat()
 
     print("\n" + "=" * 80)
     print("  EXECUTING MERGE & CLEANUP")
     print("=" * 80)
     print(f"  • Source:      {sub_dir}")
     print(f"  • Destination: {dest_dir}")
+    print(f"  • Batch ID:    {batch_id}")
     print(f"  • Diff Files to Merge: {len(diff_files)} files ({format_size(overlap['diff_bytes'])})")
     print(f"  • Redundant Duplicates: {overlap['identical_count']} files ({format_size(overlap['identical_bytes'])})")
     print("=" * 80)
 
     try:
-        # Step 1: Copy diff files into target
-        merged_count = 0
+        # Step 1: Determine tags to apply to merged files
+        dest_raw_tags = get_finder_tags(dest_dir)
+        file_tag_entries = [(t, 0) if isinstance(t, str) else t for t in dest_raw_tags]
+        file_tag_entries.append((f"origin:{sub_dir.name}", 0))
+        tags_summary_str = ", ".join(dest_raw_tags) + (f", origin:{sub_dir.name}" if dest_raw_tags else f"origin:{sub_dir.name}")
+
+        # Step 2: Copy diff files into target & apply Finder tags
+        merged_records = []
         for df in diff_files:
             cand_file = df['cand_file']
             rel_path = df['rel_path']
             dest_file = dest_dir / rel_path
             dest_file.parent.mkdir(parents=True, exist_ok=True)
 
+            is_conflict = False
             if dest_file.exists() and dest_file.stat().st_size != df['size']:
-                # Conflict resolution: preserve older version
+                is_conflict = True
                 target_mtime = dest_file.stat().st_mtime
                 cand_mtime = df['mtime']
                 if cand_mtime > target_mtime:
@@ -4273,18 +4386,26 @@ def execute_folder_merge_and_cleanup(sub_dir: Path, overlap: dict, db_path: str)
                     print(f"    ↳ [Conflict] Existing target file was newer; saved candidate as '{dest_file.name}'")
 
             shutil.copy2(str(cand_file), str(dest_file))
-            merged_count += 1
-            print(f"    ✓ Merged: '{rel_path}' ({format_size(df['size'])})")
+            set_finder_tags(dest_file, file_tag_entries)
+            merged_records.append({
+                'cand_file': cand_file,
+                'dest_file': dest_file,
+                'rel_path': rel_path,
+                'size': df['size'],
+                'reason': df['reason'],
+                'conflict': is_conflict
+            })
+            print(f"    ✓ Merged & Tagged: '{rel_path}' ({format_size(df['size'])})")
 
-        if merged_count > 0:
-            print(f"\n[Success] ✓ Successfully merged {merged_count} diff files into '{dest_dir.name}'.")
+        if merged_records:
+            print(f"\n[Success] ✓ Successfully merged and tagged {len(merged_records)} diff files into '{dest_dir.name}'.")
 
-        # Step 2: Delete duplicate candidate folder from disk
+        # Step 3: Delete duplicate candidate folder from disk
         print(f"  ↳ Removing redundant duplicate source folder '{sub_dir.name}' from disk...")
         shutil.rmtree(str(sub_dir))
         print(f"  ✓ Deleted '{sub_dir}' from disk.")
 
-        # Step 3: Purge deleted directory and files from SQLite
+        # Step 4: Purge deleted directory and files from SQLite
         if os.path.exists(db_path):
             c_conn = get_db_connection(db_path)
             c_cur = c_conn.cursor()
@@ -4300,10 +4421,83 @@ def execute_folder_merge_and_cleanup(sub_dir: Path, overlap: dict, db_path: str)
             c_conn.close()
             print("  ✓ Cleared deleted folder records from SQLite.")
 
-            # Step 4: Re-scan destination directory so merged files are indexed in DB
+            # Step 5: Re-scan destination directory so merged files are indexed in DB
             print(f"  ↳ Refreshing and indexing destination folder '{dest_dir.name}' in SQLite...")
             perform_directory_scan(dest_dir, db_path, skip_hours=0.0)
             print(f"[Success] ✓ Destination folder '{dest_dir.name}' re-scanned and synchronized.")
+
+            # Step 6: Log all resources into curation_events and file_tags
+            c_conn = get_db_connection(db_path)
+            c_cur = c_conn.cursor()
+            ensure_curation_events_table(c_cur)
+
+            for mr in merged_records:
+                dest_f = mr['dest_file']
+                parent_p = str(dest_f.parent.resolve())
+                row = c_cur.execute("""
+                    SELECT f.id, f.directory_id
+                    FROM files f
+                    JOIN directories d ON f.directory_id = d.id
+                    WHERE d.path = ? AND f.name = ?
+                """, (parent_p, dest_f.name)).fetchone()
+
+                f_id = row[0] if row else None
+                d_id = row[1] if row else None
+
+                detail_json = json.dumps({
+                    'relative_path': str(mr['rel_path']),
+                    'action': 'merge_copy',
+                    'reason': mr['reason'],
+                    'conflict': mr['conflict'],
+                    'source_folder': sub_dir.name
+                })
+
+                c_cur.execute("""
+                    INSERT INTO curation_events (
+                        batch_id, event_type, created_at, source_path, destination_path,
+                        origin_folder, resource_type, resource_path, file_id, directory_id,
+                        file_size_bytes, finder_tags, details
+                    ) VALUES (?, 'merge_file', ?, ?, ?, ?, 'file', ?, ?, ?, ?, ?, ?)
+                """, (
+                    batch_id, now_iso, str(mr['cand_file']), str(dest_f),
+                    sub_dir.name, str(dest_f.resolve()), f_id, d_id,
+                    mr['size'], tags_summary_str, detail_json
+                ))
+
+                if f_id:
+                    c_cur.execute("""
+                        INSERT OR IGNORE INTO file_tags (file_id, tag_name, created_at)
+                        VALUES (?, ?, ?)
+                    """, (f_id, f"merged_from:{sub_dir.name}", now_iso))
+                    c_cur.execute("""
+                        INSERT OR IGNORE INTO file_tags (file_id, tag_name, created_at)
+                        VALUES (?, ?, ?)
+                    """, (f_id, f"curation_batch:{batch_id}", now_iso))
+
+            # Directory-level curation event
+            summary_detail = json.dumps({
+                'diff_files_merged': len(merged_records),
+                'duplicate_files_purged': overlap['identical_count'],
+                'purged_bytes': overlap['identical_bytes'],
+                'origin_folder': sub_dir.name
+            })
+            c_cur.execute("""
+                INSERT INTO curation_events (
+                    batch_id, event_type, created_at, source_path, destination_path,
+                    origin_folder, resource_type, resource_path, file_id, directory_id,
+                    file_size_bytes, finder_tags, details
+                ) VALUES (?, 'merge_folder_cleanup', ?, ?, ?, ?, 'directory', ?, NULL, NULL, ?, ?, ?)
+            """, (
+                batch_id, now_iso, str(sub_dir), str(dest_dir),
+                sub_dir.name, str(dest_dir.resolve()), overlap.get('cand_bytes', 0),
+                tags_summary_str, summary_detail
+            ))
+
+            c_conn.commit()
+            c_conn.close()
+
+            print(f"  ✓ Logged {len(merged_records)} resources into 'curation_events' table (Batch ID: {batch_id})")
+            print(f"  ✓ Applied Finder tags and SQLite provenance tags ('merged_from:{sub_dir.name}')")
 
         return True
     except Exception as e:
@@ -5425,6 +5619,79 @@ def view_file_extensions_catalog(db_path: str):
     print("=" * 98)
     input("\nPress Enter to continue...")
 
+
+def view_curation_events_history(db_path: str):
+    """Displays chronological history of curation events (merges, relocations, verifications)."""
+    if not os.path.exists(db_path):
+        print("\n[Notice] Database not found.")
+        return
+
+    conn = get_db_connection(db_path)
+    cur = conn.cursor()
+    ensure_curation_events_table(cur)
+
+    # Check for batches
+    batches = cur.execute("""
+        SELECT batch_id, event_type, origin_folder, source_path, destination_path,
+               COUNT(*) as resource_count, MIN(created_at) as created_at
+        FROM curation_events
+        GROUP BY batch_id
+        ORDER BY created_at DESC
+    """).fetchall()
+
+    if not batches:
+        print("\n" + "=" * 98)
+        print("  CURATION EVENTS & PROVENANCE HISTORY LOG")
+        print("=" * 98)
+        print("  No curation events logged yet.")
+        print("=" * 98)
+        conn.close()
+        input("\nPress Enter to continue...")
+        return
+
+    print("\n" + "=" * 98)
+    print("  CURATION EVENTS & PROVENANCE HISTORY LOG")
+    print("=" * 98)
+    print(f"{'#':<4} {'Date & Time':<20} {'Event Type':<22} {'Origin / Source':<24} {'Destination':<24}")
+    print("-" * 98)
+
+    batch_map = {}
+    for idx, (b_id, ev_type, orig, src, dest, cnt, dt) in enumerate(batches, 1):
+        dt_clean = dt[:19].replace('T', ' ')
+        orig_disp = orig if orig else (Path(src).name if src else "N/A")
+        dest_disp = Path(dest).name if dest else "N/A"
+        batch_map[str(idx)] = b_id
+        print(f"{idx:<4} {dt_clean:<20} {ev_type:<22} {orig_disp:<24} {dest_disp:<24}")
+
+    print("-" * 98)
+    sel = input("\nEnter event # to inspect individual resources & tags (or press Enter to return): ").strip()
+    if sel in batch_map:
+        b_id = batch_map[sel]
+        items = cur.execute("""
+            SELECT resource_type, resource_path, file_size_bytes, finder_tags, created_at, details
+            FROM curation_events
+            WHERE batch_id = ?
+            ORDER BY resource_type DESC, resource_path ASC
+        """, (b_id,)).fetchall()
+
+        print("\n" + "=" * 98)
+        print(f"  BATCH DETAILS: {b_id} ({len(items)} resources)")
+        print("=" * 98)
+        for r_type, r_path, f_size, f_tags, c_at, details_str in items:
+            sz_str = format_size(f_size) if f_size else ""
+            p_name = Path(r_path).name
+            print(f"  • [{r_type.upper()}] {p_name} ({sz_str})")
+            print(f"    📍 Path: {r_path}")
+            if f_tags:
+                print(f"    🏷️ Finder Tags: {f_tags}")
+            if details_str:
+                print(f"    ↳ Details: {details_str}")
+        print("=" * 98)
+        input("\nPress Enter to continue...")
+
+    conn.close()
+
+
 def tag_review_priority_folders_interactive(db_path: str):
     """Interactive review and editing of level-1 folders across all mapped Priority locations."""
     print("\n" + "=" * 70)
@@ -5605,6 +5872,7 @@ def tag_review_priority_folders_interactive(db_path: str):
         cmd_options = [
             {"key": "w", "label": "'w' - Launch Sequential Curation Wizard (Triage subfolders across locations)"},
             {"key": "v", "label": "'v' / 'status' - Curation & Verification Report (Separated Approved vs Unapproved folders)"},
+            {"key": "events", "label": "'events' / 'history' - View Curation Events History Log (Provenance & tag audit)"},
             {"key": "loc", "label": "'loc' - Manage Priority Locations (Add / Edit / Remove mapped folders for Priority 1-4)"},
             {"key": "idrive", "label": "'idrive' - Audit iDrive backup inclusion (Check Priority 1 & 2 folders in iDrive)"},
             {"key": "ext", "label": "'ext' - View File Extensions & Required Applications Catalog (Database library)"},
@@ -5638,6 +5906,9 @@ def tag_review_priority_folders_interactive(db_path: str):
             continue
         elif action_choice in ['v', 'status']:
             generate_curation_verification_report(db_path)
+            continue
+        elif action_choice in ['events', 'history']:
+            view_curation_events_history(db_path)
             continue
         elif action_choice == 'ext':
             view_file_extensions_catalog(db_path)
