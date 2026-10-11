@@ -2599,6 +2599,7 @@ def analyze_folder_content(folder_path: Path, max_depth: int = 3) -> dict:
     sample_files = []
     mtimes = []
     subfolders = []
+    no_ext_files = []
 
     try:
         for root_dir, dirnames, filenames in os.walk(folder_path):
@@ -2623,6 +2624,7 @@ def analyze_folder_content(folder_path: Path, max_depth: int = 3) -> dict:
                         ext_counts[ext] += 1
                     else:
                         ext_counts['(no ext)'] += 1
+                        no_ext_files.append(f_path)
                     if len(sample_files) < 4:
                         sample_files.append(f)
                 except Exception:
@@ -2640,8 +2642,321 @@ def analyze_folder_content(folder_path: Path, max_depth: int = 3) -> dict:
         "sample_files": sample_files,
         "earliest_date": earliest_date,
         "latest_date": latest_date,
-        "subfolder_count": len(subfolders)
+        "subfolder_count": len(subfolders),
+        "no_ext_files": no_ext_files
     }
+
+def inspect_file_magic(file_path: Path, base_folder: Path = None) -> dict:
+    """Inspects file magic bytes and suggests extension and file category."""
+    rel_path = str(file_path.relative_to(base_folder)) if base_folder else str(file_path)
+    try:
+        stat = file_path.stat()
+        size_bytes = stat.st_size
+        size_str = format_size(size_bytes)
+    except Exception:
+        size_bytes = 0
+        size_str = "0 B"
+
+    buf = b""
+    try:
+        with open(file_path, "rb") as f:
+            buf = f.read(512)
+    except Exception:
+        pass
+
+    raw_hex = " ".join(f"{b:02x}" for b in buf[:16])
+    raw_asc = "".join(chr(b) if 32 <= b < 127 else "." for b in buf[:16])
+
+    suggested_ext = None
+    short_type = "Unknown"
+    full_type = "Unknown binary data"
+    extra_notes = ""
+
+    # Check for known signatures
+    if len(buf) >= 19 and buf[4:19] == b"MSISAM Database":
+        suggested_ext = ".mny"
+        short_type = "MS Money DB (.mny)"
+        full_type = "Microsoft Money Active Database (.mny) [Windows Jet/ISAM]"
+        extra_notes = "Proprietary accounting database used by discontinued Microsoft Money"
+    elif len(buf) >= 19 and buf[4:19] == b"Standard Jet DB":
+        suggested_ext = ".mdb"
+        short_type = "MS Access DB (.mdb)"
+        full_type = "Microsoft Access Jet Database (.mdb)"
+    elif len(buf) >= 19 and buf[4:19] == b"Standard ACE DB":
+        suggested_ext = ".accdb"
+        short_type = "MS Access DB (.accdb)"
+        full_type = "Microsoft Access 2007+ Database (.accdb)"
+    elif len(buf) >= 4 and buf[:4] == b"MSCF":
+        # Cabinet file - check if internal filename has mbf or tmp
+        buf_low = buf.lower()
+        if b"mbf" in buf_low or b".tmp" in buf_low:
+            suggested_ext = ".mbf"
+            short_type = "MS Money Backup (.mbf)"
+            full_type = "Microsoft Money Backup Archive (.mbf) [CAB format]"
+            extra_notes = "Compressed backup archive created by discontinued Microsoft Money"
+        else:
+            suggested_ext = ".cab"
+            short_type = "Cabinet Archive (.cab)"
+            full_type = "Microsoft Cabinet Archive (.cab)"
+    elif len(buf) >= 16 and buf[:16] == b"SQLite format 3\x00":
+        suggested_ext = ".sqlite"
+        short_type = "SQLite DB (.sqlite)"
+        full_type = "SQLite 3 Database (.sqlite/.db)"
+    elif len(buf) >= 5 and buf[:5] == b"%PDF-":
+        suggested_ext = ".pdf"
+        short_type = "PDF (.pdf)"
+        full_type = "Adobe PDF Document (.pdf)"
+    elif len(buf) >= 3 and buf[:3] == b"\xff\xd8\xff":
+        suggested_ext = ".jpg"
+        short_type = "JPEG (.jpg)"
+        full_type = "JPEG Image (.jpg)"
+    elif len(buf) >= 8 and buf[:8] == b"\x89PNG\r\n\x1a\n":
+        suggested_ext = ".png"
+        short_type = "PNG (.png)"
+        full_type = "PNG Image (.png)"
+    elif len(buf) >= 6 and buf[:6] in (b"GIF87a", b"GIF89a"):
+        suggested_ext = ".gif"
+        short_type = "GIF (.gif)"
+        full_type = "GIF Image (.gif)"
+    elif len(buf) >= 2 and buf[:2] == b"BM":
+        suggested_ext = ".bmp"
+        short_type = "Bitmap (.bmp)"
+        full_type = "BMP Image (.bmp)"
+    elif len(buf) >= 12 and buf[:4] == b"RIFF" and buf[8:12] == b"WEBP":
+        suggested_ext = ".webp"
+        short_type = "WebP (.webp)"
+        full_type = "Google WebP Image (.webp)"
+    elif len(buf) >= 4 and buf[:4] == b"PK\x03\x04":
+        if b"word/" in buf:
+            suggested_ext = ".docx"
+            short_type = "Word Doc (.docx)"
+            full_type = "Microsoft Word Document (.docx)"
+        elif b"xl/" in buf:
+            suggested_ext = ".xlsx"
+            short_type = "Excel Sheet (.xlsx)"
+            full_type = "Microsoft Excel Spreadsheet (.xlsx)"
+        elif b"ppt/" in buf:
+            suggested_ext = ".pptx"
+            short_type = "PowerPoint (.pptx)"
+            full_type = "Microsoft PowerPoint Presentation (.pptx)"
+        else:
+            suggested_ext = ".zip"
+            short_type = "ZIP (.zip)"
+            full_type = "ZIP Archive (.zip)"
+    elif len(buf) >= 2 and buf[:2] == b"\x1f\x8b":
+        suggested_ext = ".gz"
+        short_type = "GZIP (.gz)"
+        full_type = "GZIP Compressed Archive (.gz)"
+    elif len(buf) >= 3 and buf[:3] == b"BZh":
+        suggested_ext = ".bz2"
+        short_type = "BZip2 (.bz2)"
+        full_type = "BZip2 Compressed Archive (.bz2)"
+    elif len(buf) >= 6 and buf[:6] == b"7z\xbc\xaf\x27\x1c":
+        suggested_ext = ".7z"
+        short_type = "7-Zip (.7z)"
+        full_type = "7-Zip Archive (.7z)"
+    elif len(buf) >= 4 and buf[:4] == b"Rar!":
+        suggested_ext = ".rar"
+        short_type = "RAR (.rar)"
+        full_type = "RAR Archive (.rar)"
+    elif len(buf) >= 2 and buf[:2] == b"MZ":
+        suggested_ext = ".exe"
+        short_type = "Windows EXE (.exe)"
+        full_type = "Windows PE Executable / DLL (.exe)"
+    elif len(buf) >= 4 and buf[:4] in (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"):
+        short_type = "Mach-O Binary"
+        full_type = "macOS Mach-O Binary Executable"
+    elif len(buf) >= 2 and buf[:2] == b"#!":
+        suggested_ext = ".sh"
+        short_type = "Script (.sh)"
+        full_type = "Shell Script Executable (.sh)"
+    else:
+        # Check text
+        try:
+            text_snippet = buf.decode("utf-8")
+            if text_snippet.strip().startswith(("{", "[")):
+                suggested_ext = ".json"
+                short_type = "JSON (.json)"
+                full_type = "JSON Data Document (.json)"
+            elif text_snippet.strip().lower().startswith(("<?xml", "<html", "<!doctype")):
+                suggested_ext = ".xml" if "<?xml" in text_snippet.lower() else ".html"
+                short_type = f"{suggested_ext.upper()[1:]} Document"
+                full_type = f"{short_type} ({suggested_ext})"
+            elif all(c in '\r\n\t' or 32 <= ord(c) < 127 for c in text_snippet[:100]):
+                suggested_ext = ".txt"
+                short_type = "Text (.txt)"
+                full_type = "Plain Text Document (.txt)"
+        except Exception:
+            pass
+
+    # If still unknown, fallback to system file command if available
+    if short_type == "Unknown" and shutil.which("file"):
+        try:
+            res = subprocess.run(["file", "-b", str(file_path)], capture_output=True, text=True, timeout=2)
+            out = res.stdout.strip()
+            if out and out.lower() != "data":
+                short_type = out.split(",")[0][:30]
+                full_type = out
+        except Exception:
+            pass
+
+    # If filename indicates spideroak temp
+    if "spideroak_temp" in file_path.name.lower():
+        extra_notes = (extra_notes + " | " if extra_notes else "") + "SpiderOak cloud backup chunk cache file"
+
+    return {
+        "file_path": file_path,
+        "name": file_path.name,
+        "rel_path": rel_path,
+        "size_bytes": size_bytes,
+        "size_str": size_str,
+        "hex_dump": raw_hex,
+        "ascii_dump": raw_asc,
+        "short_type": short_type,
+        "full_type": full_type,
+        "suggested_ext": suggested_ext,
+        "extra_notes": extra_notes
+    }
+
+def format_hexdump(data: bytes, bytes_per_line: int = 16) -> str:
+    """Formats binary bytes into classic hex + ASCII dump representation."""
+    lines = []
+    for offset in range(0, len(data), bytes_per_line):
+        chunk = data[offset:offset + bytes_per_line]
+        part1 = " ".join(f"{b:02x}" for b in chunk[:8])
+        part2 = " ".join(f"{b:02x}" for b in chunk[8:])
+        hex_str = f"{part1:<23}  {part2:<23}"
+        asc_str = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        lines.append(f"{offset:08x}  {hex_str} |{asc_str}|")
+    return "\n".join(lines)
+
+def _handle_inspect_mystery_files(sub_dir: Path, analyses: list[dict], db_path: str) -> bool:
+    """
+    Interactive sub-screen to inspect mystery/extensionless files, view raw hex dumps,
+    and optionally restore suggested extensions on disk & SQLite.
+    Returns True if any file was renamed on disk.
+    """
+    has_renamed_any = False
+    while True:
+        print("\n" + "=" * 80)
+        print(f"  🔍 MYSTERY & EXTENSIONLESS FILE INSPECTOR")
+        print(f"  Folder: '{sub_dir.name}'  |  Total Files Without Extension: {len(analyses)}")
+        print("=" * 80)
+
+        for idx, item in enumerate(analyses, 1):
+            print(f"\n  [{idx}] {item['name']}")
+            print(f"      • Relative Path:  {item['rel_path']}")
+            print(f"      • File Size:      {item['size_str']}")
+            print(f"      • Magic Header:   {item['hex_dump']} ({item['ascii_dump']})")
+            print(f"      • Identified:     {item['full_type']}")
+            if item.get("suggested_ext"):
+                print(f"      • Suggested Ext:  {item['suggested_ext']}")
+            if item.get("extra_notes"):
+                print(f"      • Notes:          {item['extra_notes']}")
+
+        print("\n" + "-" * 80)
+        print("  Actions:")
+        print("    [v] View raw hex dump (first 128 bytes) of a file")
+        print("    [r] Restore suggested extensions (Safe rename on disk & SQLite)")
+        print("    [b] Return to Curation Wizard")
+        print("-" * 80)
+
+        m_act = input("\nSelect mystery action [v/r/b] (Default: b): ").strip().lower()
+        if not m_act or m_act == 'b':
+            break
+
+        if m_act == 'v':
+            v_sel = input(f"Select file number to view (1-{len(analyses)}) or 'b' to back: ").strip()
+            if not v_sel.isdigit() or int(v_sel) < 1 or int(v_sel) > len(analyses):
+                continue
+            selected_file = analyses[int(v_sel) - 1]
+            try:
+                with open(selected_file["file_path"], "rb") as f:
+                    chunk = f.read(128)
+                print("\n" + "=" * 80)
+                print(f"  RAW HEX DUMP (First 128 bytes): {selected_file['name']}")
+                print(f"  Path: {selected_file['rel_path']}")
+                print("=" * 80)
+                print(format_hexdump(chunk))
+                print("=" * 80)
+                input("\nPress Enter to return to mystery inspector...")
+            except Exception as e:
+                print(f"[Error] Could not read file: {e}")
+                input("Press Enter to continue...")
+
+        elif m_act == 'r':
+            renamable = [m for m in analyses if m.get("suggested_ext") and m["file_path"].exists()]
+            if not renamable:
+                print("\n[Notice] No files with suggested extensions found to restore.")
+                input("Press Enter to continue...")
+                continue
+
+            print("\n" + "=" * 80)
+            print("  PROPOSED FILE EXTENSION RESTORATIONS")
+            print("=" * 80)
+            for idx, r_item in enumerate(renamable, 1):
+                new_name = f"{r_item['file_path'].name}{r_item['suggested_ext']}"
+                print(f"  {idx}. {r_item['name']}  →  {new_name}")
+
+            confirm_r = input(f"\nRestore suggested extensions to {len(renamable)} file(s) on disk & SQLite? [y/N]: ").strip().lower()
+            if confirm_r != 'y':
+                print("Operation cancelled.")
+                continue
+
+            success_count = 0
+            conn = None
+            try:
+                if os.path.exists(db_path):
+                    conn = get_db_connection(db_path)
+            except Exception:
+                conn = None
+
+            for r_item in renamable:
+                old_p = r_item["file_path"]
+                new_ext = r_item["suggested_ext"]
+                new_p = old_p.parent / f"{old_p.name}{new_ext}"
+                if new_p.exists():
+                    print(f"  [Skipped] Destination already exists: {new_p.name}")
+                    continue
+                try:
+                    old_p.rename(new_p)
+                    if conn:
+                        try:
+                            parent_dir_str = str(old_p.parent.resolve())
+                            new_cat = get_file_category(new_ext).title()
+                            conn.execute("""
+                                UPDATE files
+                                SET name = ?, extension = ?, category = ?
+                                WHERE directory_id = (SELECT id FROM directories WHERE path = ?)
+                                  AND name = ?
+                            """, (new_p.name, new_ext, new_cat, parent_dir_str, old_p.name))
+                            conn.commit()
+                        except Exception:
+                            pass
+                    r_item["file_path"] = new_p
+                    r_item["name"] = new_p.name
+                    success_count += 1
+                    print(f"  ✓ Renamed: {old_p.name} → {new_p.name}")
+                except Exception as e:
+                    print(f"  [Error] Failed to rename {old_p.name}: {e}")
+
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+            if success_count > 0:
+                has_renamed_any = True
+                print(f"\n[Success] Restored extensions for {success_count} file(s)!")
+                analyses = [m for m in analyses if not m["name"].endswith(m.get("suggested_ext", "___"))]
+                if not analyses:
+                    print("All mystery files have been restored with their proper extensions.")
+                    input("Press Enter to return to Curation Wizard...")
+                    break
+                input("Press Enter to return to mystery inspector...")
+
+    return has_renamed_any
 
 def identify_folder_filetypes_and_apps(db_path: str, ext_counts: Counter, l1_name: str, tier_name: str) -> dict:
     """
@@ -3272,6 +3587,16 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
             verified_badge = "✓ Verified" if is_verified == 1 else "⚪ Unverified (Untagged)"
 
             while True:
+                # Analyze mystery / extensionless files if present
+                mystery_files = stats.get("no_ext_files", [])
+                mystery_summary = ""
+                mystery_analyses = []
+                if mystery_files:
+                    mystery_analyses = [inspect_file_magic(mf, sub_dir) for mf in mystery_files]
+                    identified_counts = Counter(m["short_type"] for m in mystery_analyses)
+                    identified_parts = [f"{cnt}x {stype}" for stype, cnt in identified_counts.most_common(3)]
+                    mystery_summary = f"{len(mystery_files)} (no ext) detected → " + ", ".join(identified_parts)
+
                 print("\n" + "-" * 80)
                 print(f"  {tier_emoji} [{tier_name}] ▸ 📍 {loc_label} ▸ {l1_dir.name}  |  Folder {s_idx}/{len(l2_subdirs)}: '{sub_dir.name}'")
                 print("-" * 80)
@@ -3281,6 +3606,8 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 print(f"  • Storage:        {size_str} across {files_count:,} files ({stats['subfolder_count']} subfolders)")
                 print(f"  • Date Range:     {date_range}")
                 print(f"  • File Types:     {top_exts}")
+                if mystery_summary:
+                    print(f"  • Mystery Files:  🔍 {mystery_summary}")
                 print(f"  • App Needed:     {detected_app}")
                 print(f"  • Category Check: {ft_info['category_match_msg']}")
                 print(f"  • Sample Files:   {samples}")
@@ -3290,10 +3617,14 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                     {"key": "a", "label": f"Approve description & attach app ('{detected_app}') (Mark Verified ✓)"},
                     {"key": "e", "label": "Edit folder name, description or attached app, apply tags & verify"},
                     {"key": "r", "label": "Rename folder on disk & database"},
+                ]
+                if mystery_files:
+                    base_actions.append({"key": "i", "label": f"Inspect & analyze {len(mystery_files)} mystery / extensionless files (Magic signatures & hex dump)"})
+                base_actions.extend([
                     {"key": "m", "label": "Move / Reassign to another Priority tier or parent folder"},
                     {"key": "s", "label": "Skip for now (remain unverified)"},
                     {"key": "q", "label": "Quit wizard and return to menu"}
-                ]
+                ])
                 w_usage = get_menu_option_usage(db_path, "wizard_action")
                 sorted_actions = sorted(base_actions, key=lambda x: w_usage.get(x["key"], 0), reverse=True)
                 top_key = sorted_actions[0]["key"] if (w_usage and w_usage.get(sorted_actions[0]["key"], 0) > 0) else "a"
@@ -3414,6 +3745,20 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                         print(f"\n[Success] ✓ Moved and verified '{sub_dir.name}' under {target_loc['label']} / {target_l1_dest.name}.")
                         total_curated += 1
                         break
+                elif action == 'i' and mystery_files:
+                    did_rename = _handle_inspect_mystery_files(sub_dir, mystery_analyses, db_path)
+                    if did_rename:
+                        stats = analyze_folder_content(sub_dir)
+                        ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], l1_dir.name, tier_name)
+                        if not existing_app:
+                            detected_app = ft_info.get("app_needed")
+                        if not existing_desc:
+                            suggested_desc = suggest_folder_description(sub_dir.name, l1_dir.name, tier_name, stats, ft_info)
+                        size_str = format_size(stats["total_bytes"])
+                        files_count = stats["total_files"]
+                        top_exts = ft_info["file_types_formatted"]
+                        samples = ", ".join(stats["sample_files"][:3]) if stats["sample_files"] else "None"
+                    continue
                 elif action == 's':
                     print(f"\n[Skipped] '{sub_dir.name}' left unverified.")
                     total_skipped += 1

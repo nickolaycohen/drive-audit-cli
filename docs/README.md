@@ -230,8 +230,14 @@ Prompts:
       ↳ Applies parent Priority Finder color tag + category tags
       ↳ Saves intelligent/approved description to SQLite
       ↳ Sets is_verified = 1 and verified_at timestamp
-  [e] Edit Description Manually
-      ↳ Customize folder description before applying tags and verification
+  [e] Edit Folder Name, Description or App
+      ↳ Customize folder name, description or attached application before verifying
+  [r] Rename Folder on Disk & DB
+      ↳ Standalone folder renaming on filesystem and SQLite before triage
+  [i] Inspect & Analyze Mystery / Extensionless Files (Conditional)
+      ↳ Deep magic-byte header inspection for extensionless & cache files
+      ↳ Identifies true formats (e.g. MS Money DBs, CAB archives, SQLite, PDFs)
+      ↳ Provides interactive hex dump viewing ([v]) and safe extension restore ([r])
   [m] Move / Reassign Tier
       ↳ Relocate folder to another Priority tier, mapped location, or parent category
   [s] Skip Folder
@@ -322,6 +328,7 @@ Inspects mapped storage locations across Priority tiers (`Priority 1` through `P
     - `[a]` **Approve**: Applies parent Priority Finder color tag + category tags, persists description and required application (`app_needed`), and marks `is_verified = 1` in SQLite.
     - `[e]` **Edit**: Customize folder name, description and/or attached application before applying tags and marking verified.
     - `[r]` **Rename**: Standalone folder rename on disk and database before triage decisions.
+    - `[i]` **Inspect Mystery Files**: Dynamically activated whenever extensionless or cache files (e.g. `spideroak_temp_*`) are detected. Reads binary magic headers (Jet/ISAM `.mny`, Cabinet `.mbf`, SQLite, PDF, Office XML, Media, executables), displays paths and sizes, provides interactive raw hex dump viewing (`[v]`), and allows safe batch extension restoration (`[r]`) synchronized with SQLite.
     - `[m]` **Move**: Relocate folder to another Priority tier, mapped location, or parent category (preserving required app metadata).
     - `[s]` **Skip**: Leave untagged and unverified.
     - `[q]` **Quit**: Safely exits with all verified progress persisted.
