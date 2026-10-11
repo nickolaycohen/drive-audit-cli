@@ -1030,11 +1030,18 @@ def show_hosts_summary(db_path: str):
                     vol_label = vol_label[:21] + "..."
                 media = b.get("media_type") or "N/A"
                 protocol = b.get("protocol") or "Internal"
-                if b.get("status") == "OK":
-                    w_str = f"{b['write_mb_s']} MB/s" if b.get('write_mb_s') else "N/A"
-                    r_str = f"{b['read_mb_s']} MB/s" if b.get('read_mb_s') else "N/A"
+                if b.get("write_mb_s") is not None:
+                    w_str = f"{b['write_mb_s']} MB/s"
+                elif "Time Machine" in (b.get("status") or "") or "Protected" in (b.get("status") or ""):
+                    w_str = "Write-Protected"
                 else:
-                    w_str = b.get("status") or "Error"
+                    w_str = b.get("status") or "N/A"
+
+                if b.get("read_mb_s") is not None:
+                    r_str = f"{b['read_mb_s']} MB/s"
+                elif "FDA Required" in (b.get("status") or "") or "FDA" in (b.get("status") or ""):
+                    r_str = "FDA Required"
+                else:
                     r_str = "-"
                 b_date = b.get("benchmark_at", "")[:19].replace("T", " ") if b.get("benchmark_at") else "N/A"
                 unmounted_flag = " (Unmounted)" if b["mount_point"] not in mounted_vols else ""

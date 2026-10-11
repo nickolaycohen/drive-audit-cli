@@ -204,17 +204,26 @@ def benchmark_volume(mount_point: str, test_size_bytes: int) -> Dict[str, any]:
                     pass
                 start_read = time.perf_counter()
                 read_bytes = 0
-                while read_bytes < test_size_bytes:
-                    to_read = min(CHUNK_SIZE, test_size_bytes - read_bytes)
+                target_read = min(test_size_bytes, 64 * 1024 * 1024)
+                while read_bytes < target_read:
+                    to_read = min(CHUNK_SIZE, target_read - read_bytes)
                     chunk = os.read(fd_sample, to_read)
                     if not chunk:
-                        break
+                        if read_bytes >= 4 * 1024 * 1024:
+                            break
+                        try:
+                            os.lseek(fd_sample, 0, os.SEEK_SET)
+                            chunk = os.read(fd_sample, to_read)
+                            if not chunk:
+                                break
+                        except Exception:
+                            break
                     read_bytes += len(chunk)
                 duration = time.perf_counter() - start_read
                 os.close(fd_sample)
                 if duration > 0 and read_bytes > 0:
                     result["read_mb_s"] = round((read_bytes / (1024 * 1024)) / duration, 1)
-                    result["status"] = "Protected (Time Machine / Read-Only)" if info.get("is_time_machine") else "Read-Only Volume"
+                    result["status"] = "Write-Protected (Time Machine)" if info.get("is_time_machine") else "Write-Protected (Read-Only)"
             except Exception:
                 pass
 
@@ -244,31 +253,30 @@ def benchmark_volume(mount_point: str, test_size_bytes: int) -> Dict[str, any]:
     return result
 
 
-def find_readable_sample_file(mount_point: str, min_size_bytes: int = 1024 * 1024) -> Optional[str]:
+def find_readable_sample_file(mount_point: str, min_size_bytes: int = 1024 * 1024, max_depth: int = 4) -> Optional[str]:
     """Finds an existing readable file on a volume to benchmark read throughput without modifying files."""
-    try:
-        # Check direct files first
-        for entry in os.scandir(mount_point):
-            if entry.is_file(follow_symlinks=False):
+    def _search(curr_dir: str, depth: int) -> Optional[str]:
+        if depth > max_depth:
+            return None
+        try:
+            for entry in os.scandir(curr_dir):
+                if entry.name in ('.Spotlight-V100', '.fseventsd', '.DocumentRevisions-V100', '.Trashes'):
+                    continue
                 try:
-                    if entry.stat().st_size >= min_size_bytes:
-                        return entry.path
-                except Exception:
-                    pass
-            elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
-                try:
-                    for sub in os.scandir(entry.path):
-                        if sub.is_file(follow_symlinks=False):
-                            try:
-                                if sub.stat().st_size >= min_size_bytes:
-                                    return sub.path
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return None
+                    if entry.is_file(follow_symlinks=False):
+                        if entry.stat().st_size >= min_size_bytes:
+                            return entry.path
+                    elif entry.is_dir(follow_symlinks=False):
+                        res = _search(entry.path, depth + 1)
+                        if res:
+                            return res
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            pass
+        return None
+
+    return _search(mount_point, 0)
 
 
 def discover_candidate_volumes() -> List[str]:
