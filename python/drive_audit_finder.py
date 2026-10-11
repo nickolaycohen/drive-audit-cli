@@ -13,6 +13,15 @@ import subprocess
 import logging
 from collections import deque, defaultdict, Counter
 from pathlib import Path
+
+# Ensure python/ package folder and project root are in sys.path
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(1, str(PROJECT_ROOT))
+
 try:
     import exifread
     logging.getLogger('exifread').setLevel(logging.ERROR)
@@ -5019,7 +5028,10 @@ def get_orchestrator_db_path() -> str:
     ext_pro_p = "/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db"
     if os.path.exists(ext_pro_p):
         return ext_pro_p
-    # 3. Local symlink or relative file in workspace
+    # 3. Project root symlink or workspace relative database
+    root_link = Path(__file__).resolve().parent.parent / "drive_audit.db"
+    if root_link.exists():
+        return str(root_link)
     return "drive_audit.db"
 
 def main():

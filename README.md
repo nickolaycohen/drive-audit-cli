@@ -153,7 +153,9 @@ flowchart TD
 Run the interactive CLI application:
 
 ```bash
-python3 drive_audit_finder.py
+./run.sh
+# or
+python3 python/drive_audit_finder.py
 ```
 
 Upon launch, you will be presented with the main menu:
@@ -366,12 +368,12 @@ Measures direct, uncached sequential read and write throughput (MB/s) for attach
 - **Safety First**: Writes pseudo-random uncompressible test blocks to a temporary hidden file with `os.fsync`, measures raw throughput, and guarantees immediate deletion upon completion.
 - **Command-line Options**:
   ```bash
-  python3 benchmark_drives.py                  # Benchmark all mounted volumes (256 MB payload)
-  python3 benchmark_drives.py --quick          # 64 MB payload quick test
-  python3 benchmark_drives.py --target /Volumes/LaCie  # Test single drive
-  python3 benchmark_drives.py --size-mb 512    # Custom payload size
-  python3 benchmark_drives.py --json           # Machine-readable JSON output
-  python3 benchmark_drives.py --interactive    # Interactive size selection menu
+  python3 python/benchmark_drives.py                  # Benchmark all mounted volumes (256 MB payload)
+  python3 python/benchmark_drives.py --quick          # 64 MB payload quick test
+  python3 python/benchmark_drives.py --target /Volumes/LaCie  # Test single drive
+  python3 python/benchmark_drives.py --size-mb 512    # Custom payload size
+  python3 python/benchmark_drives.py --json           # Machine-readable JSON output
+  python3 python/benchmark_drives.py --interactive    # Interactive size selection menu
   ```
 
 ### 4. View Top-Level Folder Scans Report

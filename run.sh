@@ -20,4 +20,4 @@ elif [ -d ".venv" ] && [ -f ".venv/bin/activate" ]; then
 fi
 
 # Execute the primary CLI orchestrator, passing any optional CLI arguments
-exec python3 drive_audit_finder.py "$@"
+exec python3 python/drive_audit_finder.py "$@"

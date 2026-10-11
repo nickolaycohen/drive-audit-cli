@@ -219,29 +219,28 @@ git push origin main
 ./run.sh
 
 # Or invoke directly via Python
-python3 drive_audit_finder.py
-
+python3 python/drive_audit_finder.py
 
 # Run with custom SQLite database path override
-DRIVE_AUDIT_DB="/path/to/drive_audit.db" python3 drive_audit_finder.py
+DRIVE_AUDIT_DB="/path/to/drive_audit.db" python3 python/drive_audit_finder.py
 
 # Benchmark all mounted volumes (256 MB payload)
-python3 benchmark_drives.py
+python3 python/benchmark_drives.py
 
 # Quick 64 MB benchmark
-python3 benchmark_drives.py --quick
+python3 python/benchmark_drives.py --quick
 
 # Benchmark a specific target drive
-python3 benchmark_drives.py --target /Volumes/LaCie
+python3 python/benchmark_drives.py --target /Volumes/LaCie
 
 # Custom payload size benchmark
-python3 benchmark_drives.py --size-mb 512
+python3 python/benchmark_drives.py --size-mb 512
 
 # Output machine-readable JSON metrics
-python3 benchmark_drives.py --json
+python3 python/benchmark_drives.py --json
 
 # Interactive benchmark menu
-python3 benchmark_drives.py --interactive
+python3 python/benchmark_drives.py --interactive
 ```
 
 ### macOS Hardware & System Discovery
