@@ -1923,6 +1923,20 @@ def generate_curation_verification_report(db_path: str):
                 """)
                 v_rows_raw = cursor.fetchall()
                 v_rows = deduplicate_verified_rows_with_breadcrumbs(v_rows_raw)
+                # Map location paths to identify level-1 category containers
+                loc_paths = {str(loc["path"].resolve()) for loc in get_priority_locations(db_path, active_only=True)}
+                all_v_paths = {r_data[2] for r_data, _ in v_rows}
+
+                def is_parent_container_path(p_str: str) -> bool:
+                    p_res = str(Path(p_str).resolve())
+                    # 1. Has other verified descendants in the report:
+                    if any(other_p != p_str and other_p.startswith(p_str + "/") for other_p in all_v_paths):
+                        return True
+                    # 2. Is directly under a Priority location (Level-1 category container like 'Data'):
+                    if any(str(Path(p_res).parent) == lp for lp in loc_paths):
+                        return True
+                    return False
+
                 print("\n" + "=" * 116)
                 print(f"APPROVED / VERIFIED FOLDERS ({len(v_rows)} folders)")
                 print("=" * 116)
@@ -1930,13 +1944,26 @@ def generate_curation_verification_report(db_path: str):
                 print("-" * 116)
                 for idx, (r_data, breadcrumb) in enumerate(v_rows, 1):
                     did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = r_data
-                    app_f = df_cnt + vs_cnt
-                    app_b = df_b + vs_b
                     v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
-                    if pend_cnt == 0:
+                    is_parent = is_parent_container_path(dpath)
+
+                    if not is_parent:
+                        # Leaf curated folder (e.g. 'DB Backup', 'MS-Money', 'My Kindle Content', 'drive-audit')
+                        # The folder itself was explicitly curated and approved — mark as Fully Verified!
                         status_badge = "✓ Fully Verified"
+                        app_f = df_cnt + vs_cnt + pend_f
+                        app_b = df_b + vs_b + pend_b
+                        display_pend_cnt = 0
                     else:
-                        status_badge = "⚠️ Partially Curated"
+                        # Parent category container (e.g. 'Data')
+                        app_f = df_cnt + vs_cnt
+                        app_b = df_b + vs_b
+                        display_pend_cnt = pend_cnt
+                        if display_pend_cnt == 0:
+                            status_badge = "✓ Fully Verified"
+                        else:
+                            status_badge = "⚠️ Partially Curated"
+
                     stat_str = f"{app_f:,} files ({format_size(app_b)})"
                     disp_name = breadcrumb if len(breadcrumb) <= 36 else ("..." + breadcrumb[-33:])
                     print(f"{idx:<4} {disp_name:<36} {status_badge:<22} {stat_str:<16} {v_date_str:<20} {dtags}")
@@ -1945,31 +1972,17 @@ def generate_curation_verification_report(db_path: str):
                         print(f"     ↳ 📂 Hierarchy: {breadcrumb}")
                     if dapp:
                         print(f"     ↳ 💻 App Needed: {dapp}")
-                    if pend_cnt > 0:
-                        print(f"     ↳ ⏳ Pending Subfolders: {pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})")
+                    if display_pend_cnt > 0:
+                        print(f"     ↳ ⏳ Pending Subfolders: {display_pend_cnt} folders ({pend_f:,} files, {format_size(pend_b)})")
                     if ddesc:
                         print(f"     ↳ 📝 \"{ddesc}\"")
                 print("=" * 116)
 
-                partially_curated = [r_data for r_data, _ in v_rows if r_data[10] > 0]
-                if partially_curated and not auto_prompted_rescan:
-                    auto_prompted_rescan = True
+                partially_curated = [r_data for r_data, _ in v_rows if is_parent_container_path(r_data[2]) and r_data[10] > 0]
+                if partially_curated:
                     pend_count = len(partially_curated)
                     tot_pend_subs = sum(r[10] for r in partially_curated)
-                    print(f"\n⚠️  {pend_count} Partially Curated folder(s) detected with {tot_pend_subs:,} pending subfolder(s).")
-                    rescan_ans = input("Would you like to rescan these folders from disk to reconcile changes & refresh the view? [Y/n]: ").strip().lower()
-                    if rescan_ans in ("", "y", "yes"):
-                        paths_to_rescan = [r[2] for r in partially_curated]
-                        roots_to_rescan = get_minimal_scan_roots(paths_to_rescan)
-                        if roots_to_rescan:
-                            print(f"\n🔄 Rescanning {len(roots_to_rescan)} top-level root folder(s) from disk to reconcile changes...")
-                            for r_p in roots_to_rescan:
-                                print(f"  ↳ Scanning: {r_p}")
-                                perform_directory_scan(r_p, db_path, skip_hours=0.0)
-                            print("\n✓ Rescan complete. Refreshing report view...\n")
-                            continue
-                        else:
-                            print("\n[Notice] None of the partially curated folder paths currently exist on disk.")
+                    print(f"\n💡 Note: {pend_count} parent category container(s) have {tot_pend_subs:,} pending subfolder(s) awaiting triage.")
 
                 exit_report = False
                 while True:
@@ -1987,7 +2000,6 @@ def generate_curation_verification_report(db_path: str):
                                 print(f"  ↳ Scanning: {r_p}")
                                 perform_directory_scan(r_p, db_path, skip_hours=0.0)
                             print("\n✓ Rescan complete. Refreshing report view...\n")
-                            auto_prompted_rescan = True
                             break
                         else:
                             print("\n[Notice] No target folders exist on disk to rescan.")
@@ -1998,33 +2010,65 @@ def generate_curation_verification_report(db_path: str):
                         if 0 <= f_idx < len(v_rows):
                             r_data, breadcrumb = v_rows[f_idx]
                             did, dname, dpath, v_at, ddesc, dapp, df_cnt, df_b, vs_cnt, vs_b, pend_cnt, pend_f, pend_b, dtags = r_data
-                            app_f = df_cnt + vs_cnt
-                            app_b = df_b + vs_b
                             v_date_str = v_at.replace("T", " ")[:19] if v_at else "N/A"
-                            
+                            is_parent = is_parent_container_path(dpath)
+
+                            if not is_parent:
+                                app_f = df_cnt + vs_cnt + pend_f
+                                app_b = df_b + vs_b + pend_b
+                                display_pend_cnt = 0
+                                status_str = f"✓ Fully Verified ({v_date_str})"
+                            else:
+                                app_f = df_cnt + vs_cnt
+                                app_b = df_b + vs_b
+                                display_pend_cnt = pend_cnt
+                                status_str = f"✓ Fully Verified ({v_date_str})" if pend_cnt == 0 else f"⚠️ Partially Curated ({pend_cnt} unverified subfolders pending triage)"
+
                             # Category breakdown across approved files
-                            cursor.execute("""
-                                SELECT f.category, COUNT(f.id), SUM(f.size_bytes)
-                                FROM directories sub
-                                JOIN files f ON f.directory_id = sub.id
-                                WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
-                                  AND f.name != '.DS_Store'
-                                GROUP BY f.category
-                                ORDER BY SUM(f.size_bytes) DESC
-                            """, (did, dpath))
+                            if not is_parent:
+                                cursor.execute("""
+                                    SELECT f.category, COUNT(f.id), SUM(f.size_bytes)
+                                    FROM directories sub
+                                    JOIN files f ON f.directory_id = sub.id
+                                    WHERE (sub.id = ? OR sub.path LIKE ? || '/%')
+                                      AND f.name != '.DS_Store'
+                                    GROUP BY f.category
+                                    ORDER BY SUM(f.size_bytes) DESC
+                                """, (did, dpath))
+                            else:
+                                cursor.execute("""
+                                    SELECT f.category, COUNT(f.id), SUM(f.size_bytes)
+                                    FROM directories sub
+                                    JOIN files f ON f.directory_id = sub.id
+                                    WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
+                                      AND f.name != '.DS_Store'
+                                    GROUP BY f.category
+                                    ORDER BY SUM(f.size_bytes) DESC
+                                """, (did, dpath))
                             cat_breakdown = cursor.fetchall()
                             cat_str = " | ".join([f"{c}: {cnt:,} ({format_size(sb)})" for c, cnt, sb in cat_breakdown]) if cat_breakdown else "0 approved files"
 
-                            # Fetch strictly approved files in folder (up to 100)
-                            cursor.execute("""
-                                SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at, sub.name as sub_folder
-                                FROM directories sub
-                                JOIN files f ON f.directory_id = sub.id
-                                WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
-                                  AND f.name != '.DS_Store'
-                                ORDER BY f.size_bytes DESC
-                                LIMIT 100
-                            """, (did, dpath))
+                            # Fetch files in folder (up to 100)
+                            if not is_parent:
+                                cursor.execute("""
+                                    SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at, sub.name as sub_folder
+                                    FROM directories sub
+                                    JOIN files f ON f.directory_id = sub.id
+                                    WHERE (sub.id = ? OR sub.path LIKE ? || '/%')
+                                      AND f.name != '.DS_Store'
+                                    ORDER BY f.size_bytes DESC
+                                    LIMIT 100
+                                """, (did, dpath))
+                            else:
+                                cursor.execute("""
+                                    SELECT f.name, f.category, f.extension, f.size_bytes, f.modified_at, sub.name as sub_folder
+                                    FROM directories sub
+                                    JOIN files f ON f.directory_id = sub.id
+                                    WHERE (sub.id = ? OR (sub.path LIKE ? || '/%' AND sub.is_verified = 1))
+                                      AND f.name != '.DS_Store'
+                                    ORDER BY f.size_bytes DESC
+                                    LIMIT 100
+                                """, (did, dpath))
                             dir_files = cursor.fetchall()
 
                             print("\n" + "#" * 90)
@@ -2033,15 +2077,12 @@ def generate_curation_verification_report(db_path: str):
                             print(f"  • Full Path:         {dpath}")
                             if breadcrumb != dname:
                                 print(f"  • Hierarchy:         {breadcrumb}")
-                            if pend_cnt == 0:
-                                print(f"  • Status:            ✓ Fully Verified ({v_date_str})")
-                            else:
-                                print(f"  • Status:            ⚠️ Partially Curated ({pend_cnt} unverified subfolders pending triage)")
-                            print(f"  • Approved Storage:  {format_size(app_b)} across {app_f:,} files ({df_cnt:,} direct files, {vs_cnt:,} verified subfolder files)")
+                            print(f"  • Status:            {status_str}")
+                            print(f"  • Approved Storage:  {format_size(app_b)} across {app_f:,} files")
                             if dapp:
                                 print(f"  • Required App:      {dapp}")
-                            if pend_cnt > 0:
-                                print(f"  • Pending Subtree:   {format_size(pend_b)} across {pend_f:,} files in {pend_cnt} unverified subfolders")
+                            if display_pend_cnt > 0:
+                                print(f"  • Pending Subtree:   {format_size(pend_b)} across {pend_f:,} files in {display_pend_cnt} unverified subfolders")
                             print(f"  • Folder Tags:       {dtags}")
                             print(f"  • Categories:        {cat_str}")
                             if ddesc:
