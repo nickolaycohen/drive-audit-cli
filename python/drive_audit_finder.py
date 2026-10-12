@@ -14,6 +14,7 @@ import plistlib
 import glob
 import subprocess
 import logging
+import hashlib
 from collections import deque, defaultdict, Counter
 from pathlib import Path
 
@@ -5059,8 +5060,8 @@ def fold_snapshot_folders_interactive(target_dir: Path, db_path: str) -> bool:
                         'src': fp, 'sz': sz, 'hash': fh,
                         'origin': 'nested_baseline', 'mtime': fp.stat().st_mtime
                     }
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"    [Warning] Could not process {fp}: {e}")
 
     # Step B: Loose root files
     for lf in loose_root_files:
@@ -5093,8 +5094,8 @@ def fold_snapshot_folders_interactive(target_dir: Path, db_path: str) -> bool:
                     'src': lf, 'sz': sz, 'hash': fh,
                     'origin': 'root', 'mtime': lf.stat().st_mtime
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"    [Warning] Could not process root file {lf}: {e}")
 
     # Step C: Walk each snapshot folder
     for sd in snapshot_dirs:
@@ -5152,8 +5153,8 @@ def fold_snapshot_folders_interactive(target_dir: Path, db_path: str) -> bool:
                             'origin': sd.name, 'mtime': fp.stat().st_mtime
                         }
                         to_move_unique.append((fp, sz, rel, sd.name))
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"    [Warning] Could not process {fp}: {e}")
 
     kept_bytes = sum(x['sz'] for x in canonical_targets.values())
     dup_bytes = sum(x[1] for x in to_purge_dups)
