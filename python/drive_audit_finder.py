@@ -819,6 +819,23 @@ def get_finder_folder_size(folder_path: Path) -> int | None:
         pass
     return None
 
+def is_volume_mounted(path_input: str | Path) -> bool:
+    """
+    Checks if the storage volume containing path_input is currently mounted.
+    Prevents false deletions when an external drive is simply detached.
+    """
+    try:
+        p = Path(path_input)
+        parts = p.parts
+        # On macOS, external drives are mounted under /Volumes/<VolumeName>
+        if len(parts) >= 3 and parts[1] == 'Volumes':
+            vol_root = Path('/', parts[1], parts[2])
+            return vol_root.exists() and vol_root.is_dir()
+        # Internal drives or root
+        return Path('/').exists()
+    except Exception:
+        return False
+
 class ScanProgressTracker:
     """Tracks scan throughput, progress percentage, and calculates a stable ETA based on total size and processing speed."""
     def __init__(self, total_target_bytes: int | None = None):
@@ -1765,6 +1782,25 @@ def generate_curation_verification_report(db_path: str):
     cursor = conn.cursor()
 
     while True:
+        # 0. Reconcile deleted directories on mounted volumes so report strictly reflects actual filesystem state
+        cursor.execute("""
+            SELECT d.id, d.path 
+            FROM priority_locations pl
+            JOIN directories d ON (d.path = pl.path OR d.path LIKE pl.path || '/%')
+            WHERE pl.is_active = 1
+        """)
+        missing_dir_ids = []
+        for did, dpath in cursor.fetchall():
+            if is_volume_mounted(dpath) and not os.path.exists(dpath):
+                missing_dir_ids.append(did)
+
+        if missing_dir_ids:
+            placeholders = ",".join("?" for _ in missing_dir_ids)
+            cursor.execute(f"DELETE FROM files WHERE directory_id IN ({placeholders})", missing_dir_ids)
+            cursor.execute(f"DELETE FROM directory_tags WHERE directory_id IN ({placeholders})", missing_dir_ids)
+            cursor.execute(f"DELETE FROM directories WHERE id IN ({placeholders})", missing_dir_ids)
+            conn.commit()
+
         # 1. Fetch Global Summary across all indexed data (Option B: strictly verified files, excluding .DS_Store)
         cursor.execute("SELECT COUNT(id), COALESCE(SUM(size_bytes), 0) FROM files WHERE name != '.DS_Store'")
         tot_files_row = cursor.fetchone()
@@ -1923,6 +1959,7 @@ def generate_curation_verification_report(db_path: str):
                     ORDER BY ad.path
                 """)
                 v_rows_raw = cursor.fetchall()
+                v_rows_raw = [r for r in v_rows_raw if not (is_volume_mounted(r[2]) and not os.path.exists(r[2]))]
                 v_rows = deduplicate_verified_rows_with_breadcrumbs(v_rows_raw)
                 # Map location paths to identify level-1 category containers
                 loc_paths = {str(loc["path"].resolve()) for loc in get_priority_locations(db_path, active_only=True)}
@@ -6871,9 +6908,10 @@ def prune_missing_records(db_path: str):
     del_files = 0
 
     for did, dpath in all_dirs:
-        if not os.path.exists(dpath):
+        if is_volume_mounted(dpath) and not os.path.exists(dpath):
             cursor.execute("SELECT COUNT(*) FROM files WHERE directory_id = ?", (did,))
             del_files += cursor.fetchone()[0]
+            cursor.execute("DELETE FROM directory_tags WHERE directory_id = ?", (did,))
             cursor.execute("DELETE FROM directories WHERE id = ?", (did,))
             del_dirs += 1
 
@@ -6883,10 +6921,12 @@ def prune_missing_records(db_path: str):
     print(f"Checking {len(all_files):,} files against filesystem...")
 
     for fid, fname, dpath in all_files:
-        full_path = os.path.join(dpath, fname)
-        if fname == ".DS_Store" or not os.path.exists(full_path):
-            cursor.execute("DELETE FROM files WHERE id = ?", (fid,))
-            del_files += 1
+        if is_volume_mounted(dpath):
+            full_path = os.path.join(dpath, fname)
+            if fname == ".DS_Store" or not os.path.exists(full_path):
+                cursor.execute("DELETE FROM file_tags WHERE file_id = ?", (fid,))
+                cursor.execute("DELETE FROM files WHERE id = ?", (fid,))
+                del_files += 1
 
     conn.commit()
     conn.close()
