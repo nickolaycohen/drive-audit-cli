@@ -2159,7 +2159,7 @@ def generate_curation_verification_report(db_path: str):
                                         print(f"    ⏳ {disp_pname:<24} {ps_f:,} files ({format_size(ps_b)}) 📍 {ps_path}")
 
                             print("#" * 90)
-                            drill_act = input("\n[e] Edit folder description or attached app, or press Enter to return: ").strip().lower()
+                            drill_act = input("\n[e] Edit description or app, [u] Un-verify (remove from approved folders), or Enter to return: ").strip().lower()
                             if drill_act == 'e':
                                 print(f"\nCurrent description: \"{ddesc or '(none)'}\"")
                                 new_desc = input("Enter new description (or Enter to keep): ").strip()
@@ -2169,6 +2169,11 @@ def generate_curation_verification_report(db_path: str):
                                 final_app = new_app if new_app else dapp
                                 _set_directory_description_in_db(Path(dpath), final_desc, db_path, is_verified=True, app_needed=final_app)
                                 print(f"\n[Success] ✓ Updated description & app for '{dname}' in SQLite!")
+                                break
+                            elif drill_act == 'u':
+                                cursor.execute("UPDATE directories SET is_verified = 0, verified_at = NULL WHERE id = ?", (did,))
+                                conn.commit()
+                                print(f"\n[Success] ✓ Un-verified '{dname}'. Removed from Approved / Verified folders.")
                                 break
                         else:
                             print(f"[Error] Invalid selection. Choose 1-{len(v_rows)}.")
@@ -4036,7 +4041,7 @@ def apply_hierarchical_tags_for_path(
             app = None
             lvl_name = f"Level {i+1} parent '{curr.name}'"
 
-        _set_directory_description_in_db(curr, desc, db_path, is_verified=True, app_needed=app)
+        _set_directory_description_in_db(curr, desc, db_path, is_verified=is_leaf, app_needed=app)
         tag_labels = [t[0] for t in level_tags]
         print(f"    ✓ {p_em} {lvl_name} tagged with: {tag_labels}")
 
