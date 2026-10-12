@@ -4950,6 +4950,378 @@ def extract_file_types_interactive(sub_dir: Path, db_path: str, stats: dict | No
     return True
 
 
+def fold_snapshot_folders_interactive(target_dir: Path, db_path: str) -> bool:
+    """
+    Consolidates historical chronological snapshot folders (e.g. 'Documents 01282009',
+    'nested Documents', 'Documents Duplicates', etc.) in-place into target_dir.
+    - Hoists nested same-name baseline (e.g. Documents/Documents/* -> Documents/*)
+    - Automatically collapses byte-for-byte exact duplicate files
+    - Preserves different revision files by appending snapshot date/tag
+    - Purges legacy Windows shortcuts, Word backups, and thumbnail caches
+    - Organizes family photo scans into 'Family Scans & IDs'
+    - Reconciles empty folders and synchronizes SQLite database.
+    """
+    target_dir = Path(target_dir).resolve()
+    if not target_dir.exists() or not target_dir.is_dir():
+        print(f"\n[Error] Target directory '{target_dir}' does not exist.")
+        return False
+
+    snapshot_dirs = []
+    for d in sorted(target_dir.iterdir()):
+        if not d.is_dir() or d.name.startswith('.'):
+            continue
+        name_l = d.name.lower()
+        if ('document' in name_l or 'snapshot' in name_l or 'backup' in name_l or
+            'duplicate' in name_l or d.name == 'Resume Milena' or d.name == target_dir.name):
+            snapshot_dirs.append(d)
+
+    loose_root_files = [f for f in sorted(target_dir.iterdir()) if f.is_file() and not f.name.startswith('.')]
+
+    if not snapshot_dirs and not loose_root_files:
+        print(f"\n[Notice] No snapshot folders or root files detected under '{target_dir.name}' to fold.")
+        return False
+
+    print("\n" + "=" * 80)
+    print(f"  📂 FOLD & CONSOLIDATE SNAPSHOTS IN-PLACE: '{target_dir.name}'")
+    print("=" * 80)
+    print(f"  • Target Directory:       {target_dir}")
+    print(f"  • Detected Snapshots:     {len(snapshot_dirs)} folders:")
+    for sd in snapshot_dirs:
+        sub_cnt = sum(len(f) for _, _, f in os.walk(sd))
+        print(f"    - {sd.name:<32} ({sub_cnt:,} files)")
+    if loose_root_files:
+        print(f"  • Loose Root Files:       {len(loose_root_files)} files in '{target_dir.name}'")
+    print("-" * 80)
+
+    start_c = input("\nProceed with dry-run analysis and collision check? [Y/n]: ").strip().lower()
+    if start_c == 'n':
+        print("\nConsolidation cancelled.")
+        return False
+
+    print("\nScanning files, computing SHA-256 hashes & analyzing collisions... Please wait...")
+
+    def get_hash(fp):
+        h = hashlib.sha256()
+        with open(fp, 'rb') as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def parse_snapshot_date(name):
+        m = re.search(r'(\d{2})(\d{2})(\d{4})', name)
+        if m:
+            month, day, year = m.groups()
+            return f"{year}-{month}-{day}"
+        return None
+
+    def is_junk(fn, p_str):
+        fl = fn.lower()
+        ext = Path(fn).suffix.lower()
+        if fl in ('thumbs.db', '.picasa.ini', 'picasa.ini', '.ds_store', 'desktop.ini') or fl.startswith('desktop (') or fn.startswith('._'):
+            return True
+        if ext in ('.lnk', '.wbk') or fn.startswith('~$'):
+            return True
+        if 'cbp formi-94 - avast yahoo image search results_files' in p_str.lower() and ext == '.jpg' and fl.startswith('th'):
+            return True
+        return False
+
+    canonical_targets = {}
+    to_purge_junk = []
+    to_purge_dups = []
+    collisions_preserved = []
+    to_move_unique = []
+    special_mny = []
+    total_files_scanned = 0
+    total_bytes_scanned = 0
+
+    nested_docs = target_dir / target_dir.name
+
+    # Step A: Baseline from nested directory if exists
+    if nested_docs.exists() and nested_docs.is_dir():
+        for r, dirs, files in os.walk(nested_docs):
+            for fn in files:
+                if fn.startswith('.'):
+                    continue
+                fp = Path(r) / fn
+                try:
+                    sz = fp.stat().st_size
+                    total_files_scanned += 1
+                    total_bytes_scanned += sz
+                    if is_junk(fn, r):
+                        to_purge_junk.append((fp, sz))
+                        continue
+                    if fp.suffix.lower() in ('.mny', '.mbf'):
+                        special_mny.append((fp, sz))
+                        continue
+                    rel = fp.relative_to(nested_docs)
+                    fh = get_hash(fp)
+                    canonical_targets[rel] = {
+                        'src': fp, 'sz': sz, 'hash': fh,
+                        'origin': 'nested_baseline', 'mtime': fp.stat().st_mtime
+                    }
+                except Exception:
+                    pass
+
+    # Step B: Loose root files
+    for lf in loose_root_files:
+        try:
+            sz = lf.stat().st_size
+            total_files_scanned += 1
+            total_bytes_scanned += sz
+            if is_junk(lf.name, str(lf)):
+                to_purge_junk.append((lf, sz))
+                continue
+            if lf.suffix.lower() in ('.mny', '.mbf'):
+                special_mny.append((lf, sz))
+                continue
+            rel = Path(lf.name)
+            fh = get_hash(lf)
+            if rel in canonical_targets:
+                existing = canonical_targets[rel]
+                if existing['hash'] == fh:
+                    to_purge_dups.append((lf, sz, rel, existing['origin']))
+                else:
+                    dt = datetime.date.fromtimestamp(lf.stat().st_mtime).isoformat()
+                    rev_rel = rel.parent / f"{rel.stem} (root_{dt}){rel.suffix}"
+                    collisions_preserved.append((lf, sz, rel, rev_rel, 'root'))
+                    canonical_targets[rev_rel] = {
+                        'src': lf, 'sz': sz, 'hash': fh,
+                        'origin': 'root', 'mtime': lf.stat().st_mtime
+                    }
+            else:
+                canonical_targets[rel] = {
+                    'src': lf, 'sz': sz, 'hash': fh,
+                    'origin': 'root', 'mtime': lf.stat().st_mtime
+                }
+        except Exception:
+            pass
+
+    # Step C: Walk each snapshot folder
+    for sd in snapshot_dirs:
+        if sd == nested_docs:
+            continue
+        s_date = parse_snapshot_date(sd.name)
+        for r, dirs, files in os.walk(sd):
+            for fn in files:
+                if fn.startswith('.'):
+                    continue
+                fp = Path(r) / fn
+                try:
+                    sz = fp.stat().st_size
+                    total_files_scanned += 1
+                    total_bytes_scanned += sz
+                    if is_junk(fn, r):
+                        to_purge_junk.append((fp, sz))
+                        continue
+                    if fp.suffix.lower() in ('.mny', '.mbf'):
+                        special_mny.append((fp, sz))
+                        continue
+
+                    if sd.name == 'FAMILIES DOCUMENTS':
+                        rel = Path('Family Scans & IDs') / fp.relative_to(sd)
+                    elif sd.name == 'Resume Milena':
+                        rel = Path(fn)
+                    else:
+                        rel = fp.relative_to(sd)
+                        if rel.parts and rel.parts[0].lower() in ('docs', 'documents'):
+                            rel = Path(*rel.parts[1:]) if len(rel.parts) > 1 else Path(fn)
+
+                    fh = get_hash(fp)
+
+                    if rel in canonical_targets:
+                        existing = canonical_targets[rel]
+                        if existing['hash'] == fh:
+                            to_purge_dups.append((fp, sz, rel, existing['origin']))
+                        else:
+                            tag = s_date if s_date else sd.name.replace(' ', '_')
+                            rev_rel = rel.parent / f"{rel.stem} ({tag}){rel.suffix}"
+                            if rev_rel in canonical_targets:
+                                if canonical_targets[rev_rel]['hash'] == fh:
+                                    to_purge_dups.append((fp, sz, rev_rel, canonical_targets[rev_rel]['origin']))
+                                    continue
+                                else:
+                                    rev_rel = rel.parent / f"{rel.stem} ({tag}_{len(canonical_targets)}){rel.suffix}"
+                            collisions_preserved.append((fp, sz, rel, rev_rel, sd.name))
+                            canonical_targets[rev_rel] = {
+                                'src': fp, 'sz': sz, 'hash': fh,
+                                'origin': sd.name, 'mtime': fp.stat().st_mtime
+                            }
+                    else:
+                        canonical_targets[rel] = {
+                            'src': fp, 'sz': sz, 'hash': fh,
+                            'origin': sd.name, 'mtime': fp.stat().st_mtime
+                        }
+                        to_move_unique.append((fp, sz, rel, sd.name))
+                except Exception:
+                    pass
+
+    kept_bytes = sum(x['sz'] for x in canonical_targets.values())
+    dup_bytes = sum(x[1] for x in to_purge_dups)
+    junk_bytes = sum(x[1] for x in to_purge_junk)
+
+    ms_money_dest = Path('/Volumes/LaCie/Storage/Priority 2/Data/Legacy/Windows/MS-Money')
+    has_ms_money_repo = ms_money_dest.exists() and ms_money_dest.is_dir()
+
+    print("\n" + "=" * 80)
+    print("  CONSOLIDATION & DEDUPLICATION DRY-RUN SUMMARY")
+    print("=" * 80)
+    print(f"  • Source Repository:            {target_dir}")
+    print(f"  • Total Files Processed:        {total_files_scanned:,} ({format_size(total_bytes_scanned)})")
+    print("-" * 80)
+    print(f"  Plan Actions:")
+    print(f"  • Canonical Files to Keep:      {len(canonical_targets):,} files ({format_size(kept_bytes)})")
+    print(f"  • Exact Duplicates to Reclaim:  {len(to_purge_dups):,} files ({format_size(dup_bytes)})")
+    print(f"  • Collisions Preserved (diff):  {len(collisions_preserved):,} files (dated revision suffix applied)")
+    print(f"  • Junk & Cache Files to Purge:  {len(to_purge_junk):,} files ({format_size(junk_bytes)}) (.lnk, .wbk, Thumbs.db)")
+    if special_mny:
+        dest_mny_label = f" -> '{ms_money_dest}'" if has_ms_money_repo else " (keep in target)"
+        print(f"  • MS Money Database Files:      {len(special_mny)} file(s){dest_mny_label}")
+    print(f"  • Empty Snapshots to Prune:     {len(snapshot_dirs)} folders")
+    print("=" * 80)
+
+    while True:
+        prompt_opts = "Select action: [y] Execute consolidation, [v] View collision details, [n] Cancel: "
+        user_c = input(prompt_opts).strip().lower()
+        if user_c == 'n':
+            print("\nConsolidation cancelled.")
+            return False
+        elif user_c == 'v':
+            print("\n" + "-" * 80)
+            print(f"COLLISION & REVISION DETAILS ({len(collisions_preserved)} files):")
+            print("-" * 80)
+            for c_src, c_sz, c_orig, c_new, c_origin_lbl in collisions_preserved:
+                print(f"  • [{c_origin_lbl}] '{c_orig}' ({format_size(c_sz)})")
+                print(f"     ↳ Saved as: '{c_new}'")
+            if to_purge_dups:
+                print("\n" + "-" * 80)
+                print(f"EXACT DUPLICATES TO RECLAIM ({len(to_purge_dups)} files):")
+                print("-" * 80)
+                for d_src, d_sz, d_rel, d_orig in to_purge_dups[:20]:
+                    print(f"  • '{d_src.name}' ({format_size(d_sz)}) in [{d_src.parent.name}] == identical copy in [{d_orig}]")
+                if len(to_purge_dups) > 20:
+                    print(f"    ↳ (+ {len(to_purge_dups) - 20} more duplicates)")
+            print("-" * 80 + "\n")
+        elif user_c in ('y', 'yes'):
+            break
+
+    print("\nExecuting consolidation and folding...")
+    batch_id = f"fold_{uuid.uuid4().hex[:8]}"
+    now_iso = datetime.datetime.now().isoformat()
+
+    conn = get_db_connection(db_path) if os.path.exists(db_path) else None
+    cur = conn.cursor() if conn else None
+    if cur:
+        ensure_curation_events_table(cur)
+
+    # 1. Purge junk
+    purged_junk_cnt = 0
+    for j_fp, j_sz in to_purge_junk:
+        try:
+            j_fp.unlink()
+            purged_junk_cnt += 1
+        except Exception:
+            pass
+
+    # 2. Move special MS Money files
+    if special_mny and has_ms_money_repo:
+        for m_fp, m_sz in special_mny:
+            try:
+                dest_mny = ms_money_dest / m_fp.name
+                if dest_mny.exists():
+                    dest_mny = ms_money_dest / f"{m_fp.stem} (from_Documents_{uuid.uuid4().hex[:4]}){m_fp.suffix}"
+                shutil.move(str(m_fp), str(dest_mny))
+                print(f"  ✓ Moved '{m_fp.name}' -> MS-Money repository ({dest_mny.name})")
+            except Exception as e:
+                print(f"  [Error] Moving {m_fp.name}: {e}")
+
+    # 3. Purge exact duplicates
+    purged_dup_cnt = 0
+    for d_fp, d_sz, _, _ in to_purge_dups:
+        try:
+            d_fp.unlink()
+            purged_dup_cnt += 1
+        except Exception:
+            pass
+
+    # 4. Move canonical files to their destination in target_dir
+    moved_cnt = 0
+    errors = []
+    # Sort items so that loose root files being renamed with tag are moved first, clearing slot
+    sorted_targets = sorted(canonical_targets.items(), key=lambda item: (item[1]['origin'] != 'root', str(item[0])))
+    for dest_rel, info in sorted_targets:
+        src_fp = info['src']
+        dest_fp = target_dir / dest_rel
+        try:
+            if src_fp.resolve() != dest_fp.resolve():
+                dest_fp.parent.mkdir(parents=True, exist_ok=True)
+                if dest_fp.exists():
+                    dest_fp = dest_fp.parent / f"{dest_fp.stem}_{uuid.uuid4().hex[:4]}{dest_fp.suffix}"
+                shutil.move(str(src_fp), str(dest_fp))
+                moved_cnt += 1
+        except Exception as e:
+            errors.append(f"{src_fp} -> {dest_fp}: {e}")
+
+    # 5. Prune empty folders bottom-up
+    pruned_folders = 0
+    for sd in snapshot_dirs:
+        if sd.exists():
+            for r, dirs, files in os.walk(sd, topdown=False):
+                rp = Path(r)
+                try:
+                    if not any(rp.iterdir()):
+                        rp.rmdir()
+                        pruned_folders += 1
+                except Exception:
+                    pass
+            try:
+                if sd.exists() and not any(sd.iterdir()):
+                    sd.rmdir()
+                    pruned_folders += 1
+            except Exception:
+                pass
+
+    if cur:
+        cur.execute("""
+            INSERT INTO curation_events (
+                batch_id, event_type, created_at, source_path, destination_path,
+                origin_folder, resource_type, resource_path, file_size_bytes, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            batch_id, "snapshot_fold_consolidate", now_iso,
+            str(target_dir), str(target_dir),
+            target_dir.name, "directory", str(target_dir),
+            kept_bytes,
+            json.dumps({
+                "canonical_kept": len(canonical_targets),
+                "duplicates_purged": purged_dup_cnt,
+                "junk_purged": purged_junk_cnt,
+                "collisions_preserved": len(collisions_preserved),
+                "empty_folders_pruned": pruned_folders
+            })
+        ))
+        conn.commit()
+        conn.close()
+
+    print("\n" + "=" * 80)
+    print(f"[Success] ✓ In-Place Folding & Consolidation Complete!")
+    print(f"  • Files in consolidated tree:   {len(canonical_targets):,} ({format_size(kept_bytes)})")
+    print(f"  • Reclaimed exact duplicates:   {purged_dup_cnt:,} ({format_size(dup_bytes)})")
+    print(f"  • Revisions preserved:          {len(collisions_preserved):,} files")
+    print(f"  • Junk & cache files purged:    {purged_junk_cnt:,} files")
+    print(f"  • Empty snapshot folders pruned:{pruned_folders:,}")
+    if errors:
+        print(f"  • Errors:                       {len(errors)}")
+        for err in errors[:5]:
+            print(f"    - {err}")
+    print("=" * 80)
+
+    if os.path.exists(db_path):
+        print(f"\nReconciling database index for '{target_dir.name}'...")
+        perform_directory_scan(target_dir, db_path, skip_hours=0.0)
+
+    return True
+
+
 def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, target_l1_dir: Path | None = None):
     """
     Sequential Curation Wizard:
@@ -5315,6 +5687,14 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 if nav_stack:
                     base_actions.append({"key": "u", "label": f"Drill up to '{nav_stack[-1][0].name}' (Return to parent level)"})
 
+                has_snapshot_children = any(
+                    re.search(r'(?:documents|\b(?:19\d\d|20\d\d|\d{8})\b|duplicates)', s.name.lower())
+                    for s in child_subdirs
+                ) or any(s.name.lower() in ('documents', 'my documents', 'nested documents') for s in child_subdirs)
+
+                if child_subdirs and (has_snapshot_children or sub_dir.name.lower() in ('documents', 'my documents')):
+                    base_actions.append({"key": "f", "label": f"Fold & consolidate snapshot folders in-place into '{sub_dir.name}' (Deduplicate & un-nest) (Recommended)"})
+
                 base_actions.extend([
                     {"key": "a", "label": f"Approve description & attach app ('{detected_app}') (Mark Verified ✓)"},
                     {"key": "e", "label": "Edit folder name, description or attached app, apply tags & verify"},
@@ -5341,6 +5721,9 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 if overlap:
                     top_key = "g"
                     sorted_actions = sorted(base_actions, key=lambda x: (x["key"] != "g", -w_usage.get(x["key"], 0)))
+                elif child_subdirs and (has_snapshot_children or sub_dir.name.lower() in ('documents', 'my documents')) and is_verified == 0:
+                    top_key = "f"
+                    sorted_actions = sorted(base_actions, key=lambda x: (x["key"] != "f", -w_usage.get(x["key"], 0)))
                 elif not ft_info.get("is_match", True):
                     top_key = "m"
                     sorted_actions = sorted(base_actions, key=lambda x: (x["key"] != "m", -w_usage.get(x["key"], 0)))
@@ -5692,6 +6075,22 @@ def curation_wizard_interactive(db_path: str, storage_root: Path | None = None, 
                 elif action == 'x' and files_count > 0:
                     did_extract = extract_file_types_interactive(sub_dir, db_path, stats, ft_info)
                     if did_extract:
+                        stats = analyze_folder_content(sub_dir)
+                        ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], curr_parent.name, tier_name)
+                        if not existing_app:
+                            detected_app = ft_info.get("app_needed")
+                        if not existing_desc:
+                            suggested_desc = suggest_folder_description(sub_dir.name, curr_parent.name, tier_name, stats, ft_info)
+                        size_str = format_size(stats["total_bytes"])
+                        files_count = stats["total_files"]
+                        date_range = f"{stats['earliest_date']} → {stats['latest_date']}" if stats["earliest_date"] else "Unknown dates"
+                        top_exts = ft_info["file_types_formatted"]
+                        samples = ", ".join(stats["sample_files"][:3]) if stats["sample_files"] else "None"
+                        child_subdirs = [s for s in sorted(sub_dir.iterdir()) if s.is_dir() and not s.name.startswith('.')] if sub_dir.exists() and sub_dir.is_dir() else []
+                    continue
+                elif action == 'f' and child_subdirs:
+                    did_fold = fold_snapshot_folders_interactive(sub_dir, db_path)
+                    if did_fold:
                         stats = analyze_folder_content(sub_dir)
                         ft_info = identify_folder_filetypes_and_apps(db_path, stats["ext_counts"], curr_parent.name, tier_name)
                         if not existing_app:
@@ -6943,12 +7342,28 @@ def prune_missing_records(db_path: str):
     print("=" * 65)
 
 def migrate_non_media_interactive(db_path: str):
-    """Interactively segregates non-media files or extracts specific file types while preserving folder structure."""
-    print("\n--- FILE SEGREGATION & EXTRACTION ---")
-    print("  1. Extract specific file types (.doc, .pdf, code, etc.) into subfolder (Preserve folder structure)")
-    print("  2. Segregate non-media files from media folder (Keep media, move docs/others)")
-    seg_mode = input("Select mode (1-2) [Default: 1]: ").strip()
+    """Interactively folds snapshots, segregates non-media files, or extracts specific file types while preserving folder structure."""
+    print("\n--- FILE CONSOLIDATION, SEGREGATION & EXTRACTION ---")
+    print("  1. Fold & consolidate historical snapshot folders in-place (Deduplicate & un-nest) (Recommended)")
+    print("  2. Extract specific file types (.doc, .pdf, code, etc.) into subfolder (Preserve folder structure)")
+    print("  3. Segregate non-media files from media folder (Keep media, move docs/others)")
+    print("  4. Return to menu")
+    seg_mode = input("Select mode (1-4) [Default: 1]: ").strip()
+    if seg_mode == "4":
+        return
     if seg_mode == "1" or not seg_mode:
+        last_dir = get_app_setting(db_path, "last_scanned_dir")
+        p1_doc = Path("/Volumes/LaCie/Storage/Priority 1/Documents")
+        default_dir = str(p1_doc) if p1_doc.exists() else (last_dir if (last_dir and os.path.exists(last_dir)) else "")
+        p_msg = f"Enter folder to fold and consolidate [Default: {default_dir}]: " if default_dir else "Enter folder to fold and consolidate: "
+        s_in = input(p_msg).strip().strip('"').strip("'")
+        s_path = s_in if s_in else default_dir
+        if not s_path or not os.path.isdir(s_path):
+            print(f"\n[Error] Invalid directory '{s_path}'.")
+            return
+        fold_snapshot_folders_interactive(Path(s_path), db_path)
+        return
+    elif seg_mode == "2":
         last_dir = get_app_setting(db_path, "last_scanned_dir")
         p_msg = f"Enter folder to extract from [Default: {last_dir}]: " if (last_dir and os.path.exists(last_dir)) else "Enter folder to extract from: "
         s_in = input(p_msg).strip().strip('"').strip("'")
@@ -7558,7 +7973,7 @@ def main():
             {"key": "7", "label": "List all active tags (Directory & File)"},
             {"key": "8", "label": "Tag & sync folders (Priority Tiers, Finder Colors & DB)"},
             {"key": "9", "label": "Search files by tag (Finder & Manual)"},
-            {"key": "10", "label": "Extract & segregate file types / non-media files (Preserve folder structure)"},
+            {"key": "10", "label": "Consolidate snapshots / Extract file types & non-media files"},
             {"key": "11", "label": "Detect & clean duplicate files (Interactive duplicate resolver)"},
             {"key": "12", "label": "View Curation & Verification Report (Approved vs Unapproved folders)"},
             {"key": "13", "label": "Exit"}
