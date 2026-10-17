@@ -89,12 +89,51 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS applied_rule_folders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL,
+            device_name TEXT NOT NULL,
+            folder_path TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            UNIQUE(rule_id, device_name, folder_path)
+        )
+    """)
+
+    cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_storage_rules_path ON storage_rules(path_pattern);
     """)
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_storage_rules_device ON storage_rules(device_pattern);
     """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_applied_rule_id ON applied_rule_folders(rule_id);
+    """)
     conn.commit()
+
+
+def record_applied_rule_folder(conn: sqlite3.Connection, rule_id: int, device_name: str, folder_path: str) -> None:
+    """Records that a rule was applied to a specific device/folder."""
+    if not rule_id:
+        return
+    now_str = datetime.datetime.now().isoformat()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO applied_rule_folders (rule_id, device_name, folder_path, applied_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(rule_id, device_name, folder_path) DO UPDATE SET applied_at = excluded.applied_at
+    """, (rule_id, device_name, folder_path, now_str))
+    conn.commit()
+
+
+def get_applied_folders_for_rule(conn: sqlite3.Connection, rule_id: int) -> List[Tuple[str, str]]:
+    """Returns list of (device_name, folder_path) tuples where this rule has been applied."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT device_name, folder_path FROM applied_rule_folders
+        WHERE rule_id = ?
+        ORDER BY device_name, folder_path
+    """, (rule_id,))
+    return [(r[0], r[1]) for r in cur.fetchall()]
 
 
 def save_storage_rule(conn: sqlite3.Connection, rule: StorageRule) -> int:

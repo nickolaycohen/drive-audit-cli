@@ -31,6 +31,8 @@ from storage_rules import (
     save_storage_rule,
     load_all_storage_rules,
     match_storage_rule,
+    record_applied_rule_folder,
+    get_applied_folders_for_rule,
     get_shared_db_path,
     get_tier_color
 )
@@ -284,41 +286,60 @@ def format_size_human(size_val: Any) -> str:
         return str(size_val or "0 B")
 
 
-def format_existing_rules_table(rules: List[StorageRule]) -> str:
-    """Formats active storage rules into a clean terminal table."""
+def format_existing_rules_table(rules: List[StorageRule], conn: Optional[sqlite3.Connection] = None) -> str:
+    """Formats active storage rules into a clean terminal table showing DEVICE / [folder]."""
     if not rules:
         return "  (No Storage Rules defined yet. New rules created below will be saved to the database.)"
     lines = []
-    lines.append(f"  {'#':<3} | {'Rule Name':<30} | {'Destination / Action':<28} | {'Scope':<15} | {'Path Match Pattern'}")
-    lines.append("  " + "-" * 118)
+    lines.append(f"  {'#':<3} | {'Rule Name':<30} | {'Destination / Action':<26} | {'Applied On (DEVICE / [folder])':<40} | {'Pattern'}")
+    lines.append("  " + "-" * 125)
     for idx, r in enumerate(rules, 1):
         if r.action == "STAGE_DISCARDABLE" or "temporary" in r.category.lower():
-            dest_str = "P4 🟠 (Temp Discardable)"
+            dest_str = "P4 🟠 (Temp Discard)"
         elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or r.target_tier.lower() in ("discard", "purge"):
             dest_str = "🚫 DISCARD / IGNORE"
         else:
             dest_str = f"{r.target_tier.upper()} ({r.target_relative_path or '/'})"
-        lines.append(f"  {idx:<3} | {r.name[:30]:<30} | {dest_str[:28]:<28} | {r.device_pattern[:15]:<15} | {r.path_pattern}")
+
+        # Check if we have recorded applied folders
+        applied_str = ""
+        if conn and r.rule_id:
+            applied = get_applied_folders_for_rule(conn, r.rule_id)
+            if applied:
+                dev, p = applied[0]
+                clean_p = p if p.startswith('/') else f"/{p}"
+                suffix = f" (+{len(applied)-1} more)" if len(applied) > 1 else ""
+                applied_str = f"{dev} {clean_p}{suffix}"
+
+        if not applied_str:
+            dev = r.device_pattern if r.device_pattern != "ALL" else "[ALL Devices]"
+            clean_p = r.path_pattern.rstrip("*") or "/"
+            applied_str = f"{dev} {clean_p}"
+
+        lines.append(f"  {idx:<3} | {r.name[:30]:<30} | {dest_str[:26]:<26} | {applied_str[:40]:<40} | {r.path_pattern}")
     return "\n".join(lines)
 
 
 def display_all_assigned_rules(conn: sqlite3.Connection):
-    """Displays a comprehensive, beautifully formatted report of all assigned Storage Rules."""
+    """
+    Displays a comprehensive, beautifully formatted report of all assigned Storage Rules,
+    including the specific DEVICE/[folder] paths each rule has been applied to.
+    """
     rules = load_all_storage_rules(conn)
-    print("\n" + "=" * 140)
-    print(f"{f'ALL ASSIGNED STORAGE RULES ({len(rules)} Rules in Database)':^140}")
-    print("=" * 140)
+    print("\n" + "=" * 165)
+    print(f"{f'ALL ASSIGNED STORAGE RULES ({len(rules)} Rules in Database)':^165}")
+    print("=" * 165)
 
     if not rules:
         print("\n  (No Storage Rules have been created yet. Rules will appear here as you triage folders.)\n")
-        print("=" * 140)
+        print("=" * 165)
         return
 
     tier_counts = {"priority 1": 0, "priority 2": 0, "priority 3": 0, "priority 4": 0, "discard": 0}
     color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
 
-    print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Scope':<18} | {'Target Destination':<32} | {'Path Match Pattern'}")
-    print("  " + "-" * 136)
+    print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Applied On (DEVICE / [folder])':<44} | {'Local Target Destination'}")
+    print("  " + "-" * 161)
 
     for idx, r in enumerate(rules, 1):
         t_key = r.target_tier.lower()
@@ -335,15 +356,37 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
         else:
             tier_disp = f"{r.target_tier.upper()} {icon}"
 
+        # Fetch actual recorded folders where this rule has been applied
+        applied = get_applied_folders_for_rule(conn, r.rule_id)
+        extra_applied = []
+        if applied:
+            first_dev, first_p = applied[0]
+            clean_p = first_p if first_p.startswith('/') else f"/{first_p}"
+            if len(applied) == 1:
+                applied_str = f"{first_dev} {clean_p}"
+            else:
+                applied_str = f"{first_dev} {clean_p} (+{len(applied)-1} folders)"
+                extra_applied = applied[1:]
+        else:
+            dev = r.device_pattern if r.device_pattern != "ALL" else "[ALL Devices]"
+            clean_p = r.path_pattern.rstrip("*") or "/"
+            applied_str = f"{dev} {clean_p}"
+
         dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
-        if len(dest_disp) > 30:
-            dest_disp = "..." + dest_disp[-27:]
+        if dest_disp.startswith("Temporary/"):
+            dest_disp = f"Priority 4/{dest_disp}"
+        if len(dest_disp) > 42:
+            dest_disp = "..." + dest_disp[-39:]
 
-        print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.device_pattern[:18]:<18} | {dest_disp:<32} | {r.path_pattern}")
+        print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {applied_str[:44]:<44} | {dest_disp}")
+        if extra_applied:
+            extra_strs = [f"{d} {p}" for d, p in extra_applied[:4]]
+            more_suffix = f" ... (+{len(extra_applied)-4} more)" if len(extra_applied) > 4 else ""
+            print(f"      ↳ Also applied to: {', '.join(extra_strs)}{more_suffix}")
 
-    print("=" * 140)
+    print("=" * 165)
     print(f"  📊 Summary: Total: {len(rules)} Rules | Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
-    print("=" * 140)
+    print("=" * 165)
 
 
 def prompt_user_for_storage_rule(
@@ -551,6 +594,7 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
+            record_applied_rule_folder(conn, rule_id, device_name, norm_path)
             print(f"\n[Success] ✓ Saved Storage Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier.upper()} {tier_icon}")
             return rule
 
@@ -572,6 +616,7 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
+            record_applied_rule_folder(conn, rule_id, device_name, norm_path)
             print(f"\n[Success] 🟠 Rule #{rule_id} Created: Routed to Priority 4 (Temporary - Discardable - Old Backups)")
             print(f"  📍 Target Depot: /Volumes/LaCie/Storage/Priority 4/{p4_rel}/")
             print(f"  ✓ Safely quarantined away from active Priorities 1, 2, and 3.")
@@ -607,6 +652,7 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
+            record_applied_rule_folder(conn, rule_id, device_name, norm_path)
             print(f"\n[Success] 🚫 Rule #{rule_id} Created: Complete Ignore ({pat_val})")
             return rule
 
@@ -653,12 +699,13 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
+            record_applied_rule_folder(conn, rule_id, device_name, norm_path)
             print(f"\n[Success] ✓ Saved Custom Storage Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier}")
             return rule
 
         if choice == "5" and rules:
             print("\n--- MATCH WITH EXISTING STORAGE RULE ---")
-            print(format_existing_rules_table(rules))
+            print(format_existing_rules_table(rules, conn=conn))
             sel = input(f"\nSelect Rule Number (1-{len(rules)}) [or 'c' to cancel]: ").strip()
             if sel.isdigit() and 1 <= int(sel) <= len(rules):
                 selected_rule = rules[int(sel) - 1]
@@ -677,6 +724,7 @@ def prompt_user_for_storage_rule(
                 )
                 rule_id = save_storage_rule(conn, rule)
                 rule.rule_id = rule_id
+                record_applied_rule_folder(conn, rule_id, device_name, norm_path)
                 print(f"\n[Success] ✓ Applied Rule #{rule_id} (based on '{selected_rule.name}') ➔ {rule.target_tier}")
                 return rule
 
@@ -846,7 +894,10 @@ def run_device_backup_wizard():
             # Check if this folder matches an existing storage rule
             matched_rule = match_storage_rule(dev_name, current_path, rules=rules)
             if matched_rule:
-                if matched_rule.action in ("DISCARD_IGNORE", "PURGE_SKIP") or matched_rule.target_tier.lower() in ("discard", "purge"):
+                record_applied_rule_folder(conn, matched_rule.rule_id, dev_name, current_path)
+                if matched_rule.action == "STAGE_DISCARDABLE":
+                    print(f"  [🟠 Temp Discardable] '{current_path}' (Rule: '{matched_rule.name}')")
+                elif matched_rule.action in ("DISCARD_IGNORE", "PURGE_SKIP") or matched_rule.target_tier.lower() in ("discard", "purge"):
                     print(f"  [🚫 Discarded / Ignored] '{current_path}' (Rule: '{matched_rule.name}')")
                 else:
                     print(f"  [✓ Rule Matched] '{current_path}' ➔ '{matched_rule.name}' ({matched_rule.target_tier.upper()})")
