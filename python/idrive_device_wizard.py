@@ -302,6 +302,50 @@ def format_existing_rules_table(rules: List[StorageRule]) -> str:
     return "\n".join(lines)
 
 
+def display_all_assigned_rules(conn: sqlite3.Connection):
+    """Displays a comprehensive, beautifully formatted report of all assigned Storage Rules."""
+    rules = load_all_storage_rules(conn)
+    print("\n" + "=" * 140)
+    print(f"{f'ALL ASSIGNED STORAGE RULES ({len(rules)} Rules in Database)':^140}")
+    print("=" * 140)
+
+    if not rules:
+        print("\n  (No Storage Rules have been created yet. Rules will appear here as you triage folders.)\n")
+        print("=" * 140)
+        return
+
+    tier_counts = {"priority 1": 0, "priority 2": 0, "priority 3": 0, "priority 4": 0, "discard": 0}
+    color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
+
+    print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Scope':<18} | {'Target Destination':<32} | {'Path Match Pattern'}")
+    print("  " + "-" * 136)
+
+    for idx, r in enumerate(rules, 1):
+        t_key = r.target_tier.lower()
+        if t_key in tier_counts:
+            tier_counts[t_key] += 1
+        elif "discard" in t_key or "purge" in t_key:
+            tier_counts["discard"] += 1
+
+        icon = color_icons.get(r.finder_color, "⚪")
+        if r.action == "STAGE_DISCARDABLE":
+            tier_disp = "P4 🟠 (Temp Discard)"
+        elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or t_key in ("discard", "purge"):
+            tier_disp = "DISCARD 🚫 (Ignored)"
+        else:
+            tier_disp = f"{r.target_tier.upper()} {icon}"
+
+        dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
+        if len(dest_disp) > 30:
+            dest_disp = "..." + dest_disp[-27:]
+
+        print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.device_pattern[:18]:<18} | {dest_disp:<32} | {r.path_pattern}")
+
+    print("=" * 140)
+    print(f"  📊 Summary: Total: {len(rules)} Rules | Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
+    print("=" * 140)
+
+
 def prompt_user_for_storage_rule(
     device_name: str,
     folder_path: str,
@@ -449,6 +493,7 @@ def prompt_user_for_storage_rule(
             print(f"  [5] Match with an Existing Storage Rule (Pick from #1 - #{len(rules)})")
         print(f"  [6] Drill down into subfolders (Classify contents individually)")
         print(f"  [7] Skip this folder for now (Decide later)")
+        print(f"  [v] View all assigned Storage Rules ({len(rules)} active rules) 📋")
         print(f"  [q] Save progress & Exit wizard (Restartable anytime)")
 
         choice = input("\nChoice (Default: 1): ").strip().lower()
@@ -457,6 +502,32 @@ def prompt_user_for_storage_rule(
 
         if choice == "q":
             return None
+
+        if choice == "v":
+            display_all_assigned_rules(conn)
+            input("\nPress [Enter] to return to folder triage...")
+            rules = load_all_storage_rules(conn)
+            print("\n" + "=" * 120)
+            print(f"  ☁️  UNCLASSIFIED FOLDER FOUND: '{folder_name}'")
+            print("=" * 120)
+            print(f"  • Device:                 {device_name}")
+            print(f"  • Remote Path:            {norm_path}")
+            print(f"  • Size / Direct Contents: {format_size_human(total_bytes)} ({total_files} files, {len(subdirs)} subfolders)")
+            print(f"  • Top File Types:         {top_exts}")
+            print(f"  • Sample Files:           {sample_str}")
+            print("-" * 120)
+            print(f"  📋 Active Storage Rules in Database ({len(rules)} established):")
+            print(format_existing_rules_table(rules[:5]))
+            if len(rules) > 5:
+                print(f"     (... and {len(rules) - 5} more rules in database)")
+            print("-" * 120)
+            print("  💡 Recommended Classification & Storage Plan:")
+            print(f"     • Classification:      {suggested_category}")
+            print(f"     • Storage Tier:        {suggested_tier.upper()} {tier_icon}")
+            print(f"     • Target Destination:  {suggested_dest}")
+            print(f"     • Operational Meaning: {suggested_impact}")
+            print("-" * 120)
+            continue
 
         if choice == "6":
             return "DRILL"
@@ -831,6 +902,13 @@ def run_device_backup_wizard():
 
 
 if __name__ == "__main__":
+    if any(arg in sys.argv for arg in ("--rules", "-v", "rules", "--list-rules")):
+        conn = sqlite3.connect(get_shared_db_path())
+        init_storage_rules_tables(conn)
+        display_all_assigned_rules(conn)
+        conn.close()
+        sys.exit(0)
+
     try:
         run_device_backup_wizard()
     except KeyboardInterrupt:
