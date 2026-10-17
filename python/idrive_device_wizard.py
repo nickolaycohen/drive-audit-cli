@@ -289,14 +289,16 @@ def format_existing_rules_table(rules: List[StorageRule]) -> str:
     if not rules:
         return "  (No Storage Rules defined yet. New rules created below will be saved to the database.)"
     lines = []
-    lines.append(f"  {'#':<3} | {'Rule Name':<28} | {'Destination / Action':<28} | {'Scope':<15} | {'Path Match Pattern'}")
-    lines.append("  " + "-" * 115)
+    lines.append(f"  {'#':<3} | {'Rule Name':<30} | {'Destination / Action':<28} | {'Scope':<15} | {'Path Match Pattern'}")
+    lines.append("  " + "-" * 118)
     for idx, r in enumerate(rules, 1):
-        if r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or r.target_tier.lower() in ("discard", "purge"):
+        if r.action == "STAGE_DISCARDABLE" or "temporary" in r.category.lower():
+            dest_str = "P4 🟠 (Temp Discardable)"
+        elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or r.target_tier.lower() in ("discard", "purge"):
             dest_str = "🚫 DISCARD / IGNORE"
         else:
             dest_str = f"{r.target_tier.upper()} ({r.target_relative_path or '/'})"
-        lines.append(f"  {idx:<3} | {r.name[:28]:<28} | {dest_str[:28]:<28} | {r.device_pattern[:15]:<15} | {r.path_pattern}")
+        lines.append(f"  {idx:<3} | {r.name[:30]:<30} | {dest_str[:28]:<28} | {r.device_pattern[:15]:<15} | {r.path_pattern}")
     return "\n".join(lines)
 
 
@@ -355,6 +357,7 @@ def prompt_user_for_storage_rule(
         suggested_action = "SURGICAL_RESTORE"
         suggested_category = "Vital Legal, Tax & Family Documents"
         suggested_color = "Red"
+        suggested_rel_path = "Family & IDs"
         suggested_dest = "/Volumes/LaCie/Storage/Priority 1/Family & IDs/"
         suggested_impact = "Will be restored directly into high-availability Priority 1 storage"
     elif any(k in path_l for k in ["quicken", ".qdf", ".qel"]):
@@ -362,6 +365,7 @@ def prompt_user_for_storage_rule(
         suggested_action = "SURGICAL_RESTORE"
         suggested_category = "Active Financial Databases (Quicken)"
         suggested_color = "Red"
+        suggested_rel_path = "Data"
         suggested_dest = "/Volumes/LaCie/Storage/Priority 1/Data/"
         suggested_impact = "Will be restored directly into high-availability Priority 1 storage"
     elif any(k in path_l for k in ["ms-money", "ms money", ".mny", "legacy", "windows"]):
@@ -369,20 +373,23 @@ def prompt_user_for_storage_rule(
         suggested_action = "SURGICAL_RESTORE"
         suggested_category = "Legacy Windows Data (MS Money)"
         suggested_color = "Blue"
+        suggested_rel_path = "Data/Legacy/Windows/MS-Money"
         suggested_dest = "/Volumes/LaCie/Storage/Priority 2/Data/Legacy/Windows/MS-Money/"
         suggested_impact = "Will be preserved in external Priority 2 reference storage with iDrive backup"
-    elif any(k in path_l for k in ["cache", "thumbs.db", "desktop.ini", "imgcache", "tmp", "trash", "temp", "logs", "crash"]):
-        suggested_tier = "discard"
-        suggested_action = "DISCARD_IGNORE"
-        suggested_category = "Disposable System Cache / OS Noise"
+    elif any(k in path_l for k in ["cache", "thumbs.db", "desktop.ini", "imgcache", "tmp", "trash", "temp", "logs", "crash"]) or any(k in path_l for k in ["old backup", "backup-restore", "copies from", "snapshot", "documents 0", "documents 1", "documents duplicates"]):
+        suggested_tier = "priority 4"
+        suggested_action = "STAGE_DISCARDABLE"
+        suggested_category = "Temporary / Discardable / Old Backups"
         suggested_color = "Orange"
-        suggested_dest = "Do NOT store in system (Skip & Purge)"
-        suggested_impact = "Will NOT be downloaded or stored locally (Noise skipped entirely)"
+        suggested_rel_path = f"Temporary/Discardable/Old Backups/{device_name}/{folder_name}"
+        suggested_dest = f"/Volumes/LaCie/Storage/Priority 4/{suggested_rel_path}/"
+        suggested_impact = f"Quarantined in Priority 4 temporary staging ({device_name}/{folder_name}) — keeps active priorities clean, safe to purge later"
     elif any(k in path_l for k in ["photo", "pictures", "camera", "dcim", "videos", "media"]):
         suggested_tier = "priority 4"
         suggested_action = "MEDIA_INTAKE"
         suggested_category = "Raw Photos & Home Videos"
         suggested_color = "Yellow"
+        suggested_rel_path = "Pictures/Intake"
         suggested_dest = "/Volumes/LaCie/Storage/Priority 4/Pictures/Intake/"
         suggested_impact = "Will be routed to Media Organizer Pipeline for Apple Photos curation"
     elif any(k in path_l for k in ["archive", "backup", "199", "200", "201", "old-"]):
@@ -390,6 +397,7 @@ def prompt_user_for_storage_rule(
         suggested_action = "ARCHIVE_COLD"
         suggested_category = "Historical Documents & Archives (Pre-2015)"
         suggested_color = "Purple"
+        suggested_rel_path = "Archives"
         suggested_dest = "/Volumes/LaCie/Storage/Priority 3/Archives/"
         suggested_impact = "Will be archived in external Priority 3 cold storage"
     else:
@@ -397,6 +405,7 @@ def prompt_user_for_storage_rule(
         suggested_action = "SURGICAL_RESTORE"
         suggested_category = "Personal & Work Documents"
         suggested_color = "Blue"
+        suggested_rel_path = f"Documents/{folder_name}"
         suggested_dest = f"/Volumes/LaCie/Storage/Priority 2/Documents/{folder_name}/"
         suggested_impact = "Will be restored and organized in external Priority 2 reference storage"
 
@@ -433,12 +442,13 @@ def prompt_user_for_storage_rule(
     while True:
         print("\nSelect Action:")
         print(f"  [1] Accept Recommended Rule (Store in {suggested_tier.upper()} {tier_icon}) [Default]")
-        print(f"  [2] Mark as DISCARDABLE / IGNORE (Do not store in system) 🚫")
-        print(f"  [3] Custom Storage Rule (Specify tier, destination, and match pattern)")
+        print(f"  [2] Route to Priority 4 (Temporary - Discardable - Old Backups - {device_name} - {folder_name}) 🟠")
+        print(f"  [3] Complete Ignore / Skip (Never download from cloud) 🚫")
+        print(f"  [4] Custom Storage Rule (Specify tier, destination, and match pattern)")
         if rules:
-            print(f"  [4] Match with an Existing Storage Rule (Pick from #1 - #{len(rules)})")
-        print(f"  [5] Drill down into subfolders (Classify contents individually)")
-        print(f"  [6] Skip this folder for now (Decide later)")
+            print(f"  [5] Match with an Existing Storage Rule (Pick from #1 - #{len(rules)})")
+        print(f"  [6] Drill down into subfolders (Classify contents individually)")
+        print(f"  [7] Skip this folder for now (Decide later)")
         print(f"  [q] Save progress & Exit wizard (Restartable anytime)")
 
         choice = input("\nChoice (Default: 1): ").strip().lower()
@@ -448,10 +458,10 @@ def prompt_user_for_storage_rule(
         if choice == "q":
             return None
 
-        if choice == "5":
+        if choice == "6":
             return "DRILL"
 
-        if choice == "6":
+        if choice == "7":
             return "SKIP"
 
         if choice == "1":
@@ -463,7 +473,7 @@ def prompt_user_for_storage_rule(
                 category=suggested_category,
                 description=suggested_impact,
                 target_tier=suggested_tier,
-                target_relative_path=folder_name,
+                target_relative_path=suggested_rel_path,
                 finder_color=suggested_color,
                 action=suggested_action,
                 is_recursive=1
@@ -474,31 +484,50 @@ def prompt_user_for_storage_rule(
             return rule
 
         if choice == "2":
-            print(f"\n--- MARK AS DISCARDABLE / IGNORE ---")
+            # Priority 4 Temporary Discardable Old Backups quarantine depot
+            p4_rel = f"Temporary/Discardable/Old Backups/{device_name}/{folder_name}"
+            rule = StorageRule(
+                name=f"Discardable - {device_name} - {folder_name}",
+                device_pattern=device_name,
+                path_pattern=norm_path + "*",
+                ext_pattern="*",
+                category="Temporary / Discardable / Old Backups",
+                description=f"Quarantined under Priority 4/{p4_rel}",
+                target_tier="priority 4",
+                target_relative_path=p4_rel,
+                finder_color="Orange",
+                action="STAGE_DISCARDABLE",
+                is_recursive=1
+            )
+            rule_id = save_storage_rule(conn, rule)
+            rule.rule_id = rule_id
+            print(f"\n[Success] 🟠 Rule #{rule_id} Created: Routed to Priority 4 (Temporary - Discardable - Old Backups)")
+            print(f"  📍 Target Depot: /Volumes/LaCie/Storage/Priority 4/{p4_rel}/")
+            print(f"  ✓ Safely quarantined away from active Priorities 1, 2, and 3.")
+            return rule
+
+        if choice == "3":
+            print(f"\n--- COMPLETE IGNORE / SKIP ---")
             print(f"Folder: '{norm_path}'")
             print("Select Match Scope:")
             print(f"  [1] Device & Folder only: '{norm_path}*' on '{device_name}' (Default)")
             print(f"  [2] Universal across ALL devices: '*/{folder_name}*'")
-            print(f"  [3] Custom path pattern")
-            pat_choice = input("Scope [1-3] (Default: 1): ").strip()
+            pat_choice = input("Scope [1-2] (Default: 1): ").strip()
             
             if pat_choice == "2":
                 pat_val = f"*/{folder_name}*"
                 dev_scope = "ALL"
-            elif pat_choice == "3":
-                pat_val = input(f"Enter pattern [Default: {norm_path}*]: ").strip() or (norm_path + "*")
-                dev_scope = device_name
             else:
                 pat_val = norm_path + "*"
                 dev_scope = device_name
 
             rule = StorageRule(
-                name=f"Discard - {folder_name}",
+                name=f"Ignore - {folder_name}",
                 device_pattern=dev_scope,
                 path_pattern=pat_val,
                 ext_pattern="*",
-                category="Discarded / Ignored",
-                description="Marked as discardable — will not be stored in the system",
+                category="Ignored Cloud Files",
+                description="Ignored — will never be downloaded from the cloud",
                 target_tier="discard",
                 target_relative_path="",
                 finder_color="Orange",
@@ -507,11 +536,10 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
-            print(f"\n[Success] 🚫 Rule #{rule_id} Created: Marked as DISCARDABLE ({pat_val})")
-            print(f"  Neither this folder nor its subfolders will be stored in the system.")
+            print(f"\n[Success] 🚫 Rule #{rule_id} Created: Complete Ignore ({pat_val})")
             return rule
 
-        if choice == "3":
+        if choice == "4":
             print("\n--- DEFINE CUSTOM STORAGE RULE ---")
             r_name = input(f"Rule Name [{device_name} - {folder_name}]: ").strip() or f"{device_name} - {folder_name}"
             
@@ -522,20 +550,21 @@ def prompt_user_for_storage_rule(
             print("  [1] Priority 1 (Active Personal, Legal, Quicken) 🔴")
             print("  [2] Priority 2 (Systems, Profiles, Legacy Windows) 🔵")
             print("  [3] Priority 3 (Historical Records, Reference Archive) 🟣")
-            print("  [4] Priority 4 (Media Organizer Intake) 🟡")
-            print("  [5] Discard / Ignore (Do not store in system) 🚫")
+            print("  [4] Priority 4 (Media Intake / Temporary Quarantine) 🟡/🟠")
+            print("  [5] Complete Ignore (Never download) 🚫")
             t_choice = input("Select Tier (1-5) [Default: 2]: ").strip()
             
             tier_map = {
-                "1": ("priority 1", "SURGICAL_RESTORE", "Red"),
-                "2": ("priority 2", "SURGICAL_RESTORE", "Blue"),
-                "3": ("priority 3", "ARCHIVE_COLD", "Purple"),
-                "4": ("priority 4", "MEDIA_INTAKE", "Yellow"),
-                "5": ("discard", "DISCARD_IGNORE", "Orange")
+                "1": ("priority 1", "SURGICAL_RESTORE", "Red", f"Documents/{folder_name}"),
+                "2": ("priority 2", "SURGICAL_RESTORE", "Blue", f"Documents/{folder_name}"),
+                "3": ("priority 3", "ARCHIVE_COLD", "Purple", f"Archives/{folder_name}"),
+                "4": ("priority 4", "STAGE_DISCARDABLE", "Orange", f"Temporary/Discardable/Old Backups/{device_name}/{folder_name}"),
+                "5": ("discard", "DISCARD_IGNORE", "Orange", "")
             }
-            tier_val, act_val, col_val = tier_map.get(t_choice, ("priority 2", "SURGICAL_RESTORE", "Blue"))
+            tier_val, act_val, col_val, default_rel = tier_map.get(t_choice, ("priority 2", "SURGICAL_RESTORE", "Blue", f"Documents/{folder_name}"))
 
             cat_val = input(f"Category Description [{suggested_category}]: ").strip() or suggested_category
+            rel_val = input(f"Relative Destination Path [{default_rel}]: ").strip() or default_rel
             desc_val = input("Human Story / Context (Optional): ").strip()
             
             rule = StorageRule(
@@ -546,7 +575,7 @@ def prompt_user_for_storage_rule(
                 category=cat_val,
                 description=desc_val,
                 target_tier=tier_val,
-                target_relative_path=folder_name if tier_val != "discard" else "",
+                target_relative_path=rel_val,
                 finder_color=col_val,
                 action=act_val,
                 is_recursive=1
@@ -556,13 +585,12 @@ def prompt_user_for_storage_rule(
             print(f"\n[Success] ✓ Saved Custom Storage Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier}")
             return rule
 
-        if choice == "4" and rules:
+        if choice == "5" and rules:
             print("\n--- MATCH WITH EXISTING STORAGE RULE ---")
             print(format_existing_rules_table(rules))
             sel = input(f"\nSelect Rule Number (1-{len(rules)}) [or 'c' to cancel]: ").strip()
             if sel.isdigit() and 1 <= int(sel) <= len(rules):
                 selected_rule = rules[int(sel) - 1]
-                # Create a rule instance for this path matching the selected rule's policy
                 rule = StorageRule(
                     name=f"{selected_rule.name} ({folder_name})",
                     device_pattern=device_name,

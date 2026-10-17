@@ -241,17 +241,18 @@ def match_storage_rule(
     return None
 
 
-def get_tier_color(tier: str) -> str:
+def get_tier_color(tier: str, action: str = "") -> str:
     """Returns standard macOS Finder tag color for each Priority tier."""
     t = tier.lower().strip()
+    a = action.lower().strip()
     if "priority 1" in t or t == "p1":
         return "Red"
     elif "priority 2" in t or t == "p2":
         return "Blue"
     elif "priority 3" in t or t == "p3":
         return "Purple"
+    elif any(k in t for k in ["discard", "temporary", "temp", "purge", "skip", "trash"]) or "stage_discardable" in a or "discard" in a:
+        return "Orange"
     elif "priority 4" in t or t == "p4":
         return "Yellow"
-    elif any(k in t for k in ["purge", "skip", "discard", "ignore", "trash"]):
-        return "Orange"
     return "Gray"
