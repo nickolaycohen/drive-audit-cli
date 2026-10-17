@@ -335,15 +335,15 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     # =========================================================================
     # TABLE 1: STORAGE RULES LEDGER
     # =========================================================================
-    print("\n" + "=" * 165)
-    print(f"{f'TABLE 1: STORAGE RULES LEDGER ({len(rules)} Active Rules)':^165}")
-    print("=" * 165)
+    print("\n" + "=" * 190)
+    print(f"{f'TABLE 1: STORAGE RULES LEDGER ({len(rules)} Active Rules)':^190}")
+    print("=" * 190)
 
     if not rules:
         print("\n  (No Storage Rules have been created yet. Rules will appear here as you triage folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Category':<26} | {'Scope':<16} | {'Target Destination':<32} | {'Path Match Pattern'}")
-        print("  " + "-" * 161)
+        print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Category':<24} | {'Scope':<10} | {'Path Match Pattern':<20} | {'Target Destination'}")
+        print("  " + "-" * 186)
 
         for idx, r in enumerate(rules, 1):
             t_key = r.target_tier.lower()
@@ -362,27 +362,25 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
 
             dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
             if dest_disp.startswith("Temporary/"):
-                dest_disp = f"P4/{dest_disp}"
-            if len(dest_disp) > 30:
-                dest_disp = "..." + dest_disp[-27:]
+                dest_disp = f"Priority 4/{dest_disp}"
 
-            print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.category[:26]:<26} | {r.device_pattern[:16]:<16} | {dest_disp:<32} | {r.path_pattern}")
+            print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.category[:24]:<24} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {dest_disp}")
 
-    print("=" * 165)
+    print("=" * 190)
 
     # =========================================================================
     # TABLE 2: CLASSIFIED CLOUD RESOURCES (DEVICE / [FOLDER])
     # =========================================================================
     applied_resources = get_all_applied_resources(conn)
-    print("\n" + "=" * 165)
-    print(f"{f'TABLE 2: CLASSIFIED CLOUD RESOURCES ({len(applied_resources)} Folders Linked to Rules)':^165}")
-    print("=" * 165)
+    print("\n" + "=" * 190)
+    print(f"{f'TABLE 2: CLASSIFIED CLOUD RESOURCES ({len(applied_resources)} Folders Linked to Rules)':^190}")
+    print("=" * 190)
 
     if not applied_resources:
         print("\n  (No cloud folders have matched or been assigned to rules yet. Run the triage wizard to link folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Device Name':<22} | {'Remote Folder Path':<42} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<30} | {'Local Target Destination'}")
-        print("  " + "-" * 161)
+        print(f"  {'#':<3} | {'Device Name':<20} | {'Remote Folder Path':<30} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<30} | {'Local Target Destination'}")
+        print("  " + "-" * 186)
 
         for idx, res in enumerate(applied_resources, 1):
             icon = color_icons.get(res["finder_color"], "⚪")
@@ -402,15 +400,12 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
             elif dest_disp != "(Do Not Store / Cloud Ignored)":
                 dest_disp = f"/Volumes/LaCie/Storage/{res['target_tier'].title()}/{dest_disp}"
 
-            if len(dest_disp) > 36:
-                dest_disp = "..." + dest_disp[-33:]
+            print(f"  {idx:<3} | {res['device_name'][:20]:<20} | {res['folder_path'][:30]:<30} | {tier_disp:<22} | {res['rule_name'][:30]:<30} | {dest_disp}")
 
-            print(f"  {idx:<3} | {res['device_name']:<22} | {res['folder_path']:<42} | {tier_disp:<22} | {res['rule_name'][:30]:<30} | {dest_disp}")
-
-    print("=" * 165)
+    print("=" * 190)
     print(f"  📊 Summary: Total: {len(rules)} Rules Established across {len(applied_resources)} Classified Cloud Folders")
     print(f"     Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
-    print("=" * 165)
+    print("=" * 190)
 
     print("\nActions: [e] Edit/Rename Rules  |  [Enter] Return")
     act_c = input("Choice: ").strip().lower()
@@ -427,17 +422,17 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
 
     while True:
         rules = load_all_storage_rules(conn)
-        print("\n" + "=" * 135)
-        print(f"{f'✏️  STORAGE RULES MANAGER & EDITOR ({len(rules)} Active Rules)':^135}")
-        print("=" * 135)
+        print("\n" + "=" * 170)
+        print(f"{f'✏️  STORAGE RULES MANAGER & EDITOR ({len(rules)} Active Rules)':^170}")
+        print("=" * 170)
 
         if not rules:
             print("\n  (No Storage Rules found in database. Rules are created during folder triage.)\n")
-            print("=" * 135)
+            print("=" * 170)
             return
 
-        print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Scope':<16} | {'Target Destination':<32} | {'Path Match Pattern'}")
-        print("  " + "-" * 131)
+        print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Scope':<10} | {'Path Match Pattern':<20} | {'Target Destination'}")
+        print("  " + "-" * 166)
         for idx, r in enumerate(rules, 1):
             icon = color_icons.get(r.finder_color, "⚪")
             if r.action == "STAGE_DISCARDABLE":
@@ -449,12 +444,10 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
 
             dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
             if dest_disp.startswith("Temporary/"):
-                dest_disp = f"P4/{dest_disp}"
-            if len(dest_disp) > 30:
-                dest_disp = "..." + dest_disp[-27:]
+                dest_disp = f"Priority 4/{dest_disp}"
 
-            print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.device_pattern[:16]:<16} | {dest_disp:<32} | {r.path_pattern}")
-        print("=" * 135)
+            print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {dest_disp}")
+        print("=" * 170)
 
         choice = input(f"\nSelect Rule # to edit (1-{len(rules)}) [or 'd' to delete, 'q' to return]: ").strip().lower()
         if not choice or choice in ("q", "quit", "exit"):
