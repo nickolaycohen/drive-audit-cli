@@ -475,7 +475,8 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
             new_name = input(f"  1. Rule Name [{r.name}]: ").strip() or r.name
 
             # 2. Category
-            new_cat = input(f"  2. Category [{r.category}]: ").strip() or r.category
+            raw_cat = input(f"  2. Category (One word only) [{r.category}]: ").strip() or r.category
+            new_cat = raw_cat.split()[0] if raw_cat else r.category
 
             # 3. Target Tier
             print(f"\n  3. Target Tier [Current: {r.target_tier.upper()}]:")
@@ -500,9 +501,9 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
                 new_tier, new_action, new_color = r.target_tier, r.action, r.finder_color
 
             # 4. Target Destination Path
-            new_dest = input(f"\n  4. Destination Path [{r.target_relative_path}]: ").strip()
-            if new_dest:
-                r.target_relative_path = new_dest
+            raw_dest = input(f"\n  4. Destination Folder (Single level) [{r.target_relative_path}]: ").strip()
+            if raw_dest:
+                r.target_relative_path = raw_dest.strip("/").split("/")[0] if raw_dest else ""
 
             # 5. Device Scope
             new_scope = input(f"  5. Device Scope ('ALL' or Device Name) [{r.device_pattern}]: ").strip() or r.device_pattern
@@ -580,15 +581,15 @@ def prompt_user_for_storage_rule(
     if any(k in path_l for k in ["family", "families documents", "adoption", "passport", "legal", "scans"]):
         suggested_tier = "priority 1"
         suggested_action = "SURGICAL_RESTORE"
-        suggested_category = "Vital Legal, Tax & Family Documents"
+        suggested_category = "Family"
         suggested_color = "Red"
-        suggested_rel_path = "Family & IDs"
-        suggested_dest = "/Volumes/LaCie/Storage/Priority 1/Family & IDs/"
+        suggested_rel_path = "Family"
+        suggested_dest = "/Volumes/LaCie/Storage/Priority 1/Family/"
         suggested_impact = "Will be restored directly into high-availability Priority 1 storage"
     elif any(k in path_l for k in ["quicken", ".qdf", ".qel"]):
         suggested_tier = "priority 1"
         suggested_action = "SURGICAL_RESTORE"
-        suggested_category = "Active Financial Databases (Quicken)"
+        suggested_category = "Financial"
         suggested_color = "Red"
         suggested_rel_path = "Data"
         suggested_dest = "/Volumes/LaCie/Storage/Priority 1/Data/"
@@ -596,31 +597,31 @@ def prompt_user_for_storage_rule(
     elif any(k in path_l for k in ["ms-money", "ms money", ".mny", "legacy", "windows"]):
         suggested_tier = "priority 2"
         suggested_action = "SURGICAL_RESTORE"
-        suggested_category = "Legacy Windows Data (MS Money)"
+        suggested_category = "Legacy"
         suggested_color = "Blue"
-        suggested_rel_path = "Data/Legacy/Windows/MS-Money"
-        suggested_dest = "/Volumes/LaCie/Storage/Priority 2/Data/Legacy/Windows/MS-Money/"
+        suggested_rel_path = "Data"
+        suggested_dest = "/Volumes/LaCie/Storage/Priority 2/Data/"
         suggested_impact = "Will be preserved in external Priority 2 reference storage with iDrive backup"
     elif any(k in path_l for k in ["cache", "thumbs.db", "desktop.ini", "imgcache", "tmp", "trash", "temp", "logs", "crash"]) or any(k in path_l for k in ["old backup", "backup-restore", "copies from", "snapshot", "documents 0", "documents 1", "documents duplicates"]):
         suggested_tier = "priority 4"
         suggested_action = "STAGE_DISCARDABLE"
-        suggested_category = "Temporary / Discardable / Old Backups"
+        suggested_category = "Temporary"
         suggested_color = "Orange"
-        suggested_rel_path = f"Temporary/Discardable/Old Backups/{{device}}/{folder_name}"
-        suggested_dest = f"/Volumes/LaCie/Storage/Priority 4/Temporary/Discardable/Old Backups/{device_name}/{folder_name}/"
-        suggested_impact = f"Quarantined in Priority 4 temporary staging ({device_name}/{folder_name}) — keeps active priorities clean, safe to purge later"
+        suggested_rel_path = "Temporary"
+        suggested_dest = "/Volumes/LaCie/Storage/Priority 4/Temporary/"
+        suggested_impact = "Quarantined in Priority 4 temporary staging — safe to purge later"
     elif any(k in path_l for k in ["photo", "pictures", "camera", "dcim", "videos", "media"]):
         suggested_tier = "priority 4"
         suggested_action = "MEDIA_INTAKE"
-        suggested_category = "Raw Photos & Home Videos"
+        suggested_category = "Photos"
         suggested_color = "Yellow"
-        suggested_rel_path = "Pictures/Intake"
-        suggested_dest = "/Volumes/LaCie/Storage/Priority 4/Pictures/Intake/"
+        suggested_rel_path = "Pictures"
+        suggested_dest = "/Volumes/LaCie/Storage/Priority 4/Pictures/"
         suggested_impact = "Will be routed to Media Organizer Pipeline for Apple Photos curation"
     elif any(k in path_l for k in ["archive", "backup", "199", "200", "201", "old-"]):
         suggested_tier = "priority 3"
         suggested_action = "ARCHIVE_COLD"
-        suggested_category = "Historical Documents & Archives (Pre-2015)"
+        suggested_category = "Archives"
         suggested_color = "Purple"
         suggested_rel_path = "Archives"
         suggested_dest = "/Volumes/LaCie/Storage/Priority 3/Archives/"
@@ -628,10 +629,10 @@ def prompt_user_for_storage_rule(
     else:
         suggested_tier = "priority 2"
         suggested_action = "SURGICAL_RESTORE"
-        suggested_category = "Personal & Work Documents"
+        suggested_category = "Documents"
         suggested_color = "Blue"
-        suggested_rel_path = f"Documents/{folder_name}"
-        suggested_dest = f"/Volumes/LaCie/Storage/Priority 2/Documents/{folder_name}/"
+        suggested_rel_path = "Documents"
+        suggested_dest = "/Volumes/LaCie/Storage/Priority 2/Documents/"
         suggested_impact = "Will be restored and organized in external Priority 2 reference storage"
 
     color_icons = {
@@ -748,16 +749,15 @@ def prompt_user_for_storage_rule(
             print(f"  [2] Device-specific only ('{device_name}' / {folder_name} only)")
             scope_c = input("Scope [1-2] (Default: 1): ").strip()
             
+            r_rel = suggested_rel_path.strip("/").split("/")[0]
             if scope_c == "2":
                 r_scope = device_name
                 r_pat = norm_path + "*"
                 r_name = f"{device_name} - {folder_name}"
-                r_rel = suggested_rel_path.replace("{device}", device_name)
             else:
                 r_scope = "ALL"
                 r_pat = f"*{folder_name}*"
                 r_name = f"{suggested_category} ({folder_name})"
-                r_rel = suggested_rel_path
 
             rule = StorageRule(
                 name=r_name,
@@ -775,36 +775,35 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
-            print(f"\n[Success] ✓ Saved Generic Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier.upper()} {tier_icon} (Scope: {r_scope})")
+            print(f"\n[Success] ✓ Saved Generic Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier.upper()} {tier_icon} (Category: {rule.category}, Destination: {r_rel})")
             return rule
 
         if choice == "2":
-            # Priority 4 Temporary Discardable Old Backups quarantine depot
-            print(f"\n--- ROUTE TO PRIORITY 4 TEMPORARY DISCARDABLE ---")
+            # Priority 4 Temporary Discardable quarantine depot
+            print(f"\n--- ROUTE TO PRIORITY 4 TEMPORARY ---")
             print(f"Folder: '{folder_name}' on '{device_name}'")
             print("Select Scope:")
             print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
             print(f"  [2] Device-specific only ('{device_name}' only)")
             scope_c = input("Scope [1-2] (Default: 1): ").strip()
             
+            r_rel = "Temporary"
             if scope_c == "2":
                 r_scope = device_name
                 r_pat = norm_path + "*"
-                r_name = f"Temporary Discardable - {device_name} - {folder_name}"
-                r_rel = f"Temporary/Discardable/Old Backups/{device_name}/{folder_name}"
+                r_name = f"Temporary - {device_name} - {folder_name}"
             else:
                 r_scope = "ALL"
                 r_pat = f"*{folder_name}*"
-                r_name = f"Temporary Discardable - {folder_name}"
-                r_rel = f"Temporary/Discardable/Old Backups/{{device}}/{folder_name}"
+                r_name = f"Temporary - {folder_name}"
 
             rule = StorageRule(
                 name=r_name,
                 device_pattern=r_scope,
                 path_pattern=r_pat,
                 ext_pattern="*",
-                category="Temporary / Discardable / Old Backups",
-                description="Universal staging rule: routes old backup folders into Priority 4 quarantine depot per device",
+                category="Temporary",
+                description="Universal staging rule: routes old backup folders into Priority 4/Temporary/",
                 target_tier="priority 4",
                 target_relative_path=r_rel,
                 finder_color="Orange",
@@ -814,9 +813,8 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
-            resolved_dest = resolve_target_relative_path(r_rel, device_name, folder_name)
-            print(f"\n[Success] 🟠 Rule #{rule_id} Created: Routed to Priority 4 (Temporary - Discardable - Old Backups) [Scope: {r_scope}]")
-            print(f"  📍 Target Depot: /Volumes/LaCie/Storage/Priority 4/{resolved_dest}/")
+            print(f"\n[Success] 🟠 Rule #{rule_id} Created: Routed to Priority 4/Temporary/ [Scope: {r_scope}]")
+            print(f"  📍 Target Depot: /Volumes/LaCie/Storage/Priority 4/Temporary/")
             print(f"  ✓ Generic policy safely applies to all matching devices.")
             return rule
 
@@ -842,7 +840,7 @@ def prompt_user_for_storage_rule(
                 device_pattern=dev_scope,
                 path_pattern=pat_val,
                 ext_pattern="*",
-                category="Ignored Cloud Files",
+                category="Ignored",
                 description="Universal ignore rule — will never be downloaded from the cloud",
                 target_tier="discard",
                 target_relative_path="",
@@ -873,16 +871,19 @@ def prompt_user_for_storage_rule(
             t_choice = input("Select Tier (1-5) [Default: 2]: ").strip()
             
             tier_map = {
-                "1": ("priority 1", "SURGICAL_RESTORE", "Red", f"Documents/{folder_name}"),
-                "2": ("priority 2", "SURGICAL_RESTORE", "Blue", f"Documents/{folder_name}"),
-                "3": ("priority 3", "ARCHIVE_COLD", "Purple", f"Archives/{folder_name}"),
-                "4": ("priority 4", "STAGE_DISCARDABLE", "Orange", f"Temporary/Discardable/Old Backups/{device_name}/{folder_name}"),
+                "1": ("priority 1", "SURGICAL_RESTORE", "Red", "Documents"),
+                "2": ("priority 2", "SURGICAL_RESTORE", "Blue", "Documents"),
+                "3": ("priority 3", "ARCHIVE_COLD", "Purple", "Archives"),
+                "4": ("priority 4", "STAGE_DISCARDABLE", "Orange", "Temporary"),
                 "5": ("discard", "DISCARD_IGNORE", "Orange", "")
             }
-            tier_val, act_val, col_val, default_rel = tier_map.get(t_choice, ("priority 2", "SURGICAL_RESTORE", "Blue", f"Documents/{folder_name}"))
+            tier_val, act_val, col_val, default_rel = tier_map.get(t_choice, ("priority 2", "SURGICAL_RESTORE", "Blue", "Documents"))
 
-            cat_val = input(f"Category Description [{suggested_category}]: ").strip() or suggested_category
-            rel_val = input(f"Relative Destination Path [{default_rel}]: ").strip() or default_rel
+            raw_cat = input(f"Category (One word only) [{suggested_category}]: ").strip() or suggested_category
+            cat_val = raw_cat.split()[0] if raw_cat else "General"
+
+            raw_rel = input(f"Destination Folder (Single level) [{default_rel}]: ").strip() or default_rel
+            rel_val = raw_rel.strip("/").split("/")[0] if raw_rel else default_rel
             desc_val = input("Human Story / Context (Optional): ").strip()
             
             rule = StorageRule(
