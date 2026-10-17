@@ -136,6 +136,36 @@ def get_applied_folders_for_rule(conn: sqlite3.Connection, rule_id: int) -> List
     return [(r[0], r[1]) for r in cur.fetchall()]
 
 
+def get_all_applied_resources(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Fetches all classified cloud resources joined with their matched storage rules."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT a.id, a.device_name, a.folder_path, a.applied_at, 
+               r.id as rule_id, r.name as rule_name, r.target_tier, 
+               r.finder_color, r.target_relative_path, r.action, r.category
+        FROM applied_rule_folders a
+        JOIN storage_rules r ON a.rule_id = r.id
+        ORDER BY a.device_name, a.folder_path
+    """)
+    rows = cur.fetchall()
+    res = []
+    for row in rows:
+        res.append({
+            "id": row[0],
+            "device_name": row[1],
+            "folder_path": row[2],
+            "applied_at": row[3],
+            "rule_id": row[4],
+            "rule_name": row[5],
+            "target_tier": row[6],
+            "finder_color": row[7],
+            "target_relative_path": row[8],
+            "action": row[9],
+            "category": row[10]
+        })
+    return res
+
+
 def save_storage_rule(conn: sqlite3.Connection, rule: StorageRule) -> int:
     """Inserts or updates a StorageRule in SQLite."""
     now = datetime.datetime.now().isoformat()

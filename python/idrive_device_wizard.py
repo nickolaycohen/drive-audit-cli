@@ -33,6 +33,7 @@ from storage_rules import (
     match_storage_rule,
     record_applied_rule_folder,
     get_applied_folders_for_rule,
+    get_all_applied_resources,
     get_shared_db_path,
     get_tier_color
 )
@@ -322,70 +323,92 @@ def format_existing_rules_table(rules: List[StorageRule], conn: Optional[sqlite3
 
 def display_all_assigned_rules(conn: sqlite3.Connection):
     """
-    Displays a comprehensive, beautifully formatted report of all assigned Storage Rules,
-    including the specific DEVICE/[folder] paths each rule has been applied to.
+    Displays a comprehensive, beautifully formatted report split into two distinct tables:
+      1. TABLE 1: STORAGE RULES LEDGER (Rule policies, categories, and patterns)
+      2. TABLE 2: CLASSIFIED CLOUD RESOURCES (Actual device folders where rules are applied)
     """
     rules = load_all_storage_rules(conn)
+    color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
+    tier_counts = {"priority 1": 0, "priority 2": 0, "priority 3": 0, "priority 4": 0, "discard": 0}
+
+    # =========================================================================
+    # TABLE 1: STORAGE RULES LEDGER
+    # =========================================================================
     print("\n" + "=" * 165)
-    print(f"{f'ALL ASSIGNED STORAGE RULES ({len(rules)} Rules in Database)':^165}")
+    print(f"{f'TABLE 1: STORAGE RULES LEDGER ({len(rules)} Active Rules)':^165}")
     print("=" * 165)
 
     if not rules:
         print("\n  (No Storage Rules have been created yet. Rules will appear here as you triage folders.)\n")
-        print("=" * 165)
-        return
+    else:
+        print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Category':<26} | {'Scope':<16} | {'Target Destination':<32} | {'Path Match Pattern'}")
+        print("  " + "-" * 161)
 
-    tier_counts = {"priority 1": 0, "priority 2": 0, "priority 3": 0, "priority 4": 0, "discard": 0}
-    color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
+        for idx, r in enumerate(rules, 1):
+            t_key = r.target_tier.lower()
+            if t_key in tier_counts:
+                tier_counts[t_key] += 1
+            elif "discard" in t_key or "purge" in t_key:
+                tier_counts["discard"] += 1
 
-    print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Applied On (DEVICE / [folder])':<44} | {'Local Target Destination'}")
-    print("  " + "-" * 161)
-
-    for idx, r in enumerate(rules, 1):
-        t_key = r.target_tier.lower()
-        if t_key in tier_counts:
-            tier_counts[t_key] += 1
-        elif "discard" in t_key or "purge" in t_key:
-            tier_counts["discard"] += 1
-
-        icon = color_icons.get(r.finder_color, "⚪")
-        if r.action == "STAGE_DISCARDABLE":
-            tier_disp = "P4 🟠 (Temp Discard)"
-        elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or t_key in ("discard", "purge"):
-            tier_disp = "DISCARD 🚫 (Ignored)"
-        else:
-            tier_disp = f"{r.target_tier.upper()} {icon}"
-
-        # Fetch actual recorded folders where this rule has been applied
-        applied = get_applied_folders_for_rule(conn, r.rule_id)
-        extra_applied = []
-        if applied:
-            first_dev, first_p = applied[0]
-            clean_p = first_p if first_p.startswith('/') else f"/{first_p}"
-            if len(applied) == 1:
-                applied_str = f"{first_dev} {clean_p}"
+            icon = color_icons.get(r.finder_color, "⚪")
+            if r.action == "STAGE_DISCARDABLE":
+                tier_disp = "P4 🟠 (Temp Discard)"
+            elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or t_key in ("discard", "purge"):
+                tier_disp = "DISCARD 🚫 (Ignored)"
             else:
-                applied_str = f"{first_dev} {clean_p} (+{len(applied)-1} folders)"
-                extra_applied = applied[1:]
-        else:
-            dev = r.device_pattern if r.device_pattern != "ALL" else "[ALL Devices]"
-            clean_p = r.path_pattern.rstrip("*") or "/"
-            applied_str = f"{dev} {clean_p}"
+                tier_disp = f"{r.target_tier.upper()} {icon}"
 
-        dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
-        if dest_disp.startswith("Temporary/"):
-            dest_disp = f"Priority 4/{dest_disp}"
-        if len(dest_disp) > 42:
-            dest_disp = "..." + dest_disp[-39:]
+            dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
+            if dest_disp.startswith("Temporary/"):
+                dest_disp = f"P4/{dest_disp}"
+            if len(dest_disp) > 30:
+                dest_disp = "..." + dest_disp[-27:]
 
-        print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {applied_str[:44]:<44} | {dest_disp}")
-        if extra_applied:
-            extra_strs = [f"{d} {p}" for d, p in extra_applied[:4]]
-            more_suffix = f" ... (+{len(extra_applied)-4} more)" if len(extra_applied) > 4 else ""
-            print(f"      ↳ Also applied to: {', '.join(extra_strs)}{more_suffix}")
+            print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.category[:26]:<26} | {r.device_pattern[:16]:<16} | {dest_disp:<32} | {r.path_pattern}")
 
     print("=" * 165)
-    print(f"  📊 Summary: Total: {len(rules)} Rules | Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
+
+    # =========================================================================
+    # TABLE 2: CLASSIFIED CLOUD RESOURCES (DEVICE / [FOLDER])
+    # =========================================================================
+    applied_resources = get_all_applied_resources(conn)
+    print("\n" + "=" * 165)
+    print(f"{f'TABLE 2: CLASSIFIED CLOUD RESOURCES ({len(applied_resources)} Folders Linked to Rules)':^165}")
+    print("=" * 165)
+
+    if not applied_resources:
+        print("\n  (No cloud folders have matched or been assigned to rules yet. Run the triage wizard to link folders.)\n")
+    else:
+        print(f"  {'#':<3} | {'Device Name':<22} | {'Remote Folder Path':<42} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<30} | {'Local Target Destination'}")
+        print("  " + "-" * 161)
+
+        for idx, res in enumerate(applied_resources, 1):
+            icon = color_icons.get(res["finder_color"], "⚪")
+            tier_str = res["target_tier"].lower()
+            act_str = res["action"]
+
+            if act_str == "STAGE_DISCARDABLE":
+                tier_disp = "P4 🟠 (Temp Discard)"
+            elif act_str in ("DISCARD_IGNORE", "PURGE_SKIP") or tier_str in ("discard", "purge"):
+                tier_disp = "DISCARD 🚫 (Ignored)"
+            else:
+                tier_disp = f"{res['target_tier'].upper()} {icon}"
+
+            dest_disp = res["target_relative_path"] if res["target_relative_path"] else "(Do Not Store / Cloud Ignored)"
+            if dest_disp.startswith("Temporary/"):
+                dest_disp = f"/Volumes/LaCie/Storage/Priority 4/{dest_disp}"
+            elif dest_disp != "(Do Not Store / Cloud Ignored)":
+                dest_disp = f"/Volumes/LaCie/Storage/{res['target_tier'].title()}/{dest_disp}"
+
+            if len(dest_disp) > 36:
+                dest_disp = "..." + dest_disp[-33:]
+
+            print(f"  {idx:<3} | {res['device_name']:<22} | {res['folder_path']:<42} | {tier_disp:<22} | {res['rule_name'][:30]:<30} | {dest_disp}")
+
+    print("=" * 165)
+    print(f"  📊 Summary: Total: {len(rules)} Rules Established across {len(applied_resources)} Classified Cloud Folders")
+    print(f"     Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
     print("=" * 165)
 
 
