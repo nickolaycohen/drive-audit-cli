@@ -29,6 +29,7 @@ from storage_rules import (
     StorageRule,
     init_storage_rules_tables,
     save_storage_rule,
+    delete_storage_rule,
     load_all_storage_rules,
     match_storage_rule,
     record_applied_rule_folder,
@@ -411,6 +412,127 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     print(f"     Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
     print("=" * 165)
 
+    print("\nActions: [e] Edit/Rename Rules  |  [Enter] Return")
+    act_c = input("Choice: ").strip().lower()
+    if act_c == "e":
+        edit_storage_rules_interactive(conn)
+
+
+def edit_storage_rules_interactive(conn: sqlite3.Connection):
+    """
+    Interactive editor to view, rename, modify, or delete Storage Rules in SQLite.
+    Allows changing rule names, priority tiers, destinations, patterns, and categories.
+    """
+    color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
+
+    while True:
+        rules = load_all_storage_rules(conn)
+        print("\n" + "=" * 135)
+        print(f"{f'✏️  STORAGE RULES MANAGER & EDITOR ({len(rules)} Active Rules)':^135}")
+        print("=" * 135)
+
+        if not rules:
+            print("\n  (No Storage Rules found in database. Rules are created during folder triage.)\n")
+            print("=" * 135)
+            return
+
+        print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Scope':<16} | {'Target Destination':<32} | {'Path Match Pattern'}")
+        print("  " + "-" * 131)
+        for idx, r in enumerate(rules, 1):
+            icon = color_icons.get(r.finder_color, "⚪")
+            if r.action == "STAGE_DISCARDABLE":
+                tier_disp = "P4 🟠 (Temp Discard)"
+            elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or r.target_tier.lower() in ("discard", "purge"):
+                tier_disp = "DISCARD 🚫 (Ignored)"
+            else:
+                tier_disp = f"{r.target_tier.upper()} {icon}"
+
+            dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
+            if dest_disp.startswith("Temporary/"):
+                dest_disp = f"P4/{dest_disp}"
+            if len(dest_disp) > 30:
+                dest_disp = "..." + dest_disp[-27:]
+
+            print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.device_pattern[:16]:<16} | {dest_disp:<32} | {r.path_pattern}")
+        print("=" * 135)
+
+        choice = input(f"\nSelect Rule # to edit (1-{len(rules)}) [or 'd' to delete, 'q' to return]: ").strip().lower()
+        if not choice or choice in ("q", "quit", "exit"):
+            break
+
+        if choice == "d":
+            del_sel = input(f"Enter Rule # to delete (1-{len(rules)}) [or 'c' to cancel]: ").strip()
+            if del_sel.isdigit() and 1 <= int(del_sel) <= len(rules):
+                target_rule = rules[int(del_sel) - 1]
+                confirm = input(f"Are you sure you want to delete Rule #{del_sel} ('{target_rule.name}')? [y/N]: ").strip().lower()
+                if confirm == "y":
+                    delete_storage_rule(conn, target_rule.rule_id)
+                    print(f"\n[✓] Rule #{del_sel} ('{target_rule.name}') deleted successfully.")
+            continue
+
+        if choice.isdigit() and 1 <= int(choice) <= len(rules):
+            r = rules[int(choice) - 1]
+            print("\n" + "=" * 90)
+            print(f"  ✏️  EDITING RULE #{choice}: '{r.name}' (ID: {r.rule_id})")
+            print("=" * 90)
+            print("  (Press [Enter] on any field to keep its current value)")
+            print("-" * 90)
+
+            # 1. Rule Name
+            new_name = input(f"  1. Rule Name [{r.name}]: ").strip() or r.name
+
+            # 2. Category
+            new_cat = input(f"  2. Category [{r.category}]: ").strip() or r.category
+
+            # 3. Target Tier
+            print(f"\n  3. Target Tier [Current: {r.target_tier.upper()}]:")
+            print("     [1] Priority 1 (Active Personal, Legal, Quicken) 🔴")
+            print("     [2] Priority 2 (Systems, Profiles, Legacy Windows) 🔵")
+            print("     [3] Priority 3 (Historical Records, Reference Archive) 🟣")
+            print("     [4] Priority 4 (Media Intake / Temporary Quarantine) 🟡/🟠")
+            print("     [5] Discard / Ignore (Do not store in system) 🚫")
+            print("     [Enter] Keep current")
+            t_sel = input("     Select Tier (1-5) [Keep]: ").strip()
+
+            tier_map = {
+                "1": ("priority 1", "SURGICAL_RESTORE", "Red"),
+                "2": ("priority 2", "SURGICAL_RESTORE", "Blue"),
+                "3": ("priority 3", "ARCHIVE_COLD", "Purple"),
+                "4": ("priority 4", "STAGE_DISCARDABLE" if ("discard" in r.name.lower() or "temp" in r.category.lower()) else "MEDIA_INTAKE", "Orange" if ("discard" in r.name.lower() or "temp" in r.category.lower()) else "Yellow"),
+                "5": ("discard", "DISCARD_IGNORE", "Orange")
+            }
+            if t_sel in tier_map:
+                new_tier, new_action, new_color = tier_map[t_sel]
+            else:
+                new_tier, new_action, new_color = r.target_tier, r.action, r.finder_color
+
+            # 4. Target Destination Path
+            new_dest = input(f"\n  4. Destination Path [{r.target_relative_path}]: ").strip()
+            if new_dest:
+                r.target_relative_path = new_dest
+
+            # 5. Device Scope
+            new_scope = input(f"  5. Device Scope ('ALL' or Device Name) [{r.device_pattern}]: ").strip() or r.device_pattern
+
+            # 6. Path Match Pattern
+            new_pat = input(f"  6. Path Pattern [{r.path_pattern}]: ").strip() or r.path_pattern
+
+            # 7. Description
+            new_desc = input(f"  7. Description [{r.description}]: ").strip() or r.description
+
+            # Save updates
+            r.name = new_name
+            r.category = new_cat
+            r.target_tier = new_tier
+            r.action = new_action
+            r.finder_color = new_color
+            r.device_pattern = new_scope
+            r.path_pattern = new_pat
+            r.description = new_desc
+
+            save_storage_rule(conn, r)
+            print(f"\n[Success] ✓ Rule #{choice} successfully updated: '{r.name}' ➔ {r.target_tier.upper()}")
+
 
 def prompt_user_for_storage_rule(
     device_name: str,
@@ -560,6 +682,7 @@ def prompt_user_for_storage_rule(
         print(f"  [6] Drill down into subfolders (Classify contents individually)")
         print(f"  [7] Skip this folder for now (Decide later)")
         print(f"  [v] View all assigned Storage Rules ({len(rules)} active rules) 📋")
+        print(f"  [e] Edit / Rename existing Storage Rules ✏️")
         print(f"  [q] Save progress & Exit wizard (Restartable anytime)")
 
         choice = input("\nChoice (Default: 1): ").strip().lower()
@@ -569,9 +692,33 @@ def prompt_user_for_storage_rule(
         if choice == "q":
             return None
 
+        if choice == "e":
+            edit_storage_rules_interactive(conn)
+            rules = load_all_storage_rules(conn)
+            print("\n" + "=" * 120)
+            print(f"  ☁️  UNCLASSIFIED FOLDER FOUND: '{folder_name}'")
+            print("=" * 120)
+            print(f"  • Device:                 {device_name}")
+            print(f"  • Remote Path:            {norm_path}")
+            print(f"  • Size / Direct Contents: {format_size_human(total_bytes)} ({total_files} files, {len(subdirs)} subfolders)")
+            print(f"  • Top File Types:         {top_exts}")
+            print(f"  • Sample Files:           {sample_str}")
+            print("-" * 120)
+            print(f"  📋 Active Storage Rules in Database ({len(rules)} established):")
+            print(format_existing_rules_table(rules[:5]))
+            if len(rules) > 5:
+                print(f"     (... and {len(rules) - 5} more rules in database)")
+            print("-" * 120)
+            print("  💡 Recommended Classification & Storage Plan:")
+            print(f"     • Classification:      {suggested_category}")
+            print(f"     • Storage Tier:        {suggested_tier.upper()} {tier_icon}")
+            print(f"     • Target Destination:  {suggested_dest}")
+            print(f"     • Operational Meaning: {suggested_impact}")
+            print("-" * 120)
+            continue
+
         if choice == "v":
             display_all_assigned_rules(conn)
-            input("\nPress [Enter] to return to folder triage...")
             rules = load_all_storage_rules(conn)
             print("\n" + "=" * 120)
             print(f"  ☁️  UNCLASSIFIED FOLDER FOUND: '{folder_name}'")
@@ -976,10 +1123,13 @@ def run_device_backup_wizard():
 
 
 if __name__ == "__main__":
-    if any(arg in sys.argv for arg in ("--rules", "-v", "rules", "--list-rules")):
+    if any(arg in sys.argv for arg in ("--rules", "-v", "rules", "--list-rules", "--edit", "-e", "edit")):
         conn = sqlite3.connect(get_shared_db_path())
         init_storage_rules_tables(conn)
-        display_all_assigned_rules(conn)
+        if any(arg in sys.argv for arg in ("--edit", "-e", "edit")):
+            edit_storage_rules_interactive(conn)
+        else:
+            display_all_assigned_rules(conn)
         conn.close()
         sys.exit(0)
 

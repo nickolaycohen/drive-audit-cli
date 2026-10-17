@@ -204,6 +204,15 @@ def save_storage_rule(conn: sqlite3.Connection, rule: StorageRule) -> int:
         return cur.lastrowid
 
 
+def delete_storage_rule(conn: sqlite3.Connection, rule_id: int) -> bool:
+    """Deletes a StorageRule and its applied folder records from SQLite."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM applied_rule_folders WHERE rule_id = ?", (rule_id,))
+    cur.execute("DELETE FROM storage_rules WHERE id = ?", (rule_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def load_all_storage_rules(conn: sqlite3.Connection) -> List[StorageRule]:
     """Loads all active storage rules from SQLite ordered by specificity."""
     cur = conn.cursor()
