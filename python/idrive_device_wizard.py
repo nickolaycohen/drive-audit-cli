@@ -1,0 +1,556 @@
+"""
+idrive_device_wizard.py — Interactive Device Backup Curation Wizard
+===================================================================
+Connects directly to the iDrive EVS API to inventory remote device backups,
+calculates the latest backup date per device, orders devices furthest-in-the-past
+first, and interactively walks the remote folder trees to establish persistent
+Storage Rules in the shared SQLite database.
+"""
+
+import os
+import sys
+import re
+import json
+import sqlite3
+import datetime
+import requests
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
+
+# Add repository root and python directory to path
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from storage_rules import (
+    StorageRule,
+    init_storage_rules_tables,
+    save_storage_rule,
+    load_all_storage_rules,
+    match_storage_rule,
+    get_shared_db_path,
+    get_tier_color
+)
+
+BASE_URL = os.environ.get("IDRIVE_EVS_URL", "https://evsweb2652.idrive.com/evs")
+COOKIE_CACHE_PATHS = [
+    Path.home() / ".idrive_cookie",
+    REPO_ROOT / ".idrive_cookie",
+    Path("/Users/nickolaycohen/dev/idrive-audit/logs/.idrive_cookie"),
+    Path("/Users/nickolaycohen/dev/idrive-audit/.idrive_cookie")
+]
+
+
+def load_cached_cookie() -> Optional[str]:
+    """Attempt to load cached iDrive session cookie from standard locations."""
+    if "IDRIVE_COOKIE" in os.environ and os.environ["IDRIVE_COOKIE"].strip():
+        return os.environ["IDRIVE_COOKIE"].strip()
+    for cp in COOKIE_CACHE_PATHS:
+        if cp.exists():
+            try:
+                content = cp.read_text(encoding="utf-8").strip()
+                if content and ("EVSID" in content or "JSESSIONID" in content):
+                    return content
+            except Exception:
+                pass
+    return None
+
+
+def save_cached_cookie(cookie_str: str):
+    """Persists working cookie to cache file."""
+    for cp in [COOKIE_CACHE_PATHS[0], COOKIE_CACHE_PATHS[1]]:
+        try:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(cookie_str.strip(), encoding="utf-8")
+        except Exception:
+            pass
+
+
+def get_authenticated_session() -> Tuple[requests.Session, str]:
+    """
+    Ensures an authenticated requests.Session for iDrive EVS API.
+    Prompts user interactively if session is expired or unavailable.
+    """
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'application/json, text/plain, */*'
+    })
+
+    cookie_str = load_cached_cookie() or ""
+
+    for attempt in range(3):
+        if cookie_str:
+            session.headers.update({'Cookie': cookie_str})
+            try:
+                r = session.post(f"{BASE_URL}/listDevices", data={'json': 'yes'}, timeout=12)
+                data = r.json()
+                if isinstance(data, dict) and data.get('message') == 'SUCCESS' and 'contents' in data:
+                    save_cached_cookie(cookie_str)
+                    return session, cookie_str
+            except Exception:
+                pass
+
+        print("\n" + "=" * 80)
+        print("  🔑 IDRIVE AUTHENTICATION REQUIRED")
+        print("=" * 80)
+        print("  Active session cookie for iDrive EVS API is required.")
+        print("  To retrieve your cookie:")
+        print("    1. Open Chrome/Safari and log in to https://www.idrive.com")
+        print("    2. Open Developer Tools (F12 or Cmd+Opt+I) -> Application -> Cookies -> evsweb*.idrive.com")
+        print("    3. Copy the Cookie header or EVSID and JSESSIONID values.")
+        print("-" * 80)
+
+        try:
+            user_input = input("Paste your iDrive Cookie string (or press Enter to exit): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nWizard cancelled.")
+            sys.exit(0)
+
+        if not user_input:
+            print("\nNo credentials provided. Exiting.")
+            sys.exit(0)
+
+        cookie_str = user_input
+
+    print("\n[Error] Unable to authenticate with iDrive EVS API. Please check your credentials.")
+    sys.exit(1)
+
+
+def fetch_devices(session: requests.Session) -> List[Dict[str, str]]:
+    """Fetches list of all backed-up devices from EVS API, excluding system devices."""
+    r = session.post(f"{BASE_URL}/listDevices", data={'json': 'yes'}, timeout=15)
+    data = r.json()
+    devices = []
+    if isinstance(data, dict) and data.get('message') == 'SUCCESS' and 'contents' in data:
+        for item in data['contents']:
+            dev_id = item.get('device_id')
+            nick = item.get('nick_name')
+            if dev_id and nick and nick != "IDrive Photos":
+                devices.append({
+                    "device_id": dev_id,
+                    "nick_name": nick,
+                    "os_type": item.get('os_type', 'Unknown'),
+                    "os_family": item.get('os_family', 'Unknown')
+                })
+    return devices
+
+
+def browse_remote_folder(
+    session: requests.Session,
+    device_id: str,
+    path: str = "/"
+) -> List[Dict[str, Any]]:
+    """Browse a folder on a specific device using EVS API."""
+    norm_path = "/" + path.strip().strip("/").replace("\\", "/")
+    if norm_path != "/" and norm_path.endswith("/"):
+        norm_path = norm_path.rstrip("/")
+
+    payload = {'p': norm_path, 'json': 'yes', 'device_id': device_id}
+    try:
+        r = session.post(f"{BASE_URL}/browseFolder", data=payload, timeout=20)
+        data = r.json()
+        if isinstance(data, dict) and data.get('message') == 'SUCCESS':
+            return data.get('contents') or []
+    except Exception as e:
+        print(f"    [Warning] Failed to browse '{norm_path}' on device {device_id}: {e}")
+    return []
+
+
+def parse_lmd_to_datetime(lmd_str: Optional[str]) -> Optional[datetime.datetime]:
+    """Parse various EVS date string representations into datetime."""
+    if not lmd_str or lmd_str == "-":
+        return None
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%m/%d/%Y %H:%M:%S",
+        "%m-%d-%Y %H:%M:%S",
+        "%Y-%m-%d"
+    ]
+    for fmt in formats:
+        try:
+            return datetime.datetime.strptime(lmd_str.strip(), fmt)
+        except ValueError:
+            pass
+    # Try regex search for YYYY-MM-DD or MM/DD/YYYY
+    m = re.search(r'(\d{4})-(\d{2})-(\d{2})', lmd_str)
+    if m:
+        try:
+            return datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except Exception:
+            pass
+    return None
+
+
+def calculate_device_latest_backup_date(
+    session: requests.Session,
+    device: Dict[str, Any]
+) -> Tuple[Optional[datetime.datetime], str]:
+    """
+    Queries the top-level directory items on a device and finds the most recent
+    last-modified date (lmd) among them.
+    """
+    dev_id = device["device_id"]
+    top_items = browse_remote_folder(session, dev_id, "/")
+    latest_dt = None
+    latest_raw = "Unknown"
+
+    for item in top_items:
+        lmd_raw = item.get("lmd")
+        dt = parse_lmd_to_datetime(lmd_raw)
+        if dt:
+            if latest_dt is None or dt > latest_dt:
+                latest_dt = dt
+                latest_raw = lmd_raw
+
+    return latest_dt, latest_raw
+
+
+def format_size_human(size_val: Any) -> str:
+    """Format bytes into human-readable string."""
+    try:
+        b = float(size_val)
+        if b <= 0:
+            return "0 B"
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if b < 1024.0:
+                return f"{b:.1f} {unit}"
+            b /= 1024.0
+        return f"{b:.1f} PB"
+    except Exception:
+        return str(size_val or "0 B")
+
+
+def prompt_user_for_storage_rule(
+    device_name: str,
+    folder_path: str,
+    children_items: List[Dict[str, Any]],
+    conn: sqlite3.Connection
+) -> Optional[StorageRule]:
+    """
+    Interactive prompt presenting unclassified folder details and guiding
+    the user to create or customize a persistent StorageRule.
+    """
+    norm_path = "/" + folder_path.strip().strip("/").replace("\\", "/")
+    folder_name = Path(norm_path).name or norm_path
+
+    # Compute quick stats
+    total_files = 0
+    total_bytes = 0
+    subdirs = []
+    ext_counts = {}
+    sample_files = []
+
+    for item in children_items:
+        is_dir = item.get('is_dir') is True or str(item.get('is_dir')).lower() in ('1', 'true')
+        name = item.get('name') or item.get('p') or "unknown"
+        sz = item.get('size')
+        try:
+            sz_int = int(sz) if sz and str(sz).isdigit() else 0
+        except Exception:
+            sz_int = 0
+
+        if is_dir:
+            subdirs.append(name)
+        else:
+            total_files += 1
+            total_bytes += sz_int
+            ext = Path(name).suffix.lower() or "(no ext)"
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+            if len(sample_files) < 4 and not name.startswith('.'):
+                sample_files.append(name)
+
+    top_exts = ", ".join([f"{k} ({v})" for k, v in sorted(ext_counts.items(), key=lambda x: -x[1])[:5]]) or "None"
+    sample_str = ", ".join(sample_files) if sample_files else "None"
+
+    # Intelligent Auto-Suggestions based on path name and extensions
+    suggested_tier = "priority 2"
+    suggested_action = "SURGICAL_RESTORE"
+    suggested_category = "General"
+    suggested_color = "Blue"
+    name_l = folder_name.lower()
+    path_l = norm_path.lower()
+
+    if any(k in path_l for k in ["family", "families documents", "adoption", "passport", "legal", "scans"]):
+        suggested_tier = "priority 1"
+        suggested_category = "Personal / Legal & Family"
+        suggested_color = "Red"
+    elif any(k in path_l for k in ["quicken", ".qdf"]):
+        suggested_tier = "priority 1"
+        suggested_category = "Financial / Quicken"
+        suggested_color = "Red"
+    elif any(k in path_l for k in ["ms-money", "ms money", ".mny", "legacy"]):
+        suggested_tier = "priority 2"
+        suggested_category = "Legacy Windows / MS Money"
+        suggested_color = "Blue"
+    elif any(k in path_l for k in ["cache", "thumbs.db", "desktop.ini", "imgcache", "tmp", "trash"]):
+        suggested_tier = "purge"
+        suggested_action = "PURGE_SKIP"
+        suggested_category = "System Cache / Disposable"
+        suggested_color = "Orange"
+    elif any(k in path_l for k in ["photo", "pictures", "camera", "dcim", "videos", "media"]):
+        suggested_tier = "priority 4"
+        suggested_action = "MEDIA_INTAKE"
+        suggested_category = "Photos & Home Media"
+        suggested_color = "Yellow"
+    elif any(k in path_l for k in ["archive", "backup", "199", "200", "old-"]):
+        suggested_tier = "priority 3"
+        suggested_action = "ARCHIVE_COLD"
+        suggested_category = "Historical Archive"
+        suggested_color = "Purple"
+
+    print("\n" + "=" * 80)
+    print(f"  ☁️  UNCLASSIFIED FOLDER FOUND: '{folder_name}'")
+    print("=" * 80)
+    print(f"  • Device:                 {device_name}")
+    print(f"  • Remote Path:            {norm_path}")
+    print(f"  • Size / Direct Contents: {format_size_human(total_bytes)} ({total_files} files, {len(subdirs)} subfolders)")
+    print(f"  • Top File Types:         {top_exts}")
+    print(f"  • Sample Files:           {sample_str}")
+    print("-" * 80)
+    print(f"  Suggested Rule:           {suggested_category} ➔ {suggested_tier.upper()} ({suggested_action})")
+    print("-" * 80)
+
+    while True:
+        print("\nSelect Action:")
+        print(f"  [1] Accept suggested Storage Rule for this folder (Recommended)")
+        print(f"  [2] Custom Storage Rule (Specify category, priority tier, path pattern)")
+        print(f"  [3] Drill down into subfolders (Classify contents individually)")
+        print(f"  [4] Skip this folder for now")
+        print(f"  [q] Save progress & Exit wizard (Restartable anytime)")
+
+        choice = input("\nChoice [1-4, q] (Default: 1): ").strip().lower()
+        if not choice:
+            choice = "1"
+
+        if choice == "q":
+            return None
+
+        if choice == "3":
+            # Signal caller to drill down
+            return "DRILL"
+
+        if choice == "4":
+            return "SKIP"
+
+        if choice == "1":
+            rule = StorageRule(
+                name=f"{device_name} - {folder_name}",
+                device_pattern=device_name,
+                path_pattern=norm_path + "*",
+                ext_pattern="*",
+                category=suggested_category,
+                description=f"Auto-classified via Device Backup Wizard from {device_name}:{norm_path}",
+                target_tier=suggested_tier,
+                target_relative_path=folder_name,
+                finder_color=suggested_color,
+                action=suggested_action,
+                is_recursive=1
+            )
+            rule_id = save_storage_rule(conn, rule)
+            rule.rule_id = rule_id
+            print(f"\n[Success] ✓ Saved Storage Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier}")
+            return rule
+
+        if choice == "2":
+            print("\n--- DEFINE CUSTOM STORAGE RULE ---")
+            r_name = input(f"Rule Name [{device_name} - {folder_name}]: ").strip() or f"{device_name} - {folder_name}"
+            
+            p_scope = input(f"Device Scope ('ALL' or '{device_name}') [Default: {device_name}]: ").strip() or device_name
+            p_pat = input(f"Path Pattern [Default: {norm_path}*]: ").strip() or (norm_path + "*")
+            
+            print("\nTarget Tier:")
+            print("  [1] Priority 1 (Active Personal, Legal, Quicken) 🔴")
+            print("  [2] Priority 2 (Systems, Profiles, Legacy Windows) 🔵")
+            print("  [3] Priority 3 (Historical Records, Reference Archive) 🟣")
+            print("  [4] Priority 4 (Media Organizer Intake) 🟡")
+            print("  [5] Purge / Skip (Ignore disposable caches/logs) 🟠")
+            t_choice = input("Select Tier (1-5) [Default: 2]: ").strip()
+            
+            tier_map = {
+                "1": ("priority 1", "SURGICAL_RESTORE", "Red"),
+                "2": ("priority 2", "SURGICAL_RESTORE", "Blue"),
+                "3": ("priority 3", "ARCHIVE_COLD", "Purple"),
+                "4": ("priority 4", "MEDIA_INTAKE", "Yellow"),
+                "5": ("purge", "PURGE_SKIP", "Orange")
+            }
+            tier_val, act_val, col_val = tier_map.get(t_choice, ("priority 2", "SURGICAL_RESTORE", "Blue"))
+
+            cat_val = input(f"Category Description [{suggested_category}]: ").strip() or suggested_category
+            desc_val = input("Human Story / Context (Optional): ").strip()
+            
+            rule = StorageRule(
+                name=r_name,
+                device_pattern=p_scope,
+                path_pattern=p_pat,
+                ext_pattern="*",
+                category=cat_val,
+                description=desc_val,
+                target_tier=tier_val,
+                target_relative_path=folder_name,
+                finder_color=col_val,
+                action=act_val,
+                is_recursive=1
+            )
+            rule_id = save_storage_rule(conn, rule)
+            rule.rule_id = rule_id
+            print(f"\n[Success] ✓ Saved Custom Storage Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier}")
+            return rule
+
+
+def run_device_backup_wizard():
+    """
+    Primary orchestrator for the Device Backup Wizard.
+    Connects to EVS, calculates device ages, sorts oldest-first, and interactively
+    walks unclassified paths to build Storage Rules.
+    """
+    db_path = get_shared_db_path()
+    conn = sqlite3.connect(db_path)
+    init_storage_rules_tables(conn)
+
+    print("\n" + "=" * 80)
+    print("  🚀 IDRIVE CLOUD DEVICE BACKUP WIZARD")
+    print("=" * 80)
+    print(f"  • Knowledge Hub Database: {db_path}")
+    print("  • Connecting to iDrive EVS Cloud Backend...")
+    print("-" * 80)
+
+    session, _ = get_authenticated_session()
+    print("[✓] Authenticated successfully with iDrive EVS API.")
+
+    print("\nDiscovering registered cloud devices...")
+    devices = fetch_devices(session)
+    if not devices:
+        print("[!] No devices found in this iDrive account.")
+        return
+
+    print(f"Found {len(devices)} device backups in account. Calculating latest update dates...")
+
+    # Step 1: Calculate latest update date per device
+    device_catalog = []
+    for idx, dev in enumerate(devices, 1):
+        nick = dev["nick_name"]
+        sys.stdout.write(f"\r  [{idx}/{len(devices)}] Inspecting top-level tree for '{nick}'...")
+        sys.stdout.flush()
+        latest_dt, latest_raw = calculate_device_latest_backup_date(session, dev)
+        dev["latest_dt"] = latest_dt
+        dev["latest_lmd"] = latest_raw
+        device_catalog.append(dev)
+
+    sys.stdout.write("\r" + " " * 75 + "\r")
+
+    # Step 2: Sort devices ascending by latest update (oldest / furthest in past first!)
+    # None dates go to the very beginning (oldest/unknown)
+    epoch_start = datetime.datetime(1970, 1, 1)
+    device_catalog.sort(key=lambda d: d["latest_dt"] if d["latest_dt"] else epoch_start)
+
+    print("\n" + "=" * 80)
+    print("  📋 CLOUD BACKUP DEVICES (SORTED OLDEST → NEWEST)")
+    print("=" * 80)
+    for idx, d in enumerate(device_catalog, 1):
+        dt_str = d["latest_dt"].strftime("%Y-%m-%d") if d["latest_dt"] else "Unknown / Legacy"
+        print(f"  {idx:>2}. {d['nick_name']:<28} | Latest Backup: {dt_str:<12} | ID: {d['device_id']}")
+    print("=" * 80)
+
+    rules = load_all_storage_rules(conn)
+    print(f"\nActive Storage Rules Loaded: {len(rules)} rules.")
+
+    start_c = input("\nProceed with recursive folder triage? [Y/n]: ").strip().lower()
+    if start_c == 'n':
+        print("Wizard paused.")
+        return
+
+    # Step 3: Walk devices and folders
+    total_classified = 0
+    total_skipped = 0
+
+    for dev_idx, dev in enumerate(device_catalog, 1):
+        dev_name = dev["nick_name"]
+        dev_id = dev["device_id"]
+        dev_date = dev["latest_dt"].strftime("%Y-%m-%d") if dev["latest_dt"] else "Legacy"
+
+        print("\n" + "#" * 80)
+        print(f"  DEVICE [{dev_idx}/{len(device_catalog)}]: '{dev_name}' (Last Backup: {dev_date})")
+        print("#" * 80)
+
+        # Queue of paths to inspect: starts with top-level items
+        queue = ["/"]
+
+        while queue:
+            current_path = queue.pop(0)
+
+            # Skip checking root "/" for rule matching; browse it directly
+            if current_path == "/":
+                top_items = browse_remote_folder(session, dev_id, "/")
+                for item in top_items:
+                    is_dir = item.get('is_dir') is True or str(item.get('is_dir')).lower() in ('1', 'true')
+                    name = item.get('name') or item.get('p')
+                    if is_dir and name:
+                        queue.append("/" + name.strip("/"))
+                continue
+
+            # Check if this folder matches an existing storage rule
+            matched_rule = match_storage_rule(dev_name, current_path, rules=rules)
+            if matched_rule:
+                print(f"  [✓ Rule Matched] '{current_path}' ➔ '{matched_rule.name}' ({matched_rule.target_tier.upper()})")
+                total_classified += 1
+                # If recursive rule covers everything underneath, skip enqueuing children
+                if matched_rule.is_recursive:
+                    continue
+
+            # Fetch folder children to evaluate or prompt
+            children = browse_remote_folder(session, dev_id, current_path)
+            
+            # If no rule matched, trigger interactive prompt
+            if not matched_rule:
+                action_res = prompt_user_for_storage_rule(dev_name, current_path, children, conn)
+                
+                if action_res is None:
+                    print("\n[Paused] Wizard progress saved to database. Run anytime to resume.")
+                    conn.close()
+                    return
+                elif action_res == "SKIP":
+                    total_skipped += 1
+                    continue
+                elif action_res == "DRILL":
+                    # Add child directories to front of queue
+                    for item in children:
+                        is_dir = item.get('is_dir') is True or str(item.get('is_dir')).lower() in ('1', 'true')
+                        name = item.get('name') or item.get('p')
+                        if is_dir and name:
+                            queue.insert(0, current_path.rstrip("/") + "/" + name.strip("/"))
+                    continue
+                elif isinstance(action_res, StorageRule):
+                    rules = load_all_storage_rules(conn)
+                    total_classified += 1
+                    # If user chose recursive rule, don't drill deeper
+                    if action_res.is_recursive:
+                        continue
+
+            # Enqueue any subdirectories if we didn't prune
+            for item in children:
+                is_dir = item.get('is_dir') is True or str(item.get('is_dir')).lower() in ('1', 'true')
+                name = item.get('name') or item.get('p')
+                if is_dir and name:
+                    queue.append(current_path.rstrip("/") + "/" + name.strip("/"))
+
+    print("\n" + "=" * 80)
+    print("  🎉 ALL REGISTERED DEVICES TRIAGED & CLASSIFIED!")
+    print("=" * 80)
+    print(f"  • Total Folders Classified: {total_classified}")
+    print(f"  • Total Folders Skipped:    {total_skipped}")
+    print(f"  • Total Storage Rules:      {len(load_all_storage_rules(conn))}")
+    print("=" * 80)
+    conn.close()
+
+
+if __name__ == "__main__":
+    try:
+        run_device_backup_wizard()
+    except KeyboardInterrupt:
+        print("\n\n[Interrupted] Device Backup Wizard paused cleanly. Run again to resume.")
+        sys.exit(0)

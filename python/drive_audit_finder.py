@@ -7977,7 +7977,8 @@ def main():
             {"key": "10", "label": "Consolidate snapshots / Extract file types & non-media files"},
             {"key": "11", "label": "Detect & clean duplicate files (Interactive duplicate resolver)"},
             {"key": "12", "label": "View Curation & Verification Report (Approved vs Unapproved folders)"},
-            {"key": "13", "label": "Exit"}
+            {"key": "13", "label": "☁️ Launch iDrive Device Backup Wizard (Triage remote devices & create Storage Rules)"},
+            {"key": "14", "label": "Exit"}
         ]
         main_usage = get_menu_option_usage(db_file, "main_menu")
         sorted_main = sorted(main_options, key=lambda x: main_usage.get(x["key"], 0), reverse=True)
@@ -7990,7 +7991,7 @@ def main():
             print(f"{opt['key']:>2}. {opt['label']}{badge}{def_badge}")
 
         def_prompt = f" [Default: {top_main}]" if (main_usage and main_usage.get(top_main, 0) > 0) else ""
-        raw_choice = input(f"\nSelect option (1-13){def_prompt}: ").strip()
+        raw_choice = input(f"\nSelect option (1-14){def_prompt}: ").strip()
         choice = raw_choice if raw_choice else (top_main if (main_usage and main_usage.get(top_main, 0) > 0) else "")
         record_menu_usage(db_file, "main_menu", choice, next((o["label"] for o in main_options if o["key"] == choice), ""))
 
@@ -8019,6 +8020,12 @@ def main():
         elif choice == "12":
             generate_curation_verification_report(db_file)
         elif choice == "13":
+            try:
+                from idrive_device_wizard import run_device_backup_wizard
+                run_device_backup_wizard()
+            except Exception as e:
+                print(f"\n[Error] Failed to run iDrive Device Backup Wizard: {e}")
+        elif choice == "14":
             print("\nExiting Storage Orchestrator. Goodbye!")
             break
         else:
