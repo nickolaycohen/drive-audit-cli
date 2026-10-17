@@ -69,18 +69,69 @@ def save_cached_cookie(cookie_str: str):
             pass
 
 
+def get_idrive_cookies_from_browser() -> Tuple[Optional[str], Optional[str]]:
+    """
+    Dynamically extracts active iDrive session cookies from local browser cache
+    (Chrome, Safari, Firefox, Brave, Edge). Returns (cookie_str, target_domain).
+    """
+    try:
+        import browser_cookie3
+    except ImportError:
+        return None, None
+
+    for loader_name in ['chrome', 'safari', 'firefox', 'brave', 'edge']:
+        loader = getattr(browser_cookie3, loader_name, None)
+        if not loader:
+            continue
+        try:
+            cj = loader(domain_name='idrive.com')
+            by_domain = {}
+            for c in cj:
+                dom = getattr(c, 'domain', '').lower().lstrip('.')
+                if 'idrive.com' in dom:
+                    if dom not in by_domain:
+                        by_domain[dom] = {}
+                    if c.name in ('EVSID', 'JSESSIONID', 'WOPI_SESSION', 'CHECKINSESSION', 'SES_TOKEN'):
+                        by_domain[dom][c.name] = c.value
+
+            # Prioritize evsweb subdomains
+            evs_domains = [d for d in by_domain if 'evsweb' in d]
+            target_doms = evs_domains + [d for d in by_domain if d not in evs_domains]
+
+            for dom in target_doms:
+                cmap = by_domain[dom]
+                if 'EVSID' in cmap or 'JSESSIONID' in cmap:
+                    cookie_str = '; '.join([f'{k}={v}' for k, v in cmap.items()])
+                    return cookie_str, dom
+        except Exception:
+            continue
+    return None, None
+
+
 def get_authenticated_session() -> Tuple[requests.Session, str]:
     """
     Ensures an authenticated requests.Session for iDrive EVS API.
-    Prompts user interactively if session is expired or unavailable.
+    Attempts to read cookies directly from browser cache before prompting user.
     """
+    global BASE_URL
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         'Accept': 'application/json, text/plain, */*'
     })
 
-    cookie_str = load_cached_cookie() or ""
+    # Try cached cookie first
+    cookie_str = load_cached_cookie()
+
+    # If no cached cookie, try reading directly from browser cache
+    if not cookie_str:
+        print("[*] Checking local browser cache (Chrome/Safari) for active iDrive login...")
+        browser_cookie, detected_dom = get_idrive_cookies_from_browser()
+        if browser_cookie:
+            cookie_str = browser_cookie
+            if detected_dom and "evsweb" in detected_dom:
+                BASE_URL = f"https://{detected_dom}/evs"
+            print(f"[✓] Automatically loaded active session from browser ({detected_dom or 'iDrive'}).")
 
     for attempt in range(3):
         if cookie_str:
@@ -94,14 +145,22 @@ def get_authenticated_session() -> Tuple[requests.Session, str]:
             except Exception:
                 pass
 
+        if attempt == 0:
+            # If cached cookie failed, try browser refresh once
+            browser_cookie, detected_dom = get_idrive_cookies_from_browser()
+            if browser_cookie and browser_cookie != cookie_str:
+                cookie_str = browser_cookie
+                if detected_dom and "evsweb" in detected_dom:
+                    BASE_URL = f"https://{detected_dom}/evs"
+                print(f"[✓] Refreshed active session from browser ({detected_dom}).")
+                continue
+
         print("\n" + "=" * 80)
         print("  🔑 IDRIVE AUTHENTICATION REQUIRED")
         print("=" * 80)
-        print("  Active session cookie for iDrive EVS API is required.")
-        print("  To retrieve your cookie:")
-        print("    1. Open Chrome/Safari and log in to https://www.idrive.com")
-        print("    2. Open Developer Tools (F12 or Cmd+Opt+I) -> Application -> Cookies -> evsweb*.idrive.com")
-        print("    3. Copy the Cookie header or EVSID and JSESSIONID values.")
+        print("  Could not automatically detect an active iDrive session in your browser.")
+        print("  Please log into https://www.idrive.com in Chrome or Safari.")
+        print("  Or copy your Cookie header (EVSID/JSESSIONID) from Developer Tools.")
         print("-" * 80)
 
         try:
