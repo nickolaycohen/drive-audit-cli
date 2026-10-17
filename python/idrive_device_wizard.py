@@ -489,41 +489,113 @@ def run_device_backup_wizard():
 
     print(f"Found {len(devices)} device backups in account. Calculating latest update dates...")
 
-    # Step 1: Calculate latest update date per device
+    # Step 1: Build complete storage summary catalog (utilizing idrive_audit.db cache when available)
+    idrive_db_path = "/Users/nickolaycohen/dev/idrive-audit/idrive_audit.db"
+    cached_info = {}
+    if os.path.exists(idrive_db_path):
+        try:
+            idb_conn = sqlite3.connect(idrive_db_path)
+            idb_conn.row_factory = sqlite3.Row
+            idb_cur = idb_conn.cursor()
+            for dev in devices:
+                dev_id = dev["device_id"]
+                idb_cur.execute(
+                    "SELECT path, lmd FROM api_calls WHERE device_id = ? AND lmd IS NOT NULL AND lmd != '' AND lmd != '-' ORDER BY lmd DESC LIMIT 1",
+                    (dev_id,)
+                )
+                lr = idb_cur.fetchone()
+                lmd_val = lr["lmd"] if lr else ""
+                lmd_p = lr["path"] if lr else ""
+
+                idb_cur.execute(
+                    "SELECT SUM(size) as total_sz FROM api_calls WHERE device_id = ? AND endpoint = 'getProperties'",
+                    (dev_id,)
+                )
+                sr = idb_cur.fetchone()
+                tot_sz = sr["total_sz"] if sr and sr["total_sz"] else 0
+
+                idb_cur.execute(
+                    "SELECT MAX(timestamp) as max_ts FROM api_calls WHERE device_id = ?",
+                    (dev_id,)
+                )
+                tr = idb_cur.fetchone()
+                max_ts = tr["max_ts"] if tr and tr["max_ts"] else ""
+
+                cached_info[dev_id] = {
+                    "lmd": lmd_val,
+                    "lmd_path": lmd_p,
+                    "size_bytes": tot_sz,
+                    "last_scan": max_ts.replace("T", " ")[:16] if max_ts else "[never]"
+                }
+            idb_conn.close()
+        except Exception:
+            pass
+
     device_catalog = []
-    for idx, dev in enumerate(devices, 1):
-        nick = dev["nick_name"]
-        sys.stdout.write(f"\r  [{idx}/{len(devices)}] Inspecting top-level tree for '{nick}'...")
-        sys.stdout.flush()
-        latest_dt, latest_raw = calculate_device_latest_backup_date(session, dev)
-        dev["latest_dt"] = latest_dt
-        dev["latest_lmd"] = latest_raw
+    for dev in devices:
+        dev_id = dev["device_id"]
+        c_data = cached_info.get(dev_id, {})
+        lmd_str = c_data.get("lmd")
+        lmd_path = c_data.get("lmd_path", "")
+        size_bytes = c_data.get("size_bytes", 0)
+        last_scan = c_data.get("last_scan", "[never]")
+
+        # If not cached or unknown, check live EVS
+        if not lmd_str or lmd_str == "Unknown":
+            dt_live, raw_live = calculate_device_latest_backup_date(session, dev)
+            if dt_live:
+                lmd_str = dt_live.isoformat()
+                lmd_path = "/"
+
+        dt = parse_lmd_to_datetime(lmd_str)
+        dev["latest_dt"] = dt
+        dev["latest_lmd"] = lmd_str or "Unknown"
+        dev["lmd_path"] = lmd_path
+        dev["size_gb"] = size_bytes / (1024 ** 3)
+        dev["last_scan"] = last_scan
+        dev["status_str"] = "Active"
         device_catalog.append(dev)
 
-    sys.stdout.write("\r" + " " * 75 + "\r")
-
     # Step 2: Sort devices ascending by latest update (oldest / furthest in past first!)
-    # None dates go to the very beginning (oldest/unknown)
-    epoch_start = datetime.datetime(1970, 1, 1)
-    device_catalog.sort(key=lambda d: d["latest_dt"] if d["latest_dt"] else epoch_start)
+    # Valid dates sorted oldest first; unknown dates placed at the end
+    epoch_future = datetime.datetime(2099, 1, 1)
+    device_catalog.sort(key=lambda d: d["latest_dt"] if d["latest_dt"] else epoch_future)
 
-    print("\n" + "=" * 80)
-    print("  📋 CLOUD BACKUP DEVICES (SORTED OLDEST → NEWEST)")
-    print("=" * 80)
+    # Print standard IDRIVE STORAGE SUMMARY table
+    print("\n" + "=" * 155)
+    print(f"{'IDRIVE STORAGE SUMMARY (Ordered by: Oldest Updates)':^155}")
+    print("=" * 155)
+    print(f"{'No.':<4} | {'Device Name':<22} | {'Scanned Size':>12} | {'Last Scanned':<16} | {'Status':<8} | {'Last Modified (Folder)':<50} | {'Device ID':<22}")
+    print("-" * 155)
+
+    total_account_gb = 0.0
     for idx, d in enumerate(device_catalog, 1):
-        dt_str = d["latest_dt"].strftime("%Y-%m-%d") if d["latest_dt"] else "Unknown / Legacy"
-        print(f"  {idx:>2}. {d['nick_name']:<28} | Latest Backup: {dt_str:<12} | ID: {d['device_id']}")
-    print("=" * 80)
+        total_account_gb += d["size_gb"]
+        l_display = f"{d['latest_lmd'][:19]} ({d['lmd_path'][-25:]})" if d["lmd_path"] else d["latest_lmd"][:19]
+        print(f"{idx:<4} | {d['nick_name']:<22} | {d['size_gb']:>9.2f} GB | {d['last_scan']:<16} | {d['status_str']:<8} | {l_display:<50} | {d['device_id']:<22}")
+
+    print("-" * 155)
+    print(f"TOTAL ACCOUNT STORAGE: {total_account_gb:.2f} GB Across {len(device_catalog)} Devices")
+    print("=" * 155)
 
     rules = load_all_storage_rules(conn)
-    print(f"\nActive Storage Rules Loaded: {len(rules)} rules.")
+    print(f"\n[✓] Loaded {len(rules)} persistent Storage Rules from {db_path}")
 
-    start_c = input("\nProceed with recursive folder triage? [Y/n]: ").strip().lower()
-    if start_c == 'n':
-        print("Wizard paused.")
-        return
+    # Identify the first device with content (skip empty/test devices like 'Y')
+    target_dev = None
+    for d in device_catalog:
+        if d["nick_name"] not in ("Y",) and d["size_gb"] >= 0:
+            target_dev = d
+            break
+    if not target_dev:
+        target_dev = device_catalog[0]
 
-    # Step 3: Walk devices and folders
+    target_date_str = target_dev["latest_dt"].strftime("%Y-%m-%d") if target_dev["latest_dt"] else "Legacy"
+    print("\n" + "=" * 155)
+    print(f"  🎯 TARGETING OLDEST MODIFIED DEVICE FIRST: '{target_dev['nick_name']}' (Last Modified: {target_date_str})")
+    print("=" * 155)
+
+    # Step 3: Walk devices and folders automatically without pause
     total_classified = 0
     total_skipped = 0
 
