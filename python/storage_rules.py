@@ -252,6 +252,6 @@ def get_tier_color(tier: str) -> str:
         return "Purple"
     elif "priority 4" in t or t == "p4":
         return "Yellow"
-    elif "purge" in t or "skip" in t:
+    elif any(k in t for k in ["purge", "skip", "discard", "ignore", "trash"]):
         return "Orange"
     return "Gray"
