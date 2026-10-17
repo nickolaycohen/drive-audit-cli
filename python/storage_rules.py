@@ -136,6 +136,16 @@ def get_applied_folders_for_rule(conn: sqlite3.Connection, rule_id: int) -> List
     return [(r[0], r[1]) for r in cur.fetchall()]
 
 
+def resolve_target_relative_path(template: str, device_name: str, folder_name: str = "") -> str:
+    """Resolves dynamic placeholders {device} and {folder} in target destination paths."""
+    if not template:
+        return ""
+    res = template.replace("{device}", device_name)
+    if folder_name:
+        res = res.replace("{folder}", folder_name)
+    return res
+
+
 def get_all_applied_resources(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """Fetches all classified cloud resources joined with their matched storage rules."""
     cur = conn.cursor()
@@ -150,16 +160,23 @@ def get_all_applied_resources(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     rows = cur.fetchall()
     res = []
     for row in rows:
+        dev_name = row[1]
+        folder_p = row[2]
+        f_name = Path(folder_p).name or folder_p
+        raw_target = row[8] or ""
+        resolved_target = resolve_target_relative_path(raw_target, dev_name, f_name)
+
         res.append({
             "id": row[0],
-            "device_name": row[1],
-            "folder_path": row[2],
+            "device_name": dev_name,
+            "folder_path": folder_p,
             "applied_at": row[3],
             "rule_id": row[4],
             "rule_name": row[5],
             "target_tier": row[6],
             "finder_color": row[7],
-            "target_relative_path": row[8],
+            "target_relative_path": resolved_target,
+            "raw_template": raw_target,
             "action": row[9],
             "category": row[10]
         })

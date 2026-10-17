@@ -613,8 +613,8 @@ def prompt_user_for_storage_rule(
         suggested_action = "STAGE_DISCARDABLE"
         suggested_category = "Temporary / Discardable / Old Backups"
         suggested_color = "Orange"
-        suggested_rel_path = f"Temporary/Discardable/Old Backups/{device_name}/{folder_name}"
-        suggested_dest = f"/Volumes/LaCie/Storage/Priority 4/{suggested_rel_path}/"
+        suggested_rel_path = f"Temporary/Discardable/Old Backups/{{device}}/{folder_name}"
+        suggested_dest = f"/Volumes/LaCie/Storage/Priority 4/Temporary/Discardable/Old Backups/{device_name}/{folder_name}/"
         suggested_impact = f"Quarantined in Priority 4 temporary staging ({device_name}/{folder_name}) — keeps active priorities clean, safe to purge later"
     elif any(k in path_l for k in ["photo", "pictures", "camera", "dcim", "videos", "media"]):
         suggested_tier = "priority 4"
@@ -749,15 +749,32 @@ def prompt_user_for_storage_rule(
             return "SKIP"
 
         if choice == "1":
+            print(f"\n--- ESTABLISH STORAGE RULE FOR '{folder_name}' ---")
+            print("Select Scope:")
+            print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
+            print(f"  [2] Device-specific only ('{device_name}' / {folder_name} only)")
+            scope_c = input("Scope [1-2] (Default: 1): ").strip()
+            
+            if scope_c == "2":
+                r_scope = device_name
+                r_pat = norm_path + "*"
+                r_name = f"{device_name} - {folder_name}"
+                r_rel = suggested_rel_path.replace("{device}", device_name)
+            else:
+                r_scope = "ALL"
+                r_pat = f"*{folder_name}*"
+                r_name = f"{suggested_category} ({folder_name})"
+                r_rel = suggested_rel_path
+
             rule = StorageRule(
-                name=f"{device_name} - {folder_name}",
-                device_pattern=device_name,
-                path_pattern=norm_path + "*",
+                name=r_name,
+                device_pattern=r_scope,
+                path_pattern=r_pat,
                 ext_pattern="*",
                 category=suggested_category,
                 description=suggested_impact,
                 target_tier=suggested_tier,
-                target_relative_path=suggested_rel_path,
+                target_relative_path=r_rel,
                 finder_color=suggested_color,
                 action=suggested_action,
                 is_recursive=1
@@ -765,21 +782,38 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
-            print(f"\n[Success] ✓ Saved Storage Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier.upper()} {tier_icon}")
+            print(f"\n[Success] ✓ Saved Generic Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier.upper()} {tier_icon} (Scope: {r_scope})")
             return rule
 
         if choice == "2":
             # Priority 4 Temporary Discardable Old Backups quarantine depot
-            p4_rel = f"Temporary/Discardable/Old Backups/{device_name}/{folder_name}"
+            print(f"\n--- ROUTE TO PRIORITY 4 TEMPORARY DISCARDABLE ---")
+            print(f"Folder: '{folder_name}' on '{device_name}'")
+            print("Select Scope:")
+            print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
+            print(f"  [2] Device-specific only ('{device_name}' only)")
+            scope_c = input("Scope [1-2] (Default: 1): ").strip()
+            
+            if scope_c == "2":
+                r_scope = device_name
+                r_pat = norm_path + "*"
+                r_name = f"Temporary Discardable - {device_name} - {folder_name}"
+                r_rel = f"Temporary/Discardable/Old Backups/{device_name}/{folder_name}"
+            else:
+                r_scope = "ALL"
+                r_pat = f"*{folder_name}*"
+                r_name = f"Temporary Discardable - {folder_name}"
+                r_rel = f"Temporary/Discardable/Old Backups/{{device}}/{folder_name}"
+
             rule = StorageRule(
-                name=f"Discardable - {device_name} - {folder_name}",
-                device_pattern=device_name,
-                path_pattern=norm_path + "*",
+                name=r_name,
+                device_pattern=r_scope,
+                path_pattern=r_pat,
                 ext_pattern="*",
                 category="Temporary / Discardable / Old Backups",
-                description=f"Quarantined under Priority 4/{p4_rel}",
+                description="Universal staging rule: routes old backup folders into Priority 4 quarantine depot per device",
                 target_tier="priority 4",
-                target_relative_path=p4_rel,
+                target_relative_path=r_rel,
                 finder_color="Orange",
                 action="STAGE_DISCARDABLE",
                 is_recursive=1
@@ -787,33 +821,36 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
-            print(f"\n[Success] 🟠 Rule #{rule_id} Created: Routed to Priority 4 (Temporary - Discardable - Old Backups)")
-            print(f"  📍 Target Depot: /Volumes/LaCie/Storage/Priority 4/{p4_rel}/")
-            print(f"  ✓ Safely quarantined away from active Priorities 1, 2, and 3.")
+            resolved_dest = resolve_target_relative_path(r_rel, device_name, folder_name)
+            print(f"\n[Success] 🟠 Rule #{rule_id} Created: Routed to Priority 4 (Temporary - Discardable - Old Backups) [Scope: {r_scope}]")
+            print(f"  📍 Target Depot: /Volumes/LaCie/Storage/Priority 4/{resolved_dest}/")
+            print(f"  ✓ Generic policy safely applies to all matching devices.")
             return rule
 
         if choice == "3":
             print(f"\n--- COMPLETE IGNORE / SKIP ---")
             print(f"Folder: '{norm_path}'")
             print("Select Match Scope:")
-            print(f"  [1] Device & Folder only: '{norm_path}*' on '{device_name}' (Default)")
-            print(f"  [2] Universal across ALL devices: '*/{folder_name}*'")
+            print(f"  [1] Universal across ALL devices: '*{folder_name}*' (Recommended) [Default]")
+            print(f"  [2] Device & Folder only: '{norm_path}*' on '{device_name}'")
             pat_choice = input("Scope [1-2] (Default: 1): ").strip()
             
             if pat_choice == "2":
-                pat_val = f"*/{folder_name}*"
-                dev_scope = "ALL"
-            else:
                 pat_val = norm_path + "*"
                 dev_scope = device_name
+                r_name = f"Ignore - {device_name} - {folder_name}"
+            else:
+                pat_val = f"*{folder_name}*"
+                dev_scope = "ALL"
+                r_name = f"Ignore - {folder_name}"
 
             rule = StorageRule(
-                name=f"Ignore - {folder_name}",
+                name=r_name,
                 device_pattern=dev_scope,
                 path_pattern=pat_val,
                 ext_pattern="*",
                 category="Ignored Cloud Files",
-                description="Ignored — will never be downloaded from the cloud",
+                description="Universal ignore rule — will never be downloaded from the cloud",
                 target_tier="discard",
                 target_relative_path="",
                 finder_color="Orange",
@@ -823,15 +860,16 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
-            print(f"\n[Success] 🚫 Rule #{rule_id} Created: Complete Ignore ({pat_val})")
+            print(f"\n[Success] 🚫 Rule #{rule_id} Created: Complete Ignore ({pat_val}) [Scope: {dev_scope}]")
             return rule
 
         if choice == "4":
             print("\n--- DEFINE CUSTOM STORAGE RULE ---")
-            r_name = input(f"Rule Name [{device_name} - {folder_name}]: ").strip() or f"{device_name} - {folder_name}"
+            r_name = input(f"Rule Name [{suggested_category} - {folder_name}]: ").strip() or f"{suggested_category} - {folder_name}"
             
-            p_scope = input(f"Device Scope ('ALL' or '{device_name}') [Default: {device_name}]: ").strip() or device_name
-            p_pat = input(f"Path Pattern [Default: {norm_path}*]: ").strip() or (norm_path + "*")
+            p_scope = input(f"Device Scope ('ALL' or '{device_name}') [Default: ALL]: ").strip() or "ALL"
+            default_pat = f"*{folder_name}*" if p_scope == "ALL" else (norm_path + "*")
+            p_pat = input(f"Path Pattern [Default: {default_pat}]: ").strip() or default_pat
             
             print("\nTarget Tier:")
             print("  [1] Priority 1 (Active Personal, Legal, Quicken) 🔴")
