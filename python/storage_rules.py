@@ -269,6 +269,93 @@ def record_applied_rule_folder(conn: sqlite3.Connection, rule_id: int, device_na
     conn.commit()
 
 
+def render_progress_bar(completed: int, total: int, width: int = 20) -> str:
+    """Returns a visual unicode progress bar [██████░░░░] 60%."""
+    if total <= 0:
+        return f"[{'░' * width}] 0%"
+    pct = min(1.0, max(0.0, completed / total))
+    filled = int(round(width * pct))
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}] {int(pct * 100)}%"
+
+
+def update_device_crawl_progress(
+    conn: sqlite3.Connection,
+    device_id: str,
+    device_name: str,
+    latest_lmd: str = "",
+    status: str = "in_progress",
+    last_path: str = "",
+    classified_folders: int = 0,
+    skipped_folders: int = 0
+) -> None:
+    """Updates or inserts the crawl progress for a specific device."""
+    now_str = datetime.datetime.now().isoformat()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO device_crawl_progress (
+            device_id, device_name, latest_lmd, status, last_path, 
+            classified_folders, skipped_folders, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(device_id) DO UPDATE SET
+            device_name = excluded.device_name,
+            latest_lmd = COALESCE(NULLIF(excluded.latest_lmd, ''), device_crawl_progress.latest_lmd),
+            status = excluded.status,
+            last_path = excluded.last_path,
+            classified_folders = excluded.classified_folders,
+            skipped_folders = excluded.skipped_folders,
+            updated_at = excluded.updated_at
+    """, (device_id, device_name, latest_lmd, status, last_path, classified_folders, skipped_folders, now_str))
+    conn.commit()
+
+
+def get_device_crawl_progress(conn: sqlite3.Connection, device_id: str) -> Optional[Dict[str, Any]]:
+    """Fetches the crawl progress record for a specific device."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT device_id, device_name, latest_lmd, status, last_path, 
+               classified_folders, skipped_folders, updated_at
+        FROM device_crawl_progress
+        WHERE device_id = ?
+    """, (device_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "device_id": row[0],
+        "device_name": row[1],
+        "latest_lmd": row[2],
+        "status": row[3],
+        "last_path": row[4],
+        "classified_folders": row[5],
+        "skipped_folders": row[6],
+        "updated_at": row[7]
+    }
+
+
+def get_all_device_crawl_progress(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    """Returns a map of device_id -> progress record for all tracked devices."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT device_id, device_name, latest_lmd, status, last_path, 
+               classified_folders, skipped_folders, updated_at
+        FROM device_crawl_progress
+    """)
+    res = {}
+    for row in cur.fetchall():
+        res[row[0]] = {
+            "device_id": row[0],
+            "device_name": row[1],
+            "latest_lmd": row[2],
+            "status": row[3],
+            "last_path": row[4],
+            "classified_folders": row[5],
+            "skipped_folders": row[6],
+            "updated_at": row[7]
+        }
+    return res
+
+
 def get_applied_folders_for_rule(conn: sqlite3.Connection, rule_id: int) -> List[Tuple[str, str]]:
     """Returns list of (device_name, folder_path) tuples where this rule has been applied."""
     cur = conn.cursor()

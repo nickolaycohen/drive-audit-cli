@@ -37,6 +37,10 @@ from storage_rules import (
     get_all_applied_resources,
     get_or_create_ingestion_record,
     get_all_ingestion_records,
+    render_progress_bar,
+    update_device_crawl_progress,
+    get_device_crawl_progress,
+    get_all_device_crawl_progress,
     get_shared_db_path,
     get_tier_color
 )
@@ -565,7 +569,8 @@ def prompt_user_for_storage_rule(
     folder_path: str,
     children_items: List[Dict[str, Any]],
     conn: sqlite3.Connection,
-    rules: Optional[List[StorageRule]] = None
+    rules: Optional[List[StorageRule]] = None,
+    device_progress: Optional[Dict[str, Any]] = None
 ) -> Optional[StorageRule]:
     """
     Interactive prompt presenting unclassified folder details and guiding
@@ -676,26 +681,52 @@ def prompt_user_for_storage_rule(
     }
     tier_icon = color_icons.get(suggested_color, "⚪")
 
-    print("\n" + "=" * 120)
-    print(f"  ☁️  UNCLASSIFIED FOLDER FOUND: '{folder_name}'")
-    print("=" * 120)
-    print(f"  • Device:                 {device_name}")
-    print(f"  • Remote Path:            {norm_path}")
-    print(f"  • Size / Direct Contents: {format_size_human(total_bytes)} ({total_files} files, {len(subdirs)} subfolders)")
-    print(f"  • Top File Types:         {top_exts}")
-    print(f"  • Sample Files:           {sample_str}")
-    print("-" * 120)
-    print(f"  📋 Active Storage Rules in Database ({len(rules)} established):")
-    print(format_existing_rules_table(rules[:5]))
-    if len(rules) > 5:
-        print(f"     (... and {len(rules) - 5} more rules in database)")
-    print("-" * 120)
-    print("  💡 Recommended Classification & Storage Plan:")
-    print(f"     • Classification:      {suggested_category}")
-    print(f"     • Storage Tier:        {suggested_tier.upper()} {tier_icon}")
-    print(f"     • Target Destination:  {suggested_dest}")
-    print(f"     • Operational Meaning: {suggested_impact}")
-    print("-" * 120)
+    def print_folder_banner():
+        print("\n" + "=" * 120)
+        title_tag = ""
+        if device_progress:
+            dev_idx = device_progress.get("device_idx", 1)
+            tot_devs = device_progress.get("total_devices", 1)
+            title_tag = f"  [Device {dev_idx}/{tot_devs}: {device_name}]"
+        print(f"  ☁️  UNCLASSIFIED FOLDER FOUND: '{folder_name}'{title_tag}")
+        print("=" * 120)
+
+        if device_progress:
+            dev_idx = device_progress.get("device_idx", 1)
+            tot_devs = device_progress.get("total_devices", 1)
+            dev_dt = device_progress.get("device_date", "Legacy")
+            eval_f = device_progress.get("evaluated_folders", 0)
+            tot_f = max(device_progress.get("total_folders", 1), eval_f + 1)
+            cur_num = device_progress.get("current_folder_num", eval_f + 1)
+            rem_f = max(0, tot_f - eval_f)
+            cls_f = device_progress.get("classified_folders", 0)
+            skp_f = device_progress.get("skipped_folders", 0)
+            bar = render_progress_bar(eval_f, tot_f, width=20)
+
+            print(f"  • Device:                 {device_name} (Device {dev_idx}/{tot_devs} • Last Backup: {dev_dt})")
+            print(f"  • Device Progress:        {bar} ({eval_f}/{tot_f} folders evaluated • {rem_f} remaining)")
+            print(f"  • Folder Triage Queue:    Folder {cur_num} of {tot_f} on this device ({cls_f} Classified, {skp_f} Skipped)")
+        else:
+            print(f"  • Device:                 {device_name}")
+
+        print(f"  • Remote Path:            {norm_path}")
+        print(f"  • Size / Direct Contents: {format_size_human(total_bytes)} ({total_files} files, {len(subdirs)} subfolders)")
+        print(f"  • Top File Types:         {top_exts}")
+        print(f"  • Sample Files:           {sample_str}")
+        print("-" * 120)
+        print(f"  📋 Active Storage Rules in Database ({len(rules)} established):")
+        print(format_existing_rules_table(rules[:5]))
+        if len(rules) > 5:
+            print(f"     (... and {len(rules) - 5} more rules in database)")
+        print("-" * 120)
+        print("  💡 Recommended Classification & Storage Plan:")
+        print(f"     • Classification:      {suggested_category}")
+        print(f"     • Storage Tier:        {suggested_tier.upper()} {tier_icon}")
+        print(f"     • Target Destination:  {suggested_dest}")
+        print(f"     • Operational Meaning: {suggested_impact}")
+        print("-" * 120)
+
+    print_folder_banner()
 
     while True:
         print("\nSelect Action:")
@@ -721,51 +752,13 @@ def prompt_user_for_storage_rule(
         if choice == "e":
             edit_storage_rules_interactive(conn)
             rules = load_all_storage_rules(conn)
-            print("\n" + "=" * 120)
-            print(f"  ☁️  UNCLASSIFIED FOLDER FOUND: '{folder_name}'")
-            print("=" * 120)
-            print(f"  • Device:                 {device_name}")
-            print(f"  • Remote Path:            {norm_path}")
-            print(f"  • Size / Direct Contents: {format_size_human(total_bytes)} ({total_files} files, {len(subdirs)} subfolders)")
-            print(f"  • Top File Types:         {top_exts}")
-            print(f"  • Sample Files:           {sample_str}")
-            print("-" * 120)
-            print(f"  📋 Active Storage Rules in Database ({len(rules)} established):")
-            print(format_existing_rules_table(rules[:5]))
-            if len(rules) > 5:
-                print(f"     (... and {len(rules) - 5} more rules in database)")
-            print("-" * 120)
-            print("  💡 Recommended Classification & Storage Plan:")
-            print(f"     • Classification:      {suggested_category}")
-            print(f"     • Storage Tier:        {suggested_tier.upper()} {tier_icon}")
-            print(f"     • Target Destination:  {suggested_dest}")
-            print(f"     • Operational Meaning: {suggested_impact}")
-            print("-" * 120)
+            print_folder_banner()
             continue
 
         if choice == "v":
             display_all_assigned_rules(conn)
             rules = load_all_storage_rules(conn)
-            print("\n" + "=" * 120)
-            print(f"  ☁️  UNCLASSIFIED FOLDER FOUND: '{folder_name}'")
-            print("=" * 120)
-            print(f"  • Device:                 {device_name}")
-            print(f"  • Remote Path:            {norm_path}")
-            print(f"  • Size / Direct Contents: {format_size_human(total_bytes)} ({total_files} files, {len(subdirs)} subfolders)")
-            print(f"  • Top File Types:         {top_exts}")
-            print(f"  • Sample Files:           {sample_str}")
-            print("-" * 120)
-            print(f"  📋 Active Storage Rules in Database ({len(rules)} established):")
-            print(format_existing_rules_table(rules[:5]))
-            if len(rules) > 5:
-                print(f"     (... and {len(rules) - 5} more rules in database)")
-            print("-" * 120)
-            print("  💡 Recommended Classification & Storage Plan:")
-            print(f"     • Classification:      {suggested_category}")
-            print(f"     • Storage Tier:        {suggested_tier.upper()} {tier_icon}")
-            print(f"     • Target Destination:  {suggested_dest}")
-            print(f"     • Operational Meaning: {suggested_impact}")
-            print("-" * 120)
+            print_folder_banner()
             continue
 
         if choice == "6":
@@ -1121,22 +1114,34 @@ def run_device_backup_wizard():
     epoch_past = datetime.datetime(1970, 1, 1)
     device_catalog.sort(key=lambda d: d["latest_dt"] if d["latest_dt"] else epoch_past, reverse=True)
 
+    crawl_progress_map = get_all_device_crawl_progress(conn)
+
     # Print standard IDRIVE STORAGE SUMMARY table
-    print("\n" + "=" * 155)
-    print(f"{'IDRIVE STORAGE SUMMARY (Recent → Oldest)':^155}")
-    print("=" * 155)
-    print(f"{'No.':<4} | {'Device Name':<22} | {'Scanned Size':>12} | {'Last Scanned':<16} | {'Status':<8} | {'Last Modified (Folder)':<50} | {'Device ID':<22}")
-    print("-" * 155)
+    print("\n" + "=" * 165)
+    print(f"{'IDRIVE STORAGE SUMMARY (Recent → Oldest)':^165}")
+    print("=" * 165)
+    print(f"{'No.':<4} | {'Device Name':<22} | {'Scanned Size':>12} | {'Last Scanned':<16} | {'Triage Status':<18} | {'Last Modified (Folder)':<45} | {'Device ID':<22}")
+    print("-" * 165)
 
     total_account_gb = 0.0
     for idx, d in enumerate(device_catalog, 1):
         total_account_gb += d["size_gb"]
         l_display = f"{d['latest_lmd'][:19]} ({d['lmd_path'][-25:]})" if d["lmd_path"] else d["latest_lmd"][:19]
-        print(f"{idx:<4} | {d['nick_name']:<22} | {d['size_gb']:>9.2f} GB | {d['last_scan']:<16} | {d['status_str']:<8} | {l_display:<50} | {d['device_id']:<22}")
+        cp = crawl_progress_map.get(d["device_id"])
+        if cp:
+            if cp["status"] == "completed":
+                t_stat = f"Completed ({cp['classified_folders']} ✓)"
+            elif cp["status"] == "in_progress":
+                t_stat = f"In Progress ({cp['classified_folders']} ⏳)"
+            else:
+                t_stat = cp["status"].title()
+        else:
+            t_stat = "Pending"
+        print(f"{idx:<4} | {d['nick_name']:<22} | {d['size_gb']:>9.2f} GB | {d['last_scan']:<16} | {t_stat:<18} | {l_display:<45} | {d['device_id']:<22}")
 
-    print("-" * 155)
+    print("-" * 165)
     print(f"TOTAL ACCOUNT STORAGE: {total_account_gb:.2f} GB Across {len(device_catalog)} Devices")
-    print("=" * 155)
+    print("=" * 165)
 
     rules = load_all_storage_rules(conn)
     print(f"\n[✓] Loaded {len(rules)} persistent Storage Rules from {db_path}")
@@ -1151,9 +1156,9 @@ def run_device_backup_wizard():
 
     target_dev = triage_catalog[0]
     target_date_str = target_dev["latest_dt"].strftime("%Y-%m-%d") if target_dev["latest_dt"] else "Legacy"
-    print("\n" + "=" * 155)
+    print("\n" + "=" * 165)
     print(f"  🎯 TARGETING OLDEST MODIFIED DEVICE FIRST: '{target_dev['nick_name']}' (Last Modified: {target_date_str})")
-    print("=" * 155)
+    print("=" * 165)
 
     # Step 3: Walk devices and folders automatically without pause
     total_classified = 0
@@ -1164,12 +1169,19 @@ def run_device_backup_wizard():
         dev_id = dev["device_id"]
         dev_date = dev["latest_dt"].strftime("%Y-%m-%d") if dev["latest_dt"] else "Legacy"
 
-        print("\n" + "#" * 80)
-        print(f"  DEVICE [{dev_idx}/{len(triage_catalog)}]: '{dev_name}' (Last Backup: {dev_date})")
-        print("#" * 80)
+        # Check existing crawl status
+        cp = get_device_crawl_progress(conn, dev_id)
+        dev_classified = cp["classified_folders"] if cp else 0
+        dev_skipped = cp["skipped_folders"] if cp else 0
+        dev_evaluated = 0
+
+        print("\n" + "#" * 90)
+        print(f"  📱 DEVICE [{dev_idx}/{len(triage_catalog)}]: '{dev_name}' (Last Backup: {dev_date})")
+        print("#" * 90)
 
         # Queue of paths to inspect: starts with top-level items
         queue = ["/"]
+        dev_total_folders = 0
 
         while queue:
             current_path = queue.pop(0)
@@ -1182,7 +1194,18 @@ def run_device_backup_wizard():
                     name = item.get('name') or item.get('p')
                     if is_dir and name:
                         queue.append("/" + name.strip("/"))
+                dev_total_folders = len(queue)
+                preview = ", ".join(queue[:5])
+                if len(queue) > 5:
+                    preview += f" ... (+{len(queue) - 5} more)"
+                print(f"  • Discovered Top Folders ({dev_total_folders}): {preview}")
+                print(f"  • Initial Progress: {render_progress_bar(0, dev_total_folders, width=15)} (0/{dev_total_folders} evaluated | {dev_total_folders} Remaining)")
+                print("-" * 90)
+                update_device_crawl_progress(conn, dev_id, dev_name, dev_date, status="in_progress", last_path="/", classified_folders=dev_classified, skipped_folders=dev_skipped)
                 continue
+
+            dev_evaluated += 1
+            dev_total_folders = max(dev_total_folders, dev_evaluated + len(queue))
 
             # Check if this folder matches an existing storage rule
             matched_rule = match_storage_rule(dev_name, current_path, rules=rules)
@@ -1197,14 +1220,17 @@ def run_device_backup_wizard():
                     target_folder=matched_rule.target_relative_path or "Documents",
                     status="ignored" if matched_rule.target_tier.lower() in ("discard", "purge") else "pending"
                 )
+                dev_classified += 1
+                total_classified += 1
+                prog_bar = render_progress_bar(dev_evaluated, dev_total_folders, width=15)
                 if matched_rule.action == "STAGE_DISCARDABLE":
                     print(f"  [🟠 Temp Discardable] '{current_path}' (Rule: '{matched_rule.name}', Ingestion ID: {ing_rec['ingestion_id']})")
                 elif matched_rule.action in ("DISCARD_IGNORE", "PURGE_SKIP") or matched_rule.target_tier.lower() in ("discard", "purge"):
                     print(f"  [🚫 Discarded / Ignored] '{current_path}' (Rule: '{matched_rule.name}', Ingestion ID: {ing_rec['ingestion_id']})")
                 else:
                     print(f"  [✓ Rule Matched] '{current_path}' ➔ '{matched_rule.name}' ({matched_rule.target_tier.upper()}, Ingestion ID: {ing_rec['ingestion_id']})")
-                total_classified += 1
-                # If recursive rule covers everything underneath, skip enqueuing children
+                print(f"  ➔ Progress on '{dev_name}': {prog_bar} ({dev_evaluated}/{dev_total_folders} evaluated | {dev_classified} Classified, {len(queue)} Remaining)")
+                update_device_crawl_progress(conn, dev_id, dev_name, dev_date, status="in_progress", last_path=current_path, classified_folders=dev_classified, skipped_folders=dev_skipped)
                 if matched_rule.is_recursive:
                     continue
 
@@ -1213,14 +1239,34 @@ def run_device_backup_wizard():
             
             # If no rule matched, trigger interactive prompt
             if not matched_rule:
-                action_res = prompt_user_for_storage_rule(dev_name, current_path, children, conn, rules=rules)
+                dev_prog_info = {
+                    "device_idx": dev_idx,
+                    "total_devices": len(triage_catalog),
+                    "device_name": dev_name,
+                    "device_date": dev_date,
+                    "evaluated_folders": dev_evaluated - 1,
+                    "current_folder_num": dev_evaluated,
+                    "total_folders": dev_total_folders,
+                    "classified_folders": dev_classified,
+                    "skipped_folders": dev_skipped,
+                    "remaining_folders": len(queue)
+                }
+                action_res = prompt_user_for_storage_rule(
+                    dev_name, current_path, children, conn, 
+                    rules=rules, device_progress=dev_prog_info
+                )
                 
                 if action_res is None:
-                    print("\n[Paused] Wizard progress saved to database. Run anytime to resume.")
+                    update_device_crawl_progress(conn, dev_id, dev_name, dev_date, status="in_progress", last_path=current_path, classified_folders=dev_classified, skipped_folders=dev_skipped)
+                    print(f"\n[Paused] Progress for '{dev_name}' saved ({dev_classified} classified, {dev_skipped} skipped). Run anytime to resume.")
                     conn.close()
                     return
                 elif action_res == "SKIP":
+                    dev_skipped += 1
                     total_skipped += 1
+                    prog_bar = render_progress_bar(dev_evaluated, dev_total_folders, width=15)
+                    print(f"  ➔ Progress on '{dev_name}': {prog_bar} ({dev_evaluated}/{dev_total_folders} evaluated | {dev_classified} Classified, {dev_skipped} Skipped, {len(queue)} Remaining)")
+                    update_device_crawl_progress(conn, dev_id, dev_name, dev_date, status="in_progress", last_path=current_path, classified_folders=dev_classified, skipped_folders=dev_skipped)
                     continue
                 elif action_res == "DRILL":
                     # Add child directories to front of queue
@@ -1229,11 +1275,15 @@ def run_device_backup_wizard():
                         name = item.get('name') or item.get('p')
                         if is_dir and name:
                             queue.insert(0, current_path.rstrip("/") + "/" + name.strip("/"))
+                    dev_total_folders = max(dev_total_folders, dev_evaluated + len(queue))
                     continue
                 elif isinstance(action_res, StorageRule):
                     rules = load_all_storage_rules(conn)
+                    dev_classified += 1
                     total_classified += 1
-                    # If user chose recursive rule, don't drill deeper
+                    prog_bar = render_progress_bar(dev_evaluated, dev_total_folders, width=15)
+                    print(f"  ➔ Progress on '{dev_name}': {prog_bar} ({dev_evaluated}/{dev_total_folders} evaluated | {dev_classified} Classified, {len(queue)} Remaining)")
+                    update_device_crawl_progress(conn, dev_id, dev_name, dev_date, status="in_progress", last_path=current_path, classified_folders=dev_classified, skipped_folders=dev_skipped)
                     if action_res.is_recursive:
                         continue
 
@@ -1243,12 +1293,19 @@ def run_device_backup_wizard():
                 name = item.get('name') or item.get('p')
                 if is_dir and name:
                     queue.append(current_path.rstrip("/") + "/" + name.strip("/"))
+            dev_total_folders = max(dev_total_folders, dev_evaluated + len(queue))
 
-    print("\n" + "=" * 80)
-    print("  🎉 ALL REGISTERED DEVICES TRIAGED & CLASSIFIED!")
-    print("=" * 80)
-    print(f"  • Total Folders Classified: {total_classified}")
-    print(f"  • Total Folders Skipped:    {total_skipped}")
+        # Device finished!
+        update_device_crawl_progress(conn, dev_id, dev_name, dev_date, status="completed", last_path="/", classified_folders=dev_classified, skipped_folders=dev_skipped)
+        fin_bar = render_progress_bar(dev_evaluated, max(dev_total_folders, 1), width=20)
+        print("\n" + "=" * 90)
+        print(f"  🎉 DEVICE COMPLETED [{dev_idx}/{len(triage_catalog)}]: '{dev_name}'")
+        print(f"  • Final Progress: {fin_bar} (100%)")
+        print(f"  • Device Summary: {dev_classified} Folders Classified | {dev_skipped} Skipped")
+        if dev_idx < len(triage_catalog):
+            next_d = triage_catalog[dev_idx]
+            print(f"  ➔ Next Device in Queue: '{next_d['nick_name']}' [{dev_idx + 1}/{len(triage_catalog)}]")
+        print("=" * 90)
     print(f"  • Total Storage Rules:      {len(load_all_storage_rules(conn))}")
     print("=" * 80)
     conn.close()
