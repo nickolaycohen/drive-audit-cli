@@ -16,7 +16,7 @@ import sqlite3
 import datetime
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Set
 
 DEFAULT_DB_PATH = "/Volumes/Extreme Pro/Data/sqlite/drive-audit/drive_audit.db"
 
@@ -234,6 +234,16 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS drilled_folders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_name TEXT NOT NULL,
+            folder_path TEXT NOT NULL,
+            drilled_at TEXT NOT NULL,
+            UNIQUE(device_name, folder_path)
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS ingestion_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ingestion_id TEXT UNIQUE NOT NULL,
@@ -260,6 +270,9 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
     """)
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_applied_rule_id ON applied_rule_folders(rule_id);
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_drilled_dev_path ON drilled_folders(device_name, folder_path);
     """)
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_ingestion_device_path ON ingestion_records(device_name, source_path);
@@ -472,6 +485,84 @@ def record_applied_rule_folder(conn: sqlite3.Connection, rule_id: int, device_na
         ON CONFLICT(rule_id, device_name, folder_path) DO UPDATE SET applied_at = excluded.applied_at
     """, (rule_id, device_name, folder_path, now_str))
     conn.commit()
+
+
+def record_drilled_folder(conn: sqlite3.Connection, device_name: str, folder_path: str) -> None:
+    """Records that a folder was drilled down into for individual subfolder classification."""
+    if not device_name or not folder_path:
+        return
+    norm_path = "/" + folder_path.strip().strip("/").replace("\\", "/")
+    now_str = datetime.datetime.now().isoformat()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO drilled_folders (device_name, folder_path, drilled_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(device_name, folder_path) DO UPDATE SET drilled_at = excluded.drilled_at
+    """, (device_name.strip(), norm_path, now_str))
+    conn.commit()
+
+
+def is_folder_drilled(conn: sqlite3.Connection, device_name: str, folder_path: str) -> bool:
+    """Checks if a folder on a device has previously been marked to drill down."""
+    if not device_name or not folder_path:
+        return False
+    norm_path = "/" + folder_path.strip().strip("/").replace("\\", "/")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT 1 FROM drilled_folders 
+        WHERE device_name = ? AND folder_path = ?
+    """, (device_name.strip(), norm_path))
+    return cur.fetchone() is not None
+
+
+def get_drilled_folders_for_device(conn: sqlite3.Connection, device_name: str) -> Set[str]:
+    """Returns set of all normalized folder paths that have been marked as drilled down for a device."""
+    if not device_name:
+        return set()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT folder_path FROM drilled_folders 
+        WHERE device_name = ?
+    """, (device_name.strip(),))
+    return {r[0] for r in cur.fetchall()}
+
+
+def delete_drilled_folder(conn: sqlite3.Connection, device_name: str, folder_path: str) -> bool:
+    """Removes a folder from drilled_folders (e.g. if a rule is explicitly assigned to it or user resets it)."""
+    if not device_name or not folder_path:
+        return False
+    norm_path = "/" + folder_path.strip().strip("/").replace("\\", "/")
+    cur = conn.cursor()
+    cur.execute("""
+        DELETE FROM drilled_folders 
+        WHERE device_name = ? AND folder_path = ?
+    """, (device_name.strip(), norm_path))
+    affected = cur.rowcount > 0
+    conn.commit()
+    return affected
+
+
+def get_all_drilled_folders(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Returns list of all drilled folders across all devices."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, device_name, folder_path, drilled_at 
+        FROM drilled_folders
+        ORDER BY device_name, folder_path
+    """)
+    return [
+        {"id": r[0], "device_name": r[1], "folder_path": r[2], "drilled_at": r[3]}
+        for r in cur.fetchall()
+    ]
+
+
+def clear_drilled_folders_for_device(conn: sqlite3.Connection, device_name: str) -> int:
+    """Clears all drilled folder records for a device."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM drilled_folders WHERE device_name = ?", (device_name.strip(),))
+    affected = cur.rowcount
+    conn.commit()
+    return affected
 
 
 def format_size_human(size_val: Any) -> str:

@@ -45,7 +45,13 @@ from storage_rules import (
     get_tier_color,
     is_ios_device,
     is_mac_device,
-    is_windows_device
+    is_windows_device,
+    record_drilled_folder,
+    is_folder_drilled,
+    get_drilled_folders_for_device,
+    delete_drilled_folder,
+    get_all_drilled_folders,
+    clear_drilled_folders_for_device
 )
 
 BASE_URL = os.environ.get("IDRIVE_EVS_URL", "https://evsweb2652.idrive.com/evs")
@@ -485,14 +491,36 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
             print(f"  {idx:<3} | {rec['ingestion_id']:<12} | {rec['device_name'][:20]:<20} | {rec['source_path'][:25]:<25} | {tier_disp:<22} | {rec['rule_name'][:30]:<30} | {dest_disp}")
 
     print("=" * 200)
-    print(f"  📊 Summary: Total: {len(rules)} Rules Established across {len(ingestion_records)} Classified Cloud Folders")
+
+    # =========================================================================
+    # TABLE 3: DRILLED DOWN FOLDERS (Subfolder Exploration)
+    # =========================================================================
+    drilled_list = get_all_drilled_folders(conn)
+    if drilled_list:
+        print("\n" + "=" * 200)
+        print(f"{f'TABLE 3: DRILLED DOWN FOLDERS ({len(drilled_list)} Folders Explored at Subfolder Level)':^200}")
+        print("=" * 200)
+        print(f"  {'#':<3} | {'Device Name':<25} | {'Remote Folder Path':<50} | {'Drilled At'}")
+        print("  " + "-" * 196)
+        for idx, df in enumerate(drilled_list, 1):
+            print(f"  {idx:<3} | {df['device_name'][:25]:<25} | {df['folder_path'][:50]:<50} | {df['drilled_at'][:19]}")
+        print("=" * 200)
+
+    drilled_str = f" | {len(drilled_list)} Drilled Down Folders 📂" if drilled_list else ""
+    print(f"  📊 Summary: Total: {len(rules)} Rules Established across {len(ingestion_records)} Classified Cloud Folders{drilled_str}")
     print(f"     Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
     print("=" * 200)
 
-    print("\nActions: [e] Edit/Rename Rules  |  [Enter] Return")
+    act_prompt = "\nActions: [e] Edit/Rename Rules"
+    if drilled_list:
+        act_prompt += "  |  [dr] Manage Drilled Folders"
+    act_prompt += "  |  [Enter] Return"
+    print(act_prompt)
     act_c = input("Choice: ").strip().lower()
     if act_c == "e":
         edit_storage_rules_interactive(conn)
+    elif act_c == "dr":
+        manage_drilled_folders_interactive(conn)
 
 
 def edit_storage_rules_interactive(conn: sqlite3.Connection):
@@ -531,9 +559,13 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
             print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {dest_disp}")
         print("=" * 170)
 
-        choice = input(f"\nSelect Rule # to edit (1-{len(rules)}) [or 'd' to delete, 'q' to return]: ").strip().lower()
+        choice = input(f"\nSelect Rule # to edit (1-{len(rules)}) [or 'd' to delete, 'dr' to manage drilled, 'q' to return]: ").strip().lower()
         if not choice or choice in ("q", "quit", "exit"):
             break
+
+        if choice == "dr":
+            manage_drilled_folders_interactive(conn)
+            continue
 
         if choice == "d":
             del_sel = input(f"Enter Rule # to delete (1-{len(rules)}) [or 'c' to cancel]: ").strip()
@@ -626,6 +658,43 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
                 """, (r.target_tier, r.target_relative_path or i_folder, new_local_dest, new_status, datetime.datetime.now().isoformat(), i_id))
             conn.commit()
             print(f"\n[Success] ✓ Rule #{choice} successfully updated: '{r.name}' ➔ {r.target_tier.upper()}")
+
+
+def manage_drilled_folders_interactive(conn: sqlite3.Connection):
+    """Interactive manager to view and remove drilled folder records."""
+    while True:
+        drilled_list = get_all_drilled_folders(conn)
+        print("\n" + "=" * 140)
+        print(f"{f'📂 DRILLED DOWN FOLDERS MANAGER ({len(drilled_list)} Recorded Folders)':^140}")
+        print("=" * 140)
+        if not drilled_list:
+            print("\n  (No drilled folders recorded. Choose option [6] during triage to record drill-downs.)\n")
+            print("=" * 140)
+            return
+
+        print(f"  {'#':<3} | {'Device Name':<25} | {'Remote Folder Path':<65} | {'Drilled At'}")
+        print("  " + "-" * 136)
+        for idx, df in enumerate(drilled_list, 1):
+            print(f"  {idx:<3} | {df['device_name'][:25]:<25} | {df['folder_path'][:65]:<65} | {df['drilled_at'][:19]}")
+        print("=" * 140)
+
+        print("\nActions: Enter # to delete/undrill, 'all' to clear all, or [Enter] / 'q' to return")
+        sel = input("Choice: ").strip().lower()
+        if not sel or sel in ("q", "quit", "exit"):
+            break
+        if sel == "all":
+            confirm = input("Are you sure you want to clear ALL drilled folders? [y/N]: ").strip().lower()
+            if confirm == "y":
+                conn.execute("DELETE FROM drilled_folders")
+                conn.commit()
+                print("\n[✓] All drilled folders cleared.")
+            continue
+        if sel.isdigit() and 1 <= int(sel) <= len(drilled_list):
+            item = drilled_list[int(sel) - 1]
+            confirm = input(f"Remove '{item['folder_path']}' on '{item['device_name']}' from drilled folders? [y/N]: ").strip().lower()
+            if confirm == "y":
+                delete_drilled_folder(conn, item["device_name"], item["folder_path"])
+                print(f"\n[✓] Removed '{item['folder_path']}' from drilled folders.")
 
 
 def prompt_user_for_storage_rule(
@@ -1306,6 +1375,7 @@ def run_device_backup_wizard():
 
         # Check existing crawl status
         cp = get_device_crawl_progress(conn, dev_id)
+        drilled_set = get_drilled_folders_for_device(conn, dev_name)
         dev_classified_folders = 0
         dev_skipped_folders = 0
         dev_classified_files = 0
@@ -1386,9 +1456,15 @@ def run_device_backup_wizard():
             curr_fc = curr_props.get("filecount", 0)
             curr_sz = curr_props.get("size_bytes", 0)
 
+            norm_curr_path = "/" + current_path.strip().strip("/").replace("\\", "/")
+
             # Check if this folder matches an existing storage rule
             matched_rule = match_storage_rule(dev_name, current_path, rules=rules)
             if matched_rule:
+                if norm_curr_path in drilled_set:
+                    delete_drilled_folder(conn, dev_name, current_path)
+                    drilled_set.discard(norm_curr_path)
+
                 record_applied_rule_folder(conn, matched_rule.rule_id, dev_name, current_path)
                 ing_rec = get_or_create_ingestion_record(
                     conn=conn,
@@ -1431,11 +1507,30 @@ def run_device_backup_wizard():
                 if matched_rule.is_recursive:
                     continue
 
-            # Fetch folder children to evaluate or prompt
-            children = browse_remote_folder(session, dev_id, current_path)
-            
-            # If no rule matched, trigger interactive prompt
+            # If no rule matched, check if folder was previously drilled down or prompt user
             if not matched_rule:
+                if norm_curr_path in drilled_set:
+                    print(f"  [📂 Drilled Down] '{current_path}' (Previously drilled down ➔ advancing to subfolders)")
+                    children = browse_remote_folder(session, dev_id, current_path)
+                    child_dirs = []
+                    for item in children:
+                        is_dir = item.get('is_dir') is True or str(item.get('is_dir')).lower() in ('1', 'true')
+                        name = item.get('name') or item.get('p')
+                        if is_dir and name:
+                            child_dirs.append(current_path.rstrip("/") + "/" + name.strip("/"))
+                    for c_path in reversed(child_dirs):
+                        queue.insert(0, c_path)
+                    dev_total_folders = max(dev_total_folders, dev_evaluated_folders + len(queue))
+                    update_device_crawl_progress(
+                        conn, dev_id, dev_name, dev_date, status="in_progress", last_path=current_path,
+                        classified_folders=dev_classified_folders, skipped_folders=dev_skipped_folders,
+                        total_files=dev_total_files, classified_files=dev_classified_files, skipped_files=dev_skipped_files,
+                        total_folders=dev_total_folders
+                    )
+                    continue
+
+                # Fetch folder children to evaluate or prompt
+                children = browse_remote_folder(session, dev_id, current_path)
                 dev_prog_info = {
                     "device_idx": dev_idx,
                     "total_devices": len(triage_catalog),
@@ -1490,15 +1585,30 @@ def run_device_backup_wizard():
                     )
                     continue
                 elif action_res == "DRILL":
+                    record_drilled_folder(conn, dev_name, current_path)
+                    drilled_set.add(norm_curr_path)
                     # Add child directories to front of queue
+                    child_dirs = []
                     for item in children:
                         is_dir = item.get('is_dir') is True or str(item.get('is_dir')).lower() in ('1', 'true')
                         name = item.get('name') or item.get('p')
                         if is_dir and name:
-                            queue.insert(0, current_path.rstrip("/") + "/" + name.strip("/"))
+                            child_dirs.append(current_path.rstrip("/") + "/" + name.strip("/"))
+                    for c_path in reversed(child_dirs):
+                        queue.insert(0, c_path)
                     dev_total_folders = max(dev_total_folders, dev_evaluated_folders + len(queue))
+                    print(f"  ➔ [📂 Drill Down Recorded] '{current_path}' recorded in database — will not re-prompt on restart.")
+                    update_device_crawl_progress(
+                        conn, dev_id, dev_name, dev_date, status="in_progress", last_path=current_path,
+                        classified_folders=dev_classified_folders, skipped_folders=dev_skipped_folders,
+                        total_files=dev_total_files, classified_files=dev_classified_files, skipped_files=dev_skipped_files,
+                        total_folders=dev_total_folders
+                    )
                     continue
                 elif isinstance(action_res, StorageRule):
+                    if norm_curr_path in drilled_set:
+                        delete_drilled_folder(conn, dev_name, current_path)
+                        drilled_set.discard(norm_curr_path)
                     rules = load_all_storage_rules(conn)
                     dev_classified_folders += 1
                     dev_classified_files += curr_fc
