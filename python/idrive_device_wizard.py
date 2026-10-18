@@ -614,7 +614,7 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
                     new_status = "ignored"
                 else:
                     c_folder = r.target_relative_path.strip("/").split("/")[0] if r.target_relative_path else i_folder
-                    new_local_dest = f"/Volumes/LaCie/Storage/{r.target_tier.title()}/{c_folder}/{ing_str}"
+                    new_local_dest = f"/Volumes/LaCie/Storage/{r.target_tier.title()}/{c_folder}"
                     new_status = "pending"
                 cur.execute("""
                     UPDATE ingestion_records 

@@ -152,6 +152,17 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_ingestion_id ON ingestion_records(ingestion_id);
     """)
+    # Ensure local_destination in ingestion_records does not have ingestion_id automatically appended
+    try:
+        cur.execute("""
+            UPDATE ingestion_records 
+            SET local_destination = SUBSTR(local_destination, 1, INSTR(local_destination, '/' || ingestion_id) - 1)
+            WHERE local_destination LIKE '%/' || ingestion_id
+        """)
+        conn.commit()
+    except Exception:
+        pass
+
     conn.commit()
 
 
@@ -168,7 +179,8 @@ def get_or_create_ingestion_record(
 ) -> Dict[str, Any]:
     """
     Fetches or registers an ingestion record with a unique Ingestion ID (e.g. ING-0001).
-    Appends the Ingestion ID to the local target destination path for Storage Manager record keeping.
+    Assigns the clean Local Target Destination (e.g. /Volumes/LaCie/Storage/Priority 2/Documents)
+    without appending the Ingestion ID, leaving merge and conflict resolution to the Storage Manager.
     """
     cur = conn.cursor()
     norm_source = "/" + source_path.strip().strip("/").replace("\\", "/")
@@ -187,7 +199,7 @@ def get_or_create_ingestion_record(
             local_dest = "(Do Not Store / Cloud Ignored)"
         else:
             clean_folder = target_folder.strip("/").split("/")[0] if target_folder else "Documents"
-            local_dest = f"/Volumes/LaCie/Storage/{target_tier.title()}/{clean_folder}/{ing_id}"
+            local_dest = f"/Volumes/LaCie/Storage/{target_tier.title()}/{clean_folder}"
         
         cur.execute("""
             UPDATE ingestion_records
@@ -221,7 +233,7 @@ def get_or_create_ingestion_record(
         local_dest = "(Do Not Store / Cloud Ignored)"
     else:
         clean_folder = target_folder.strip("/").split("/")[0] if target_folder else "Documents"
-        local_dest = f"/Volumes/LaCie/Storage/{target_tier.title()}/{clean_folder}/{ing_id}"
+        local_dest = f"/Volumes/LaCie/Storage/{target_tier.title()}/{clean_folder}"
 
     cur.execute("""
         INSERT INTO ingestion_records 
@@ -289,6 +301,21 @@ def record_applied_rule_folder(conn: sqlite3.Connection, rule_id: int, device_na
         ON CONFLICT(rule_id, device_name, folder_path) DO UPDATE SET applied_at = excluded.applied_at
     """, (rule_id, device_name, folder_path, now_str))
     conn.commit()
+
+
+def format_size_human(size_val: Any) -> str:
+    """Format bytes into human-readable string."""
+    try:
+        b = float(size_val)
+        if b <= 0:
+            return "0 B"
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if b < 1024.0:
+                return f"{b:.1f} {unit}"
+            b /= 1024.0
+        return f"{b:.1f} PB"
+    except Exception:
+        return str(size_val or "0 B")
 
 
 def render_progress_bar(completed: int, total: int, width: int = 20) -> str:
