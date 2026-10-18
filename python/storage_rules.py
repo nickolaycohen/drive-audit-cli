@@ -51,6 +51,121 @@ class StorageRule:
     updated_at: Optional[str] = None
 
 
+def is_ios_device(device_name: str) -> bool:
+    """Checks if a device name indicates an Apple iOS mobile device (iPhone, iPad, iPod, iOS)."""
+    d = device_name.lower().strip()
+    return any(k in d for k in ("iphone", "ipad", "ipod", "ios"))
+
+
+def is_mac_device(device_name: str) -> bool:
+    """Checks if a device name indicates an Apple macOS workstation (MacBook, Macmini, iMac, Mac)."""
+    d = device_name.lower().strip()
+    return any(k in d for k in ("macbook", "macmini", "imac", "mac mini", "mac pro", "mac"))
+
+
+def is_windows_device(device_name: str) -> bool:
+    """Checks if a device name indicates a Windows PC/Laptop (PC, ASUS, Laptop, Desktop, Windows)."""
+    d = device_name.lower().strip()
+    return any(k in d for k in ("pc", "asus", "laptop", "desktop", "windows"))
+
+
+def matches_device_pattern(device_name: str, device_pattern: str) -> bool:
+    """
+    Checks if device_name satisfies device_pattern.
+    Supports:
+      - 'ALL' or '*'
+      - 'iOS' or 'all_ios' or 'iOS (*iPhone*, *iPad*)' (matches any iOS device)
+      - 'Mac' or 'macOS' or 'all_mac' (matches any Mac)
+      - 'Windows' or 'PC' (matches any Windows device)
+      - Comma, pipe, or ' or ' separated lists: e.g. '*iPhone*, *iPad*'
+    """
+    if not device_pattern or device_pattern.strip().upper() in ("ALL", "*"):
+        return True
+
+    dev_lower = device_name.strip().lower()
+    raw_pats = [p.strip().lower() for p in re.split(r'[,|]|\s+or\s+', device_pattern) if p.strip()]
+
+    for p in raw_pats:
+        # Check semantic device categories
+        if p in ("ios", "*ios*", "all_ios", "ios devices") or "ios" in p:
+            if is_ios_device(dev_lower):
+                return True
+        if p in ("mac", "*mac*", "macos", "all_mac", "mac devices"):
+            if is_mac_device(dev_lower):
+                return True
+        if p in ("windows", "*windows*", "pc", "*pc*", "windows devices"):
+            if is_windows_device(dev_lower):
+                return True
+
+        # Clean glob matching
+        clean_glob = p.replace("(", "").replace(")", "").strip()
+        if not clean_glob:
+            continue
+        if fnmatch.fnmatch(dev_lower, clean_glob) or fnmatch.fnmatch(dev_lower, f"*{clean_glob}*"):
+            return True
+
+    return False
+
+
+def matches_path_pattern(path: str, path_pattern: str, is_recursive: bool = True) -> bool:
+    """
+    Checks if path satisfies path_pattern.
+    Supports:
+      - Comma, pipe, or ' or ' separated lists: e.g. '/Photos, /Videos' or 'Photos or Videos'
+      - Wildcards (*, ?)
+      - Substring matching
+      - Directory recursion
+      - 'regex:...' expressions
+    """
+    if not path_pattern:
+        return False
+
+    norm_path = "/" + path.strip().strip("/").replace("\\", "/")
+    norm_path_lower = norm_path.lower()
+
+    if path_pattern.strip().lower().startswith("regex:"):
+        sub_pats = [path_pattern.strip()]
+    else:
+        sub_pats = [p.strip() for p in re.split(r'[,|]|\s+or\s+', path_pattern) if p.strip()]
+
+    for pat in sub_pats:
+        pat_lower = pat.lower()
+        if pat_lower.startswith("regex:"):
+            try:
+                rx = re.compile(pat[6:], re.IGNORECASE)
+                if rx.search(norm_path):
+                    return True
+            except re.error:
+                continue
+
+        # Exact path match
+        clean_pat = "/" + pat_lower.strip().strip("/").replace("\\", "/")
+        if clean_pat == norm_path_lower:
+            return True
+
+        if any(c in pat_lower for c in ("*", "?", "[")):
+            if fnmatch.fnmatch(norm_path_lower, pat_lower) or fnmatch.fnmatch(norm_path_lower, f"*{pat_lower}*"):
+                return True
+        else:
+            # Substring match if no wildcards
+            f_name = Path(norm_path_lower).name
+            clean_word = pat_lower.strip("/")
+            if clean_word == f_name or clean_word in norm_path_lower.split("/"):
+                return True
+            if clean_word in norm_path_lower:
+                return True
+
+        # Check recursion
+        if is_recursive:
+            dir_pat = pat_lower.rstrip("/") + "/*"
+            if fnmatch.fnmatch(norm_path_lower, dir_pat) or fnmatch.fnmatch(norm_path_lower, f"*{dir_pat}"):
+                return True
+            if norm_path_lower.startswith(pat_lower.rstrip("/") + "/"):
+                return True
+
+    return False
+
+
 def init_storage_rules_tables(conn: sqlite3.Connection):
     """Initializes storage_rules and device_crawl_progress tables if not present."""
     cur = conn.cursor()
@@ -159,6 +274,62 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
             SET local_destination = SUBSTR(local_destination, 1, INSTR(local_destination, '/' || ingestion_id) - 1)
             WHERE local_destination LIKE '%/' || ingestion_id
         """)
+        conn.commit()
+    except Exception:
+        pass
+
+    # Seed / Update generalized Media Intake rule for iDrive backup of an iOS device
+    try:
+        now_str = datetime.datetime.now().isoformat()
+        cur.execute("SELECT id FROM storage_rules WHERE name LIKE '%Media Intake%'")
+        row = cur.fetchone()
+        ios_desc = "Media Intake rule for iDrive backup of an iOS device: resources in /Photos and /Videos are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
+        if row:
+            rule_id = row[0]
+            cur.execute("""
+                UPDATE storage_rules
+                SET name = 'Media Intake (iOS Backup)',
+                    device_pattern = 'iOS (*iPhone*, *iPad*)',
+                    path_pattern = '/Photos, /Videos',
+                    target_tier = 'priority 4',
+                    target_relative_path = 'Temporary',
+                    finder_color = 'Orange',
+                    action = 'MEDIA_INTAKE',
+                    category = 'Temporary',
+                    description = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (ios_desc, now_str, rule_id))
+        else:
+            cur.execute("""
+                INSERT INTO storage_rules (
+                    name, device_pattern, path_pattern, ext_pattern, category, description,
+                    target_tier, target_relative_path, finder_color, action, is_recursive, created_at, updated_at
+                ) VALUES (
+                    'Media Intake (iOS Backup)', 'iOS (*iPhone*, *iPad*)', '/Photos, /Videos', '*', 'Temporary',
+                    ?, 'priority 4', 'Temporary', 'Orange', 'MEDIA_INTAKE', 1, ?, ?
+                )
+            """, (ios_desc, now_str, now_str))
+            rule_id = cur.lastrowid
+
+        # Attach iOS devices with /Photos and /Videos to this generalized rule
+        cur.execute("SELECT DISTINCT device_name FROM ingestion_records")
+        dev_rows = cur.fetchall()
+        for (d_name,) in dev_rows:
+            if is_ios_device(d_name):
+                for p_name in ("/Photos", "/Videos"):
+                    cur.execute("""
+                        INSERT INTO applied_rule_folders (rule_id, device_name, folder_path, applied_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(rule_id, device_name, folder_path) DO UPDATE SET applied_at = excluded.applied_at
+                    """, (rule_id, d_name, p_name, now_str))
+                    cur.execute("""
+                        UPDATE ingestion_records
+                        SET rule_id = ?, target_tier = 'priority 4', target_folder = 'Temporary',
+                            local_destination = '/Volumes/LaCie/Storage/Priority 4/Temporary',
+                            status = 'pending', updated_at = ?
+                        WHERE device_name = ? AND source_path = ?
+                    """, (rule_id, now_str, d_name, p_name))
         conn.commit()
     except Exception:
         pass
@@ -584,40 +755,12 @@ def match_storage_rule(
     dev_lower = device_name.strip().lower()
 
     for rule in rules:
-        # Check device pattern
-        if rule.device_pattern != "ALL":
-            if not fnmatch.fnmatch(dev_lower, rule.device_pattern.strip().lower()):
-                continue
+        # Check device pattern (supports 'ALL', 'iOS', 'Mac', 'Windows', or comma-separated lists)
+        if not matches_device_pattern(device_name, rule.device_pattern):
+            continue
 
-        # Check path pattern (case-insensitive)
-        pat = rule.path_pattern.strip()
-        pat_lower = pat.lower()
-
-        matched = False
-        # If pattern starts with regex flag 'regex:'
-        if pat_lower.startswith("regex:"):
-            try:
-                rx = re.compile(pat[6:], re.IGNORECASE)
-                if rx.search(norm_path):
-                    matched = True
-            except re.error:
-                pass
-        else:
-            # Standard glob / wildcard matching
-            # Ensure pattern has wildcards if simple substring is intended
-            if not any(c in pat for c in ("*", "?", "[")):
-                # If substring
-                matched = pat_lower in norm_path_lower
-            else:
-                matched = fnmatch.fnmatch(norm_path_lower, pat_lower) or fnmatch.fnmatch(norm_path_lower, f"*{pat_lower}*")
-
-        if not matched and rule.is_recursive:
-            # Check if norm_path is a descendant of a matching directory
-            if not pat_lower.endswith("*"):
-                dir_pat = pat_lower.rstrip("/") + "/*"
-                matched = fnmatch.fnmatch(norm_path_lower, dir_pat)
-
-        if not matched:
+        # Check path pattern (supports comma-separated lists, wildcards, recursion, and regex)
+        if not matches_path_pattern(norm_path, rule.path_pattern, is_recursive=bool(rule.is_recursive)):
             continue
 
         # Check extension filter if supplied

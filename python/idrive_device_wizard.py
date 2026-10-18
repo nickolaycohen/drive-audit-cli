@@ -42,7 +42,10 @@ from storage_rules import (
     get_device_crawl_progress,
     get_all_device_crawl_progress,
     get_shared_db_path,
-    get_tier_color
+    get_tier_color,
+    is_ios_device,
+    is_mac_device,
+    is_windows_device
 )
 
 BASE_URL = os.environ.get("IDRIVE_EVS_URL", "https://evsweb2652.idrive.com/evs")
@@ -409,7 +412,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     if not rules:
         print("\n  (No Storage Rules have been created yet. Rules will appear here as you triage folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Category':<24} | {'Scope':<10} | {'Path Match Pattern':<20} | {'Target Destination'}")
+        print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Category':<20} | {'Scope':<24} | {'Path Match Pattern':<25} | {'Target Destination'}")
         print("  " + "-" * 186)
 
         for idx, r in enumerate(rules, 1):
@@ -431,7 +434,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
             if dest_disp.startswith("Temporary"):
                 dest_disp = f"Priority 4/{dest_disp}"
 
-            print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.category[:24]:<24} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {dest_disp}")
+            print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.category[:20]:<20} | {r.device_pattern[:24]:<24} | {r.path_pattern:<25} | {dest_disp}")
 
     print("=" * 190)
 
@@ -711,11 +714,11 @@ def prompt_user_for_storage_rule(
     elif any(k in path_l for k in ["photo", "pictures", "camera", "dcim", "videos", "media"]):
         suggested_tier = "priority 4"
         suggested_action = "MEDIA_INTAKE"
-        suggested_category = "Photos"
-        suggested_color = "Yellow"
-        suggested_rel_path = "Pictures"
-        suggested_dest = "/Volumes/LaCie/Storage/Priority 4/Pictures/"
-        suggested_impact = "Will be routed to Media Organizer Pipeline for Apple Photos curation"
+        suggested_category = "Temporary"
+        suggested_color = "Orange"
+        suggested_rel_path = "Temporary"
+        suggested_dest = "/Volumes/LaCie/Storage/Priority 4/Temporary/"
+        suggested_impact = "Stored in Priority 4/Temporary to be ingested from the Media Organizer"
     elif any(k in path_l for k in ["archive", "backup", "199", "200", "201", "old-"]):
         suggested_tier = "priority 3"
         suggested_action = "ARCHIVE_COLD"
@@ -851,20 +854,58 @@ def prompt_user_for_storage_rule(
 
         if choice == "1":
             print(f"\n--- ESTABLISH STORAGE RULE FOR '{folder_name}' ---")
+            is_ios = is_ios_device(device_name)
+            is_media = any(k in norm_path.lower() for k in ["photo", "video", "dcim", "media", "camera"])
             print("Select Scope:")
-            print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
-            print(f"  [2] Device-specific only ('{device_name}' / {folder_name} only)")
-            scope_c = input("Scope [1-2] (Default: 1): ").strip()
-            
-            r_rel = suggested_rel_path.strip("/").split("/")[0]
-            if scope_c == "2":
-                r_scope = device_name
-                r_pat = norm_path + "*"
-                r_name = f"{device_name} - {folder_name}"
+            if is_ios and is_media:
+                print(f"  [1] All iOS Devices (iPhone & iPad - /Photos & /Videos) (Recommended) [Default]")
+                print(f"  [2] Universal across ALL devices (*{folder_name}*)")
+                print(f"  [3] Device-specific only ('{device_name}' / {folder_name} only)")
+                scope_c = input("Scope [1-3] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} ({folder_name})"
+                elif scope_c == "3":
+                    r_scope = device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"{device_name} - {folder_name}"
+                else:
+                    r_scope = "iOS (*iPhone*, *iPad*)"
+                    r_pat = "/Photos, /Videos"
+                    r_name = "Media Intake (iOS Backup)"
+                    suggested_impact = "Media Intake rule for iDrive backup of an iOS device: resources in /Photos and /Videos are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
+            elif is_ios:
+                print(f"  [1] All iOS Devices (iPhone & iPad) (*{folder_name}*) (Recommended) [Default]")
+                print(f"  [2] Universal across ALL devices (*{folder_name}*)")
+                print(f"  [3] Device-specific only ('{device_name}' / {folder_name} only)")
+                scope_c = input("Scope [1-3] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} ({folder_name})"
+                elif scope_c == "3":
+                    r_scope = device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"{device_name} - {folder_name}"
+                else:
+                    r_scope = "iOS (*iPhone*, *iPad*)"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} - iOS ({folder_name})"
             else:
-                r_scope = "ALL"
-                r_pat = f"*{folder_name}*"
-                r_name = f"{suggested_category} ({folder_name})"
+                print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
+                print(f"  [2] Device-specific only ('{device_name}' / {folder_name} only)")
+                scope_c = input("Scope [1-2] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"{device_name} - {folder_name}"
+                else:
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} ({folder_name})"
+
+            r_rel = suggested_rel_path.strip("/").split("/")[0]
 
             rule = StorageRule(
                 name=r_name,
