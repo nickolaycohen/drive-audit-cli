@@ -35,6 +35,8 @@ from storage_rules import (
     record_applied_rule_folder,
     get_applied_folders_for_rule,
     get_all_applied_resources,
+    get_or_create_ingestion_record,
+    get_all_ingestion_records,
     get_shared_db_path,
     get_tier_color
 )
@@ -361,7 +363,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
                 tier_disp = f"{r.target_tier.upper()} {icon}"
 
             dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
-            if dest_disp.startswith("Temporary/"):
+            if dest_disp.startswith("Temporary"):
                 dest_disp = f"Priority 4/{dest_disp}"
 
             print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.category[:24]:<24} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {dest_disp}")
@@ -369,43 +371,55 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     print("=" * 190)
 
     # =========================================================================
-    # TABLE 2: CLASSIFIED CLOUD RESOURCES (DEVICE / [FOLDER])
+    # TABLE 2: CLASSIFIED CLOUD RESOURCES & INGESTION LEDGER
     # =========================================================================
     applied_resources = get_all_applied_resources(conn)
-    print("\n" + "=" * 190)
-    print(f"{f'TABLE 2: CLASSIFIED CLOUD RESOURCES ({len(applied_resources)} Folders Linked to Rules)':^190}")
-    print("=" * 190)
+    ingestion_records = get_all_ingestion_records(conn)
 
-    if not applied_resources:
+    # Sync any applied folders into ingestion_records if not already present
+    known_pairs = {(r["device_name"], r["source_path"]) for r in ingestion_records}
+    for app in applied_resources:
+        if (app["device_name"], app["folder_path"]) not in known_pairs:
+            get_or_create_ingestion_record(
+                conn=conn,
+                device_name=app["device_name"],
+                source_path=app["folder_path"],
+                rule_id=app["rule_id"],
+                target_tier=app["target_tier"],
+                target_folder=app.get("target_relative_path", "Documents") or "Documents",
+                status="ignored" if app["target_tier"].lower() in ("discard", "purge") else "pending"
+            )
+    ingestion_records = get_all_ingestion_records(conn)
+
+    print("\n" + "=" * 200)
+    print(f"{f'TABLE 2: CLASSIFIED CLOUD RESOURCES & INGESTION LEDGER ({len(ingestion_records)} Tracked Resources)':^200}")
+    print("=" * 200)
+
+    if not ingestion_records:
         print("\n  (No cloud folders have matched or been assigned to rules yet. Run the triage wizard to link folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Device Name':<20} | {'Remote Folder Path':<30} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<30} | {'Local Target Destination'}")
-        print("  " + "-" * 186)
+        print(f"  {'#':<3} | {'Ingestion ID':<12} | {'Device Name':<20} | {'Remote Folder Path':<25} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<30} | {'Local Target Destination'}")
+        print("  " + "-" * 196)
 
-        for idx, res in enumerate(applied_resources, 1):
-            icon = color_icons.get(res["finder_color"], "⚪")
-            tier_str = res["target_tier"].lower()
-            act_str = res["action"]
+        for idx, rec in enumerate(ingestion_records, 1):
+            icon = color_icons.get(rec["finder_color"], "⚪")
+            tier_str = rec["target_tier"].lower()
 
-            if act_str == "STAGE_DISCARDABLE":
-                tier_disp = "P4 🟠 (Temp Discard)"
-            elif act_str in ("DISCARD_IGNORE", "PURGE_SKIP") or tier_str in ("discard", "purge"):
+            if tier_str in ("discard", "purge") or rec["status"] == "ignored":
                 tier_disp = "DISCARD 🚫 (Ignored)"
+            elif tier_str == "priority 4":
+                tier_disp = "P4 🟠 (Temp Discard)"
             else:
-                tier_disp = f"{res['target_tier'].upper()} {icon}"
+                tier_disp = f"{rec['target_tier'].upper()} {icon}"
 
-            dest_disp = res["target_relative_path"] if res["target_relative_path"] else "(Do Not Store / Cloud Ignored)"
-            if dest_disp.startswith("Temporary/"):
-                dest_disp = f"/Volumes/LaCie/Storage/Priority 4/{dest_disp}"
-            elif dest_disp != "(Do Not Store / Cloud Ignored)":
-                dest_disp = f"/Volumes/LaCie/Storage/{res['target_tier'].title()}/{dest_disp}"
+            dest_disp = rec["local_destination"]
 
-            print(f"  {idx:<3} | {res['device_name'][:20]:<20} | {res['folder_path'][:30]:<30} | {tier_disp:<22} | {res['rule_name'][:30]:<30} | {dest_disp}")
+            print(f"  {idx:<3} | {rec['ingestion_id']:<12} | {rec['device_name'][:20]:<20} | {rec['source_path'][:25]:<25} | {tier_disp:<22} | {rec['rule_name'][:30]:<30} | {dest_disp}")
 
-    print("=" * 190)
-    print(f"  📊 Summary: Total: {len(rules)} Rules Established across {len(applied_resources)} Classified Cloud Folders")
+    print("=" * 200)
+    print(f"  📊 Summary: Total: {len(rules)} Rules Established across {len(ingestion_records)} Classified Cloud Folders")
     print(f"     Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
-    print("=" * 190)
+    print("=" * 200)
 
     print("\nActions: [e] Edit/Rename Rules  |  [Enter] Return")
     act_c = input("Choice: ").strip().lower()
@@ -443,7 +457,7 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
                 tier_disp = f"{r.target_tier.upper()} {icon}"
 
             dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
-            if dest_disp.startswith("Temporary/"):
+            if dest_disp.startswith("Temporary"):
                 dest_disp = f"Priority 4/{dest_disp}"
 
             print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {dest_disp}")
@@ -525,6 +539,24 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
             r.description = new_desc
 
             save_storage_rule(conn, r)
+            # Synchronize linked ingestion records
+            cur = conn.cursor()
+            cur.execute("SELECT id, ingestion_id, target_folder FROM ingestion_records WHERE rule_id = ?", (r.rule_id,))
+            for ing_row in cur.fetchall():
+                i_id, ing_str, i_folder = ing_row[0], ing_row[1], ing_row[2] or r.target_relative_path or "Documents"
+                if r.target_tier.lower() in ("discard", "purge"):
+                    new_local_dest = "(Do Not Store / Cloud Ignored)"
+                    new_status = "ignored"
+                else:
+                    c_folder = r.target_relative_path.strip("/").split("/")[0] if r.target_relative_path else i_folder
+                    new_local_dest = f"/Volumes/LaCie/Storage/{r.target_tier.title()}/{c_folder}/{ing_str}"
+                    new_status = "pending"
+                cur.execute("""
+                    UPDATE ingestion_records 
+                    SET target_tier = ?, target_folder = ?, local_destination = ?, status = ?, updated_at = ?
+                    WHERE id = ?
+                """, (r.target_tier, r.target_relative_path or i_folder, new_local_dest, new_status, datetime.datetime.now().isoformat(), i_id))
+            conn.commit()
             print(f"\n[Success] ✓ Rule #{choice} successfully updated: '{r.name}' ➔ {r.target_tier.upper()}")
 
 
@@ -775,7 +807,19 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+            ing_rec = get_or_create_ingestion_record(
+                conn=conn,
+                device_name=device_name,
+                source_path=norm_path,
+                rule_id=rule_id,
+                target_tier=suggested_tier,
+                target_folder=r_rel,
+                status="ignored" if suggested_tier in ("discard", "purge") else "pending",
+                total_files=total_files,
+                total_bytes=total_bytes
+            )
             print(f"\n[Success] ✓ Saved Generic Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier.upper()} {tier_icon} (Category: {rule.category}, Destination: {r_rel})")
+            print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} | Local Target: {ing_rec['local_destination']}")
             return rule
 
         if choice == "2":
@@ -813,8 +857,19 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+            ing_rec = get_or_create_ingestion_record(
+                conn=conn,
+                device_name=device_name,
+                source_path=norm_path,
+                rule_id=rule_id,
+                target_tier="priority 4",
+                target_folder="Temporary",
+                status="pending",
+                total_files=total_files,
+                total_bytes=total_bytes
+            )
             print(f"\n[Success] 🟠 Rule #{rule_id} Created: Routed to Priority 4/Temporary/ [Scope: {r_scope}]")
-            print(f"  📍 Target Depot: /Volumes/LaCie/Storage/Priority 4/Temporary/")
+            print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} | Local Target: {ing_rec['local_destination']}")
             print(f"  ✓ Generic policy safely applies to all matching devices.")
             return rule
 
@@ -851,7 +906,19 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+            ing_rec = get_or_create_ingestion_record(
+                conn=conn,
+                device_name=device_name,
+                source_path=norm_path,
+                rule_id=rule_id,
+                target_tier="discard",
+                target_folder="",
+                status="ignored",
+                total_files=total_files,
+                total_bytes=total_bytes
+            )
             print(f"\n[Success] 🚫 Rule #{rule_id} Created: Complete Ignore ({pat_val}) [Scope: {dev_scope}]")
+            print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} (Ignored)")
             return rule
 
         if choice == "4":
@@ -902,7 +969,19 @@ def prompt_user_for_storage_rule(
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
             record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+            ing_rec = get_or_create_ingestion_record(
+                conn=conn,
+                device_name=device_name,
+                source_path=norm_path,
+                rule_id=rule_id,
+                target_tier=tier_val,
+                target_folder=rel_val,
+                status="ignored" if tier_val in ("discard", "purge") else "pending",
+                total_files=total_files,
+                total_bytes=total_bytes
+            )
             print(f"\n[Success] ✓ Saved Custom Storage Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier}")
+            print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} | Local Target: {ing_rec['local_destination']}")
             return rule
 
         if choice == "5" and rules:
@@ -927,7 +1006,19 @@ def prompt_user_for_storage_rule(
                 rule_id = save_storage_rule(conn, rule)
                 rule.rule_id = rule_id
                 record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+                ing_rec = get_or_create_ingestion_record(
+                    conn=conn,
+                    device_name=device_name,
+                    source_path=norm_path,
+                    rule_id=rule_id,
+                    target_tier=selected_rule.target_tier,
+                    target_folder=selected_rule.target_relative_path or folder_name,
+                    status="ignored" if selected_rule.target_tier in ("discard", "purge") else "pending",
+                    total_files=total_files,
+                    total_bytes=total_bytes
+                )
                 print(f"\n[Success] ✓ Applied Rule #{rule_id} (based on '{selected_rule.name}') ➔ {rule.target_tier}")
+                print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} | Local Target: {ing_rec['local_destination']}")
                 return rule
 
 
@@ -1097,12 +1188,21 @@ def run_device_backup_wizard():
             matched_rule = match_storage_rule(dev_name, current_path, rules=rules)
             if matched_rule:
                 record_applied_rule_folder(conn, matched_rule.rule_id, dev_name, current_path)
+                ing_rec = get_or_create_ingestion_record(
+                    conn=conn,
+                    device_name=dev_name,
+                    source_path=current_path,
+                    rule_id=matched_rule.rule_id,
+                    target_tier=matched_rule.target_tier,
+                    target_folder=matched_rule.target_relative_path or "Documents",
+                    status="ignored" if matched_rule.target_tier.lower() in ("discard", "purge") else "pending"
+                )
                 if matched_rule.action == "STAGE_DISCARDABLE":
-                    print(f"  [🟠 Temp Discardable] '{current_path}' (Rule: '{matched_rule.name}')")
+                    print(f"  [🟠 Temp Discardable] '{current_path}' (Rule: '{matched_rule.name}', Ingestion ID: {ing_rec['ingestion_id']})")
                 elif matched_rule.action in ("DISCARD_IGNORE", "PURGE_SKIP") or matched_rule.target_tier.lower() in ("discard", "purge"):
-                    print(f"  [🚫 Discarded / Ignored] '{current_path}' (Rule: '{matched_rule.name}')")
+                    print(f"  [🚫 Discarded / Ignored] '{current_path}' (Rule: '{matched_rule.name}', Ingestion ID: {ing_rec['ingestion_id']})")
                 else:
-                    print(f"  [✓ Rule Matched] '{current_path}' ➔ '{matched_rule.name}' ({matched_rule.target_tier.upper()})")
+                    print(f"  [✓ Rule Matched] '{current_path}' ➔ '{matched_rule.name}' ({matched_rule.target_tier.upper()}, Ingestion ID: {ing_rec['ingestion_id']})")
                 total_classified += 1
                 # If recursive rule covers everything underneath, skip enqueuing children
                 if matched_rule.is_recursive:

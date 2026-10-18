@@ -100,6 +100,25 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS ingestion_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ingestion_id TEXT UNIQUE NOT NULL,
+            device_name TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            rule_id INTEGER,
+            target_tier TEXT NOT NULL,
+            target_folder TEXT NOT NULL,
+            local_destination TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            total_files INTEGER DEFAULT 0,
+            total_bytes INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (rule_id) REFERENCES storage_rules(id)
+        )
+    """)
+
+    cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_storage_rules_path ON storage_rules(path_pattern);
     """)
     cur.execute("""
@@ -108,7 +127,132 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_applied_rule_id ON applied_rule_folders(rule_id);
     """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ingestion_device_path ON ingestion_records(device_name, source_path);
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ingestion_id ON ingestion_records(ingestion_id);
+    """)
     conn.commit()
+
+
+def get_or_create_ingestion_record(
+    conn: sqlite3.Connection,
+    device_name: str,
+    source_path: str,
+    rule_id: Optional[int] = None,
+    target_tier: str = "priority 2",
+    target_folder: str = "Documents",
+    status: str = "pending",
+    total_files: int = 0,
+    total_bytes: int = 0
+) -> Dict[str, Any]:
+    """
+    Fetches or registers an ingestion record with a unique Ingestion ID (e.g. ING-0001).
+    Appends the Ingestion ID to the local target destination path for Storage Manager record keeping.
+    """
+    cur = conn.cursor()
+    norm_source = "/" + source_path.strip().strip("/").replace("\\", "/")
+    cur.execute("""
+        SELECT id, ingestion_id, device_name, source_path, rule_id, target_tier, 
+               target_folder, local_destination, status, total_files, total_bytes, created_at, updated_at
+        FROM ingestion_records
+        WHERE device_name = ? AND source_path = ?
+    """, (device_name, norm_source))
+    row = cur.fetchone()
+    now_str = datetime.datetime.now().isoformat()
+
+    if row:
+        rec_id, ing_id = row[0], row[1]
+        if target_tier.lower() in ("discard", "purge") or status == "ignored":
+            local_dest = "(Do Not Store / Cloud Ignored)"
+        else:
+            clean_folder = target_folder.strip("/").split("/")[0] if target_folder else "Documents"
+            local_dest = f"/Volumes/LaCie/Storage/{target_tier.title()}/{clean_folder}/{ing_id}"
+        
+        cur.execute("""
+            UPDATE ingestion_records
+            SET rule_id = ?, target_tier = ?, target_folder = ?, local_destination = ?, status = ?, updated_at = ?
+            WHERE id = ?
+        """, (rule_id, target_tier, target_folder, local_dest, status, now_str, rec_id))
+        conn.commit()
+        return {
+            "id": rec_id,
+            "ingestion_id": ing_id,
+            "device_name": device_name,
+            "source_path": norm_source,
+            "rule_id": rule_id,
+            "target_tier": target_tier,
+            "target_folder": target_folder,
+            "local_destination": local_dest,
+            "status": status,
+            "total_files": total_files or row[9],
+            "total_bytes": total_bytes or row[10]
+        }
+
+    # Generate next sequential Ingestion ID
+    cur.execute("SELECT MAX(id) FROM ingestion_records")
+    max_val = cur.fetchone()[0] or 0
+    ing_id = f"ING-{max_val + 1:04d}"
+
+    if target_tier.lower() in ("discard", "purge") or status == "ignored":
+        local_dest = "(Do Not Store / Cloud Ignored)"
+    else:
+        clean_folder = target_folder.strip("/").split("/")[0] if target_folder else "Documents"
+        local_dest = f"/Volumes/LaCie/Storage/{target_tier.title()}/{clean_folder}/{ing_id}"
+
+    cur.execute("""
+        INSERT INTO ingestion_records 
+        (ingestion_id, device_name, source_path, rule_id, target_tier, target_folder, local_destination, status, total_files, total_bytes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (ing_id, device_name, norm_source, rule_id, target_tier, target_folder, local_dest, status, total_files, total_bytes, now_str, now_str))
+    conn.commit()
+    new_id = cur.lastrowid
+    return {
+        "id": new_id,
+        "ingestion_id": ing_id,
+        "device_name": device_name,
+        "source_path": norm_source,
+        "rule_id": rule_id,
+        "target_tier": target_tier,
+        "target_folder": target_folder,
+        "local_destination": local_dest,
+        "status": status,
+        "total_files": total_files,
+        "total_bytes": total_bytes
+    }
+
+
+def get_all_ingestion_records(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Returns all ingestion records joined with their storage rules."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT i.id, i.ingestion_id, i.device_name, i.source_path, i.target_tier, 
+               r.finder_color, r.name as rule_name, i.local_destination, i.status,
+               i.total_files, i.total_bytes, i.created_at, i.target_folder
+        FROM ingestion_records i
+        LEFT JOIN storage_rules r ON i.rule_id = r.id
+        ORDER BY i.id ASC
+    """)
+    rows = cur.fetchall()
+    res = []
+    for r in rows:
+        res.append({
+            "id": r[0],
+            "ingestion_id": r[1],
+            "device_name": r[2],
+            "source_path": r[3],
+            "target_tier": r[4],
+            "finder_color": r[5] or "Gray",
+            "rule_name": r[6] or "Manual Classification",
+            "local_destination": r[7],
+            "status": r[8],
+            "total_files": r[9],
+            "total_bytes": r[10],
+            "created_at": r[11],
+            "target_folder": r[12]
+        })
+    return res
 
 
 def record_applied_rule_folder(conn: sqlite3.Connection, rule_id: int, device_name: str, folder_path: str) -> None:
