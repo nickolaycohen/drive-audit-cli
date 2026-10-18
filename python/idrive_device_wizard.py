@@ -375,7 +375,9 @@ def format_existing_rules_table(rules: List[StorageRule], conn: Optional[sqlite3
     lines.append(f"  {'#':<3} | {'Rule Name':<30} | {'Destination / Action':<26} | {'Applied On (DEVICE / [folder])':<40} | {'Pattern'}")
     lines.append("  " + "-" * 125)
     for idx, r in enumerate(rules, 1):
-        if r.action == "STAGE_DISCARDABLE" or "temporary" in r.category.lower():
+        if r.action == "MEDIA_INTAKE" or "media intake" in r.name.lower():
+            dest_str = "Priority 4/Temporary"
+        elif r.action == "STAGE_DISCARDABLE" or "temporary" in r.category.lower():
             dest_str = "P4 🟠 (Temp Discard)"
         elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or r.target_tier.lower() in ("discard", "purge"):
             dest_str = "🚫 DISCARD / IGNORE"
@@ -485,8 +487,10 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
 
             if tier_str in ("discard", "purge") or rec["status"] == "ignored":
                 tier_disp = "DISCARD 🚫 (Ignored)"
-            elif tier_str == "priority 4":
+            elif rec.get("action") == "STAGE_DISCARDABLE" or "discard" in rec.get("rule_name", "").lower():
                 tier_disp = "P4 🟠 (Temp Discard)"
+            elif tier_str == "priority 4":
+                tier_disp = f"PRIORITY 4 {icon}"
             else:
                 tier_disp = f"{rec['target_tier'].upper()} {icon}"
 
@@ -1005,7 +1009,7 @@ def prompt_user_for_storage_rule(
             is_media = any(k in norm_path.lower() for k in ["photo", "video", "dcim", "media", "camera", "pictures"])
             print("Select Scope:")
             if src_os == "Android" and is_media:
-                print(f"  [1] All Android Devices (*DCIM*, *Camera*) (Recommended) [Default]")
+                print(f"  [1] All Android Devices ([Android OS] - *Camera*) (Recommended) [Default]")
                 print(f"  [2] Mobile Media Intake (Android DCIM & iOS /Photos, /Videos) 📱")
                 print(f"  [3] Device-specific only ('{src_dev}' via '{device_name}')")
                 print(f"  [4] Universal across ALL devices (*{folder_name}*)")
@@ -1024,8 +1028,8 @@ def prompt_user_for_storage_rule(
                     r_pat = f"*{folder_name}*"
                     r_name = f"Media Intake ({folder_name})"
                 else:
-                    r_scope = "Android (*Moto*, *Samsung*, *Pixel*, *Galaxy*)"
-                    r_pat = "*DCIM*, *Camera*"
+                    r_scope = "[Android OS]"
+                    r_pat = "*Camera*"
                     r_name = "Media Intake"
                     suggested_impact = f"Media Intake rule for iDrive backup of an Android device ({src_dev}): resources in DCIM/Camera are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
                 suggested_tier = "priority 4"

@@ -447,26 +447,56 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
     except Exception:
         pass
 
-    # Ensure Temporary (Camera) has Scope [Android OS]
+    # Seed / Update generalized Media Intake rule for iDrive backup of an Android device
     try:
         now_str = datetime.datetime.now().isoformat()
-        cur.execute("SELECT id FROM storage_rules WHERE name = 'Temporary (Camera)'")
+        cur.execute("""
+            SELECT id FROM storage_rules 
+            WHERE id = 6 
+               OR name = 'Temporary (Camera)' 
+               OR (name = 'Media Intake' AND (device_pattern LIKE '%Android%' OR device_pattern LIKE '%[Android OS]%'))
+        """)
         cam_row = cur.fetchone()
+        android_desc = "Media Intake rule for iDrive backup of an Android device: resources in DCIM and Camera are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
         if cam_row:
+            android_rule_id = cam_row[0]
             cur.execute("""
                 UPDATE storage_rules
-                SET device_pattern = '[Android OS]',
+                SET name = 'Media Intake',
+                    device_pattern = '[Android OS]',
+                    path_pattern = '*Camera*',
+                    target_tier = 'priority 4',
+                    target_relative_path = 'Temporary',
+                    finder_color = 'Orange',
+                    action = 'MEDIA_INTAKE',
+                    category = 'Temporary',
+                    description = ?,
                     updated_at = ?
                 WHERE id = ?
-            """, (now_str, cam_row[0]))
-            conn.commit()
+            """, (android_desc, now_str, android_rule_id))
+        else:
+            cur.execute("""
+                INSERT INTO storage_rules (
+                    name, device_pattern, path_pattern, ext_pattern, category, description,
+                    target_tier, target_relative_path, finder_color, action, is_recursive, created_at, updated_at
+                ) VALUES (
+                    'Media Intake', '[Android OS]', '*Camera*', '*', 'Temporary',
+                    ?, 'priority 4', 'Temporary', 'Orange', 'MEDIA_INTAKE', 1, ?, ?
+                )
+            """, (android_desc, now_str, now_str))
+            android_rule_id = cur.lastrowid
+        conn.commit()
     except Exception:
-        pass
+        android_rule_id = 6
 
     # Seed / Update generalized Media Intake rule for iDrive backup of an iOS device
     try:
         now_str = datetime.datetime.now().isoformat()
-        cur.execute("SELECT id FROM storage_rules WHERE name LIKE '%Media Intake%'")
+        cur.execute("""
+            SELECT id FROM storage_rules 
+            WHERE (name = 'Media Intake' AND (device_pattern LIKE '%iOS%' OR device_pattern LIKE '%iPhone%' OR id = 2))
+               OR (name LIKE '%Media Intake%' AND id != ?)
+        """, (android_rule_id,))
         row = cur.fetchone()
         ios_desc = "Media Intake rule for iDrive backup of an iOS device: resources in /Photos and /Videos are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
         if row:
@@ -637,7 +667,7 @@ def get_all_ingestion_records(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         SELECT i.id, i.ingestion_id, i.device_name, i.source_path, i.target_tier, 
                r.finder_color, r.name as rule_name, i.local_destination, i.status,
                i.total_files, i.total_bytes, i.created_at, i.target_folder,
-               i.source_device, i.source_os
+               i.source_device, i.source_os, r.action
         FROM ingestion_records i
         LEFT JOIN storage_rules r ON i.rule_id = r.id
         ORDER BY i.id ASC
@@ -660,7 +690,8 @@ def get_all_ingestion_records(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             "created_at": r[11],
             "target_folder": r[12],
             "source_device": r[13] or r[2],
-            "source_os": r[14] or ""
+            "source_os": r[14] or "",
+            "action": r[15] or ""
         })
     return res
 
