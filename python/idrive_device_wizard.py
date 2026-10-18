@@ -424,8 +424,8 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     if not rules:
         print("\n  (No Storage Rules have been created yet. Rules will appear here as you triage folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Category':<20} | {'Scope':<24} | {'Path Match Pattern':<25} | {'Target Destination'}")
-        print("  " + "-" * 186)
+        print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Category':<20} | {'Scope':<24} | {'Path Match Pattern':<25} | {'Target Destination'}")
+        print("  " + "-" * 188)
 
         for idx, r in enumerate(rules, 1):
             t_key = r.target_tier.lower()
@@ -446,7 +446,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
             if dest_disp.startswith("Temporary"):
                 dest_disp = f"Priority 4/{dest_disp}"
 
-            print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.category[:20]:<20} | {r.device_pattern[:24]:<24} | {r.path_pattern:<25} | {dest_disp}")
+            print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.category[:20]:<20} | {r.device_pattern[:24]:<24} | {r.path_pattern:<25} | {dest_disp}")
 
     print("=" * 190)
 
@@ -478,8 +478,8 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     if not ingestion_records:
         print("\n  (No cloud folders have matched or been assigned to rules yet. Run the triage wizard to link folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Ingestion ID':<12} | {'Device Name':<20} | {'Remote Folder Path':<25} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<30} | {'Local Target Destination'}")
-        print("  " + "-" * 196)
+        print(f"  {'#':<3} | {'Ingestion ID':<12} | {'Device Name':<20} | {'Remote Folder Path':<25} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<32} | {'Local Target Destination'}")
+        print("  " + "-" * 198)
 
         for idx, rec in enumerate(ingestion_records, 1):
             icon = color_icons.get(rec["finder_color"], "⚪")
@@ -503,7 +503,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
             else:
                 dev_disp = rec["device_name"][:20]
 
-            print(f"  {idx:<3} | {rec['ingestion_id']:<12} | {dev_disp:<20} | {rec['source_path'][:25]:<25} | {tier_disp:<22} | {rec['rule_name'][:30]:<30} | {dest_disp}")
+            print(f"  {idx:<3} | {rec['ingestion_id']:<12} | {dev_disp:<20} | {rec['source_path'][:25]:<25} | {tier_disp:<22} | {rec['rule_name'][:32]:<32} | {dest_disp}")
 
     print("=" * 200)
 
@@ -526,57 +526,74 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     print(f"     Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
     print("=" * 200)
 
-    act_prompt = "\nActions: [e] Edit/Rename Rules"
+    act_prompt = "\nActions: [e] Edit/Rename Rules  |  [i] Reassign/Edit Ingestions"
     if drilled_list:
         act_prompt += "  |  [dr] Manage Drilled Folders"
-    act_prompt += "  |  [Enter] Return"
+    max_select = max(len(rules), len(ingestion_records))
+    act_prompt += f"  |  [#] Quick Select (1-{max_select})  |  [Enter] Return"
     print(act_prompt)
     act_c = input("Choice: ").strip().lower()
     if act_c == "e":
         edit_storage_rules_interactive(conn)
+    elif act_c == "i":
+        reassign_ingestion_record_interactive(conn)
     elif act_c == "dr":
         manage_drilled_folders_interactive(conn)
+    elif act_c.startswith("ing-") or (act_c.startswith("i") and act_c[1:].isdigit()):
+        reassign_ingestion_record_interactive(conn, initial_sel=act_c)
+    elif act_c.isdigit():
+        val = int(act_c)
+        if val > len(rules) and val <= len(ingestion_records):
+            reassign_ingestion_record_interactive(conn, initial_sel=act_c)
+        elif 1 <= val <= len(rules):
+            edit_storage_rules_interactive(conn, initial_rule_num=val)
 
 
-def edit_storage_rules_interactive(conn: sqlite3.Connection):
+def edit_storage_rules_interactive(conn: sqlite3.Connection, initial_rule_num: Optional[int] = None):
     """
     Interactive editor to view, rename, modify, or delete Storage Rules in SQLite.
     Allows changing rule names, priority tiers, destinations, patterns, and categories.
     """
     color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
+    first_pass = True
 
     while True:
         rules = load_all_storage_rules(conn)
-        print("\n" + "=" * 170)
-        print(f"{f'✏️  STORAGE RULES MANAGER & EDITOR ({len(rules)} Active Rules)':^170}")
-        print("=" * 170)
-
         if not rules:
             print("\n  (No Storage Rules found in database. Rules are created during folder triage.)\n")
             print("=" * 170)
             return
 
-        print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Scope':<10} | {'Path Match Pattern':<20} | {'Target Destination'}")
-        print("  " + "-" * 166)
-        for idx, r in enumerate(rules, 1):
-            icon = color_icons.get(r.finder_color, "⚪")
-            if r.action == "STAGE_DISCARDABLE":
-                tier_disp = "P4 🟠 (Temp Discard)"
-            elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or r.target_tier.lower() in ("discard", "purge"):
-                tier_disp = "DISCARD 🚫 (Ignored)"
-            else:
-                tier_disp = f"{r.target_tier.upper()} {icon}"
+        if initial_rule_num and first_pass and 1 <= initial_rule_num <= len(rules):
+            choice = str(initial_rule_num)
+            first_pass = False
+        else:
+            first_pass = False
+            print("\n" + "=" * 170)
+            print(f"{f'✏️  STORAGE RULES MANAGER & EDITOR ({len(rules)} Active Rules)':^170}")
+            print("=" * 170)
 
-            dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
-            if dest_disp.startswith("Temporary"):
-                dest_disp = f"Priority 4/{dest_disp}"
+            print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Scope':<10} | {'Path Match Pattern':<20} | {'Target Destination'}")
+            print("  " + "-" * 166)
+            for idx, r in enumerate(rules, 1):
+                icon = color_icons.get(r.finder_color, "⚪")
+                if r.action == "STAGE_DISCARDABLE":
+                    tier_disp = "P4 🟠 (Temp Discard)"
+                elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or r.target_tier.lower() in ("discard", "purge"):
+                    tier_disp = "DISCARD 🚫 (Ignored)"
+                else:
+                    tier_disp = f"{r.target_tier.upper()} {icon}"
 
-            print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {dest_disp}")
-        print("=" * 170)
+                dest_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
+                if dest_disp.startswith("Temporary"):
+                    dest_disp = f"Priority 4/{dest_disp}"
 
-        choice = input(f"\nSelect Rule # to edit (1-{len(rules)}) [or 'd' to delete, 'dr' to manage drilled, 'q' to return]: ").strip().lower()
-        if not choice or choice in ("q", "quit", "exit"):
-            break
+                print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {dest_disp}")
+            print("=" * 170)
+
+            choice = input(f"\nSelect Rule # to edit (1-{len(rules)}) [or 'd' to delete, 'dr' to manage drilled, 'q' to return]: ").strip().lower()
+            if not choice or choice in ("q", "quit", "exit"):
+                break
 
         if choice == "dr":
             manage_drilled_folders_interactive(conn)
@@ -673,6 +690,192 @@ def edit_storage_rules_interactive(conn: sqlite3.Connection):
                 """, (r.target_tier, r.target_relative_path or i_folder, new_local_dest, new_status, datetime.datetime.now().isoformat(), i_id))
             conn.commit()
             print(f"\n[Success] ✓ Rule #{choice} successfully updated: '{r.name}' ➔ {r.target_tier.upper()}")
+
+
+def reassign_ingestion_record_interactive(conn: sqlite3.Connection, initial_sel: Optional[str] = None):
+    """
+    Interactive editor to view, reassign, or rename matched rules for Ingestion Records in SQLite.
+    Allows changing an ingestion record's rule assignment, editing its rule policy name,
+    or adjusting its destination tier and folder.
+    """
+    color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
+    first_pass = True
+
+    while True:
+        records = get_all_ingestion_records(conn)
+        if not records:
+            print("\n  (No ingestion records tracked yet.)\n")
+            return
+
+        rec = None
+        if initial_sel and first_pass:
+            first_pass = False
+            clean_sel = initial_sel.lower().replace("i", "").replace("ng-", "").replace("ng", "").strip()
+            if clean_sel.isdigit():
+                idx_val = int(clean_sel)
+                if 1 <= idx_val <= len(records):
+                    rec = records[idx_val - 1]
+            if not rec:
+                for r in records:
+                    if r["ingestion_id"].lower() == initial_sel.lower():
+                        rec = r
+                        break
+
+        if not rec:
+            first_pass = False
+            print("\n" + "=" * 200)
+            print(f"{f'📦 INGESTION RECORDS MANAGER ({len(records)} Tracked Resources)':^200}")
+            print("=" * 200)
+            print(f"  {'#':<3} | {'Ingestion ID':<12} | {'Device Name':<20} | {'Remote Folder Path':<25} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<30} | {'Local Target Destination'}")
+            print("  " + "-" * 196)
+            for idx, r in enumerate(records, 1):
+                icon = color_icons.get(r["finder_color"], "⚪")
+                tier_str = r["target_tier"].lower()
+                if tier_str in ("discard", "purge") or r["status"] == "ignored":
+                    tier_disp = "DISCARD 🚫 (Ignored)"
+                elif r.get("action") == "STAGE_DISCARDABLE" or "discard" in r.get("rule_name", "").lower():
+                    tier_disp = "P4 🟠 (Temp Discard)"
+                elif tier_str == "priority 4":
+                    tier_disp = f"PRIORITY 4 {icon}"
+                else:
+                    tier_disp = f"{r['target_tier'].upper()} {icon}"
+
+                src_dev = r.get("source_device")
+                src_os = r.get("source_os")
+                if src_dev and src_dev != r["device_name"]:
+                    os_tag = f" - {src_os}" if src_os else ""
+                    dev_disp = f"{r['device_name'][:10]} ({src_dev[:8]}{os_tag})"
+                else:
+                    dev_disp = r["device_name"][:20]
+
+                print(f"  {idx:<3} | {r['ingestion_id']:<12} | {dev_disp:<20} | {r['source_path'][:25]:<25} | {tier_disp:<22} | {r['rule_name'][:30]:<30} | {r['local_destination']}")
+            print("=" * 200)
+
+            choice = input(f"\nSelect Ingestion # or ID (1-{len(records)} or e.g. ING-0015) [or 'q' to return]: ").strip().lower()
+            if not choice or choice in ("q", "quit", "exit"):
+                break
+
+            clean_choice = choice.replace("i", "").replace("ng-", "").replace("ng", "").strip()
+            if clean_choice.isdigit():
+                idx_val = int(clean_choice)
+                if 1 <= idx_val <= len(records):
+                    rec = records[idx_val - 1]
+            if not rec:
+                for r in records:
+                    if r["ingestion_id"].lower() == choice:
+                        rec = r
+                        break
+
+            if not rec:
+                print(f"\n[Error] Invalid selection '{choice}'.")
+                continue
+
+        # Found record to manage
+        src_info = f"{rec['device_name']}"
+        if rec.get("source_device") and rec.get("source_device") != rec["device_name"]:
+            src_info += f" ({rec['source_device']} - {rec.get('source_os', '')})"
+
+        print("\n" + "=" * 90)
+        print(f"  ✏️  MANAGING INGESTION RECORD: {rec['ingestion_id']} ('{rec['source_path']}')")
+        print("=" * 90)
+        print(f"  • Source Device:        {src_info}")
+        print(f"  • Remote Folder:        {rec['source_path']}")
+        print(f"  • Matched Rule Policy:  {rec['rule_name']} (Rule ID: {rec.get('rule_id') or 'None'})")
+        print(f"  • Assigned Tier:        {rec['target_tier'].upper()}")
+        print(f"  • Target Destination:   {rec['local_destination']}")
+        print(f"  • Status:               {rec['status']}")
+        print(f"  • Files / Storage:      {rec['total_files']:,} files ({format_size_human(rec['total_bytes'])})")
+        print("-" * 90)
+        print("Actions:")
+        print(f"  [1] Rename / Edit Matched Rule Policy ('{rec['rule_name']}')")
+        print("  [2] Reassign to a Different Storage Rule")
+        print("  [3] Edit Local Target Destination Path")
+        print("  [q] Return")
+
+        sub_c = input("\nChoice [1-3, q]: ").strip().lower()
+        if sub_c in ("q", "quit", "exit"):
+            continue
+
+        if sub_c == "1":
+            cur = conn.cursor()
+            cur.execute("SELECT rule_id FROM ingestion_records WHERE id = ?", (rec["id"],))
+            r_id_row = cur.fetchone()
+            rule_id = r_id_row[0] if r_id_row else None
+            if not rule_id:
+                print(f"\n[Error] No matched rule ID found for {rec['ingestion_id']}.")
+                continue
+            cur.execute("SELECT id, name, target_tier, category, device_pattern, path_pattern, target_relative_path, finder_color, action, is_recursive, description FROM storage_rules WHERE id = ?", (rule_id,))
+            r_row = cur.fetchone()
+            if not r_row:
+                print(f"\n[Error] Storage Rule #{rule_id} not found in database.")
+                continue
+
+            current_name = r_row[1]
+            new_name = input(f"\nEnter New Rule Name [{current_name}]: ").strip()
+            if new_name and new_name != current_name:
+                now_str = datetime.datetime.now().isoformat()
+                cur.execute("UPDATE storage_rules SET name = ?, updated_at = ? WHERE id = ?", (new_name, now_str, rule_id))
+                conn.commit()
+                print(f"\n[✓] Rule #{rule_id} renamed to '{new_name}'! Matched policy updated for {rec['ingestion_id']}.")
+            else:
+                print("\n[Notice] Rule name kept unchanged.")
+
+        elif sub_c == "2":
+            all_rules = load_all_storage_rules(conn)
+            print("\n" + "=" * 170)
+            print(f"{'ACTIVE STORAGE RULES':^170}")
+            print("=" * 170)
+            print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Scope':<10} | {'Path Match Pattern':<20} | {'Target Destination'}")
+            print("  " + "-" * 166)
+            for idx, r in enumerate(all_rules, 1):
+                icon = color_icons.get(r.finder_color, "⚪")
+                if r.action == "STAGE_DISCARDABLE":
+                    t_disp = "P4 🟠 (Temp Discard)"
+                elif r.action in ("DISCARD_IGNORE", "PURGE_SKIP") or r.target_tier.lower() in ("discard", "purge"):
+                    t_disp = "DISCARD 🚫 (Ignored)"
+                else:
+                    t_disp = f"{r.target_tier.upper()} {icon}"
+                d_disp = r.target_relative_path if r.target_relative_path else "(None / Ignored)"
+                if d_disp.startswith("Temporary"):
+                    d_disp = f"Priority 4/{d_disp}"
+                print(f"  {idx:<3} | {r.name[:30]:<30} | {t_disp:<22} | {r.device_pattern[:10]:<10} | {r.path_pattern:<20} | {d_disp}")
+            print("=" * 170)
+
+            r_sel = input(f"\nSelect new Rule # to assign to {rec['ingestion_id']} (1-{len(all_rules)}) [or 'c' to cancel]: ").strip()
+            if r_sel.isdigit() and 1 <= int(r_sel) <= len(all_rules):
+                new_rule = all_rules[int(r_sel) - 1]
+                now_str = datetime.datetime.now().isoformat()
+                if new_rule.target_tier.lower() in ("discard", "purge"):
+                    new_local_dest = "(Do Not Store / Cloud Ignored)"
+                    new_status = "ignored"
+                else:
+                    c_folder = new_rule.target_relative_path.strip("/").split("/")[0] if new_rule.target_relative_path else "Documents"
+                    new_local_dest = f"/Volumes/LaCie/Storage/{new_rule.target_tier.title()}/{c_folder}"
+                    new_status = "pending"
+
+                cur = conn.cursor()
+                cur.execute("""
+                    UPDATE ingestion_records
+                    SET rule_id = ?, target_tier = ?, target_folder = ?, local_destination = ?, status = ?, updated_at = ?
+                    WHERE id = ?
+                """, (new_rule.rule_id, new_rule.target_tier, new_rule.target_relative_path or "Documents", new_local_dest, new_status, now_str, rec["id"]))
+
+                cur.execute("""
+                    UPDATE applied_rule_folders
+                    SET rule_id = ?, applied_at = ?
+                    WHERE device_name = ? AND folder_path = ?
+                """, (new_rule.rule_id, now_str, rec["device_name"], rec["source_path"]))
+                conn.commit()
+                print(f"\n[✓] Successfully reassigned {rec['ingestion_id']} to Rule #{new_rule.rule_id} ('{new_rule.name}') ➔ {new_rule.target_tier.upper()}!")
+
+        elif sub_c == "3":
+            new_dest = input(f"\nEnter New Local Destination [{rec['local_destination']}]: ").strip()
+            if new_dest and new_dest != rec["local_destination"]:
+                now_str = datetime.datetime.now().isoformat()
+                cur = conn.cursor()
+                cur.execute("UPDATE ingestion_records SET local_destination = ?, updated_at = ? WHERE id = ?", (new_dest, now_str, rec["id"]))
+                conn.commit()
+                print(f"\n[✓] Local destination updated to '{new_dest}' for {rec['ingestion_id']}.")
 
 
 def manage_drilled_folders_interactive(conn: sqlite3.Connection):
@@ -1395,10 +1598,20 @@ def prompt_user_for_storage_rule(
             sel = input(f"\nSelect Rule Number (1-{len(rules)}) [or 'c' to cancel]: ").strip()
             if sel.isdigit() and 1 <= int(sel) <= len(rules):
                 selected_rule = rules[int(sel) - 1]
+                # Clean base name (strip any trailing parentheticals so they don't chain)
+                base_name = re.sub(r'\s*\([^)]*\)$', '', selected_rule.name).strip() or selected_rule.name
+                default_name = f"{base_name} ({folder_name})"
+                print(f"\nEstablish Storage Rule for '{folder_name}' (based on '{selected_rule.name}'):")
+                new_rule_name = input(f"  1. Rule Name [{default_name}]: ").strip() or default_name
+                default_scope = f"{device_name} ({src_dev})" if is_nested else device_name
+                new_scope = input(f"  2. Device Scope [{default_scope}]: ").strip() or default_scope
+                default_pat = f"*{folder_name}*"
+                new_pat = input(f"  3. Match Pattern [{default_pat}]: ").strip() or default_pat
+
                 rule = StorageRule(
-                    name=f"{selected_rule.name} ({folder_name})",
-                    device_pattern=device_name,
-                    path_pattern=norm_path + "*",
+                    name=new_rule_name,
+                    device_pattern=new_scope,
+                    path_pattern=new_pat,
                     ext_pattern=selected_rule.ext_pattern,
                     category=selected_rule.category,
                     description=selected_rule.description,
@@ -1410,7 +1623,7 @@ def prompt_user_for_storage_rule(
                 )
                 rule_id = save_storage_rule(conn, rule)
                 rule.rule_id = rule_id
-                record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+                record_applied_rule_folder(conn, rule_id, device_name, norm_path, source_device=src_dev, source_os=src_os)
                 ing_rec = get_or_create_ingestion_record(
                     conn=conn,
                     device_name=device_name,
@@ -1420,9 +1633,11 @@ def prompt_user_for_storage_rule(
                     target_folder=selected_rule.target_relative_path or folder_name,
                     status="ignored" if selected_rule.target_tier in ("discard", "purge") else "pending",
                     total_files=folder_files,
-                    total_bytes=folder_bytes
+                    total_bytes=folder_bytes,
+                    source_device=src_dev,
+                    source_os=src_os
                 )
-                print(f"\n[Success] ✓ Applied Rule #{rule_id} (based on '{selected_rule.name}') ➔ {rule.target_tier}")
+                print(f"\n[Success] ✓ Applied Rule #{rule_id} ('{rule.name}') ➔ {rule.target_tier.upper()}")
                 print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} ({folder_files:,} files) | Local Target: {ing_rec['local_destination']}")
                 return rule
 
