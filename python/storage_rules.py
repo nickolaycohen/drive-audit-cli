@@ -84,9 +84,28 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
             last_path TEXT,
             classified_folders INTEGER DEFAULT 0,
             skipped_folders INTEGER DEFAULT 0,
+            total_files INTEGER DEFAULT 0,
+            classified_files INTEGER DEFAULT 0,
+            skipped_files INTEGER DEFAULT 0,
+            total_folders INTEGER DEFAULT 0,
             updated_at TEXT NOT NULL
         )
     """)
+
+    # Ensure columns exist in existing device_crawl_progress table
+    cur.execute("PRAGMA table_info(device_crawl_progress)")
+    existing_cols = {r[1] for r in cur.fetchall()}
+    for col_name, col_type in [
+        ("total_files", "INTEGER DEFAULT 0"),
+        ("classified_files", "INTEGER DEFAULT 0"),
+        ("skipped_files", "INTEGER DEFAULT 0"),
+        ("total_folders", "INTEGER DEFAULT 0")
+    ]:
+        if col_name not in existing_cols:
+            try:
+                cur.execute(f"ALTER TABLE device_crawl_progress ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS applied_rule_folders (
@@ -172,9 +191,12 @@ def get_or_create_ingestion_record(
         
         cur.execute("""
             UPDATE ingestion_records
-            SET rule_id = ?, target_tier = ?, target_folder = ?, local_destination = ?, status = ?, updated_at = ?
+            SET rule_id = ?, target_tier = ?, target_folder = ?, local_destination = ?, status = ?,
+                total_files = CASE WHEN ? > 0 THEN ? ELSE total_files END,
+                total_bytes = CASE WHEN ? > 0 THEN ? ELSE total_bytes END,
+                updated_at = ?
             WHERE id = ?
-        """, (rule_id, target_tier, target_folder, local_dest, status, now_str, rec_id))
+        """, (rule_id, target_tier, target_folder, local_dest, status, total_files, total_files, total_bytes, total_bytes, now_str, rec_id))
         conn.commit()
         return {
             "id": rec_id,
@@ -287,16 +309,20 @@ def update_device_crawl_progress(
     status: str = "in_progress",
     last_path: str = "",
     classified_folders: int = 0,
-    skipped_folders: int = 0
+    skipped_folders: int = 0,
+    total_files: int = 0,
+    classified_files: int = 0,
+    skipped_files: int = 0,
+    total_folders: int = 0
 ) -> None:
-    """Updates or inserts the crawl progress for a specific device."""
+    """Updates or inserts the crawl progress for a specific device with file and folder counts."""
     now_str = datetime.datetime.now().isoformat()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO device_crawl_progress (
             device_id, device_name, latest_lmd, status, last_path, 
-            classified_folders, skipped_folders, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            classified_folders, skipped_folders, total_files, classified_files, skipped_files, total_folders, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(device_id) DO UPDATE SET
             device_name = excluded.device_name,
             latest_lmd = COALESCE(NULLIF(excluded.latest_lmd, ''), device_crawl_progress.latest_lmd),
@@ -304,8 +330,12 @@ def update_device_crawl_progress(
             last_path = excluded.last_path,
             classified_folders = excluded.classified_folders,
             skipped_folders = excluded.skipped_folders,
+            total_files = CASE WHEN excluded.total_files > 0 THEN excluded.total_files ELSE device_crawl_progress.total_files END,
+            classified_files = excluded.classified_files,
+            skipped_files = excluded.skipped_files,
+            total_folders = CASE WHEN excluded.total_folders > 0 THEN excluded.total_folders ELSE device_crawl_progress.total_folders END,
             updated_at = excluded.updated_at
-    """, (device_id, device_name, latest_lmd, status, last_path, classified_folders, skipped_folders, now_str))
+    """, (device_id, device_name, latest_lmd, status, last_path, classified_folders, skipped_folders, total_files, classified_files, skipped_files, total_folders, now_str))
     conn.commit()
 
 
@@ -314,7 +344,7 @@ def get_device_crawl_progress(conn: sqlite3.Connection, device_id: str) -> Optio
     cur = conn.cursor()
     cur.execute("""
         SELECT device_id, device_name, latest_lmd, status, last_path, 
-               classified_folders, skipped_folders, updated_at
+               classified_folders, skipped_folders, total_files, classified_files, skipped_files, total_folders, updated_at
         FROM device_crawl_progress
         WHERE device_id = ?
     """, (device_id,))
@@ -329,7 +359,11 @@ def get_device_crawl_progress(conn: sqlite3.Connection, device_id: str) -> Optio
         "last_path": row[4],
         "classified_folders": row[5],
         "skipped_folders": row[6],
-        "updated_at": row[7]
+        "total_files": row[7] if len(row) > 7 and row[7] is not None else 0,
+        "classified_files": row[8] if len(row) > 8 and row[8] is not None else 0,
+        "skipped_files": row[9] if len(row) > 9 and row[9] is not None else 0,
+        "total_folders": row[10] if len(row) > 10 and row[10] is not None else 0,
+        "updated_at": row[11] if len(row) > 11 else ""
     }
 
 
@@ -338,7 +372,7 @@ def get_all_device_crawl_progress(conn: sqlite3.Connection) -> Dict[str, Dict[st
     cur = conn.cursor()
     cur.execute("""
         SELECT device_id, device_name, latest_lmd, status, last_path, 
-               classified_folders, skipped_folders, updated_at
+               classified_folders, skipped_folders, total_files, classified_files, skipped_files, total_folders, updated_at
         FROM device_crawl_progress
     """)
     res = {}
@@ -351,7 +385,11 @@ def get_all_device_crawl_progress(conn: sqlite3.Connection) -> Dict[str, Dict[st
             "last_path": row[4],
             "classified_folders": row[5],
             "skipped_folders": row[6],
-            "updated_at": row[7]
+            "total_files": row[7] if len(row) > 7 and row[7] is not None else 0,
+            "classified_files": row[8] if len(row) > 8 and row[8] is not None else 0,
+            "skipped_files": row[9] if len(row) > 9 and row[9] is not None else 0,
+            "total_folders": row[10] if len(row) > 10 and row[10] is not None else 0,
+            "updated_at": row[11] if len(row) > 11 else ""
         }
     return res
 
