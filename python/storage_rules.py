@@ -288,7 +288,7 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
             rule_id = row[0]
             cur.execute("""
                 UPDATE storage_rules
-                SET name = 'Media Intake (iOS Backup)',
+                SET name = 'Media Intake',
                     device_pattern = 'iOS (*iPhone*, *iPad*)',
                     path_pattern = '/Photos, /Videos',
                     target_tier = 'priority 4',
@@ -306,7 +306,7 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
                     name, device_pattern, path_pattern, ext_pattern, category, description,
                     target_tier, target_relative_path, finder_color, action, is_recursive, created_at, updated_at
                 ) VALUES (
-                    'Media Intake (iOS Backup)', 'iOS (*iPhone*, *iPad*)', '/Photos, /Videos', '*', 'Temporary',
+                    'Media Intake', 'iOS (*iPhone*, *iPad*)', '/Photos, /Videos', '*', 'Temporary',
                     ?, 'priority 4', 'Temporary', 'Orange', 'MEDIA_INTAKE', 1, ?, ?
                 )
             """, (ios_desc, now_str, now_str))

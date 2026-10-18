@@ -873,7 +873,7 @@ def prompt_user_for_storage_rule(
                 else:
                     r_scope = "iOS (*iPhone*, *iPad*)"
                     r_pat = "/Photos, /Videos"
-                    r_name = "Media Intake (iOS Backup)"
+                    r_name = "Media Intake"
                     suggested_impact = "Media Intake rule for iDrive backup of an iOS device: resources in /Photos and /Videos are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
             elif is_ios:
                 print(f"  [1] All iOS Devices (iPhone & iPad) (*{folder_name}*) (Recommended) [Default]")
