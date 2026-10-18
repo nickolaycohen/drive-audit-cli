@@ -46,6 +46,9 @@ from storage_rules import (
     is_ios_device,
     is_mac_device,
     is_windows_device,
+    is_android_device,
+    detect_host_os,
+    detect_source_device_and_os,
     record_drilled_folder,
     is_folder_drilled,
     get_drilled_folders_for_device,
@@ -404,6 +407,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
       1. TABLE 1: STORAGE RULES LEDGER (Rule policies, categories, and patterns)
       2. TABLE 2: CLASSIFIED CLOUD RESOURCES (Actual device folders where rules are applied)
     """
+    init_storage_rules_tables(conn)
     rules = load_all_storage_rules(conn)
     color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
     tier_counts = {"priority 1": 0, "priority 2": 0, "priority 3": 0, "priority 4": 0, "discard": 0}
@@ -487,8 +491,15 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
                 tier_disp = f"{rec['target_tier'].upper()} {icon}"
 
             dest_disp = rec["local_destination"]
+            src_dev = rec.get("source_device")
+            src_os = rec.get("source_os")
+            if src_dev and src_dev != rec["device_name"]:
+                os_tag = f" - {src_os}" if src_os else ""
+                dev_disp = f"{rec['device_name'][:10]} ({src_dev[:8]}{os_tag})"
+            else:
+                dev_disp = rec["device_name"][:20]
 
-            print(f"  {idx:<3} | {rec['ingestion_id']:<12} | {rec['device_name'][:20]:<20} | {rec['source_path'][:25]:<25} | {tier_disp:<22} | {rec['rule_name'][:30]:<30} | {dest_disp}")
+            print(f"  {idx:<3} | {rec['ingestion_id']:<12} | {dev_disp:<20} | {rec['source_path'][:25]:<25} | {tier_disp:<22} | {rec['rule_name'][:30]:<30} | {dest_disp}")
 
     print("=" * 200)
 
@@ -697,6 +708,52 @@ def manage_drilled_folders_interactive(conn: sqlite3.Connection):
                 print(f"\n[✓] Removed '{item['folder_path']}' from drilled folders.")
 
 
+def resolve_source_os_interactive(device_name: str, folder_path: str, detected_info: Dict[str, Any]) -> Tuple[str, str, bool]:
+    """
+    Ensures the source Operating System and original device name are known.
+    If the system cannot recognize the source OS (unknown / ambiguous), it prompts the user.
+    Returns (source_device, source_os, is_nested).
+    """
+    src_dev = detected_info.get("source_device") or device_name
+    src_os = detected_info.get("source_os") or "Unknown"
+    is_nested = detected_info.get("is_nested", False)
+    conf = detected_info.get("confidence", "unknown")
+
+    if conf == "unknown" or src_os in ("Unknown", None, ""):
+        print("\n" + "-" * 85)
+        print("❓ SOURCE OPERATING SYSTEM DETECTION")
+        print(f"  The source Operating System for '{folder_path}' cannot be recognized automatically.")
+        print("  Please select the source Operating System for this resource:")
+        print("    [1] Android (e.g. Motorola / Moto, Samsung, Google Pixel) 🤖")
+        print("    [2] iOS (Apple iPhone, iPad, iPod) 🍏")
+        print("    [3] Windows (PC, Laptop, Server) 🪟")
+        print("    [4] macOS (MacBook, iMac, Mac mini) 🍎")
+        print("    [5] Linux / Unix 🐧")
+        print("    [6] Universal / OS-Agnostic 🌐")
+        os_c = input("  Source OS [1-6] (Default: 6): ").strip()
+        os_map = {
+            "1": "Android",
+            "2": "iOS",
+            "3": "Windows",
+            "4": "macOS",
+            "5": "Linux",
+            "6": "Universal"
+        }
+        src_os = os_map.get(os_c, "Universal")
+        if src_os in ("Android", "iOS"):
+            dev_prompt = f"  Original Device Name [Default: '{src_dev}']: "
+            cust_dev = input(dev_prompt).strip()
+            if cust_dev:
+                src_dev = cust_dev
+            is_nested = (src_dev != device_name)
+        print(f"  ✓ Set Source OS: {src_os} (Original Device: '{src_dev}')")
+        print("-" * 85)
+    elif is_nested:
+        print(f"\n  📱 Detected Source Context: '{src_dev}' ({src_os}) inside Host Backup '{device_name}' ({detected_info.get('host_os', 'Host')})")
+
+    return src_dev, src_os, is_nested
+
+
 def prompt_user_for_storage_rule(
     device_name: str,
     folder_path: str,
@@ -714,6 +771,13 @@ def prompt_user_for_storage_rule(
 
     norm_path = "/" + folder_path.strip().strip("/").replace("\\", "/")
     folder_name = Path(norm_path).name or norm_path
+
+    # Detect original source device and OS for nested or ambiguous backups
+    detected_info = detect_source_device_and_os(device_name, norm_path)
+    host_os = detected_info.get("host_os", "Unknown")
+    prelim_src_dev = detected_info.get("source_device", device_name)
+    prelim_src_os = detected_info.get("source_os", host_os)
+    prelim_nested = detected_info.get("is_nested", False)
 
     # Compute quick stats
     total_files = 0
@@ -787,7 +851,12 @@ def prompt_user_for_storage_rule(
         suggested_color = "Orange"
         suggested_rel_path = "Temporary"
         suggested_dest = "/Volumes/LaCie/Storage/Priority 4/Temporary/"
-        suggested_impact = "Stored in Priority 4/Temporary to be ingested from the Media Organizer"
+        if prelim_src_os == "Android":
+            suggested_impact = f"Media Intake rule for iDrive backup of an Android device ({prelim_src_dev}): resources in DCIM/Camera are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
+        elif prelim_src_os == "iOS":
+            suggested_impact = f"Media Intake rule for iDrive backup of an iOS device ({prelim_src_dev}): resources in /Photos and /Videos are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
+        else:
+            suggested_impact = "Stored in Priority 4/Temporary to be ingested from the Media Organizer"
     elif any(k in path_l for k in ["archive", "backup", "199", "200", "201", "old-"]):
         suggested_tier = "priority 3"
         suggested_action = "ARCHIVE_COLD"
@@ -845,7 +914,10 @@ def prompt_user_for_storage_rule(
             cls_f = device_progress.get("classified_folders", 0)
             skp_f = device_progress.get("skipped_folders", 0)
 
-            print(f"  • Device:                 {device_name} (Device {dev_idx}/{tot_devs} • Last Backup: {dev_dt})")
+            if prelim_nested:
+                print(f"  • Device:                 {device_name} ({host_os} Host) ➔ 📱 Original Source: '{prelim_src_dev}' ({prelim_src_os}) (Device {dev_idx}/{tot_devs} • Last Backup: {dev_dt})")
+            else:
+                print(f"  • Device:                 {device_name} ({host_os}) (Device {dev_idx}/{tot_devs} • Last Backup: {dev_dt})")
             if tot_files > 0:
                 bar = render_progress_bar(eval_files, tot_files, width=20)
                 f_pct_dev = (f_files / tot_files * 100) if tot_files > 0 else 0.0
@@ -858,7 +930,13 @@ def prompt_user_for_storage_rule(
                 print(f"  • Device Progress:        {bar} ({eval_f}/{tot_f} folders evaluated • {rem_f} remaining)")
                 print(f"  • Folder Triage Queue:    Folder {cur_num} of {tot_f} on this device ({cls_f} Classified, {skp_f} Skipped)")
         else:
-            print(f"  • Device:                 {device_name}")
+            if prelim_nested:
+                print(f"  • Device:                 {device_name} ({host_os} Host) ➔ 📱 Original Source: '{prelim_src_dev}' ({prelim_src_os})")
+            else:
+                print(f"  • Device:                 {device_name} ({host_os})")
+
+        if detected_info.get("confidence") == "unknown":
+            print(f"  • Source OS Detection:    ⚠️  Unknown / Unrecognized (Will prompt for OS on rule creation)")
 
         print(f"  • Remote Path:            {norm_path}")
         print(f"  • Size / Direct Contents: {format_size_human(total_bytes)} ({total_files} files, {len(subdirs)} subfolders)")
@@ -923,28 +1001,85 @@ def prompt_user_for_storage_rule(
 
         if choice == "1":
             print(f"\n--- ESTABLISH STORAGE RULE FOR '{folder_name}' ---")
-            is_ios = is_ios_device(device_name)
-            is_media = any(k in norm_path.lower() for k in ["photo", "video", "dcim", "media", "camera"])
+            src_dev, src_os, is_nested = resolve_source_os_interactive(device_name, norm_path, detected_info)
+            is_media = any(k in norm_path.lower() for k in ["photo", "video", "dcim", "media", "camera", "pictures"])
             print("Select Scope:")
-            if is_ios and is_media:
-                print(f"  [1] All iOS Devices (iPhone & iPad - /Photos & /Videos) (Recommended) [Default]")
-                print(f"  [2] Universal across ALL devices (*{folder_name}*)")
-                print(f"  [3] Device-specific only ('{device_name}' / {folder_name} only)")
+            if src_os == "Android" and is_media:
+                print(f"  [1] All Android Devices (*DCIM*, *Camera*) (Recommended) [Default]")
+                print(f"  [2] Mobile Media Intake (Android DCIM & iOS /Photos, /Videos) 📱")
+                print(f"  [3] Device-specific only ('{src_dev}' via '{device_name}')")
+                print(f"  [4] Universal across ALL devices (*{folder_name}*)")
+                scope_c = input("Scope [1-4] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = "Android (*Moto*, *Samsung*, *Pixel*), iOS (*iPhone*, *iPad*)"
+                    r_pat = "*DCIM*, *Camera*, /Photos, /Videos"
+                    r_name = "Media Intake"
+                    suggested_impact = "Universal Mobile Media Intake rule for iDrive backups (Android & iOS): stored in Priority 4/Temporary to be ingested from the Media Organizer"
+                elif scope_c == "3":
+                    r_scope = f"{device_name} ({src_dev})" if is_nested else device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"Media Intake - {src_dev}"
+                elif scope_c == "4":
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"Media Intake ({folder_name})"
+                else:
+                    r_scope = "Android (*Moto*, *Samsung*, *Pixel*, *Galaxy*)"
+                    r_pat = "*DCIM*, *Camera*"
+                    r_name = "Media Intake"
+                    suggested_impact = f"Media Intake rule for iDrive backup of an Android device ({src_dev}): resources in DCIM/Camera are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
+                suggested_tier = "priority 4"
+                suggested_action = "MEDIA_INTAKE"
+                suggested_category = "Temporary"
+                suggested_color = "Orange"
+                suggested_rel_path = "Temporary"
+            elif src_os == "Android":
+                print(f"  [1] All Android Devices (*{folder_name}*) (Recommended) [Default]")
+                print(f"  [2] Device-specific only ('{src_dev}' via '{device_name}')")
+                print(f"  [3] Universal across ALL devices (*{folder_name}*)")
                 scope_c = input("Scope [1-3] (Default: 1): ").strip()
                 if scope_c == "2":
+                    r_scope = f"{device_name} ({src_dev})" if is_nested else device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"{suggested_category} - {src_dev}"
+                elif scope_c == "3":
                     r_scope = "ALL"
                     r_pat = f"*{folder_name}*"
                     r_name = f"{suggested_category} ({folder_name})"
+                else:
+                    r_scope = "Android (*Moto*, *Samsung*, *Pixel*, *Galaxy*)"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} - Android ({folder_name})"
+            elif src_os == "iOS" and is_media:
+                print(f"  [1] All iOS Devices (iPhone & iPad - /Photos & /Videos) (Recommended) [Default]")
+                print(f"  [2] Mobile Media Intake (Android DCIM & iOS /Photos, /Videos) 📱")
+                print(f"  [3] Device-specific only ('{device_name}' / {folder_name} only)")
+                print(f"  [4] Universal across ALL devices (*{folder_name}*)")
+                scope_c = input("Scope [1-4] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = "Android (*Moto*, *Samsung*, *Pixel*), iOS (*iPhone*, *iPad*)"
+                    r_pat = "*DCIM*, *Camera*, /Photos, /Videos"
+                    r_name = "Media Intake"
+                    suggested_impact = "Universal Mobile Media Intake rule for iDrive backups (Android & iOS): stored in Priority 4/Temporary to be ingested from the Media Organizer"
                 elif scope_c == "3":
                     r_scope = device_name
                     r_pat = norm_path + "*"
                     r_name = f"{device_name} - {folder_name}"
+                elif scope_c == "4":
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} ({folder_name})"
                 else:
                     r_scope = "iOS (*iPhone*, *iPad*)"
                     r_pat = "/Photos, /Videos"
                     r_name = "Media Intake"
                     suggested_impact = "Media Intake rule for iDrive backup of an iOS device: resources in /Photos and /Videos are stored in /Volumes/LaCie/Storage/Priority 4/Temporary to be ingested from the Media Organizer"
-            elif is_ios:
+                suggested_tier = "priority 4"
+                suggested_action = "MEDIA_INTAKE"
+                suggested_category = "Temporary"
+                suggested_color = "Orange"
+                suggested_rel_path = "Temporary"
+            elif src_os == "iOS":
                 print(f"  [1] All iOS Devices (iPhone & iPad) (*{folder_name}*) (Recommended) [Default]")
                 print(f"  [2] Universal across ALL devices (*{folder_name}*)")
                 print(f"  [3] Device-specific only ('{device_name}' / {folder_name} only)")
@@ -961,6 +1096,40 @@ def prompt_user_for_storage_rule(
                     r_scope = "iOS (*iPhone*, *iPad*)"
                     r_pat = f"*{folder_name}*"
                     r_name = f"{suggested_category} - iOS ({folder_name})"
+            elif src_os == "Windows":
+                print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
+                print(f"  [2] All Windows Devices (*{folder_name}*)")
+                print(f"  [3] Device-specific only ('{device_name}' / {folder_name} only)")
+                scope_c = input("Scope [1-3] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = "Windows (*PC*, *Laptop*, *Windows*)"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} - Windows ({folder_name})"
+                elif scope_c == "3":
+                    r_scope = device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"{device_name} - {folder_name}"
+                else:
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} ({folder_name})"
+            elif src_os == "macOS":
+                print(f"  [1] All macOS Devices (*{folder_name}*) (Recommended) [Default]")
+                print(f"  [2] Universal across ALL devices (*{folder_name}*)")
+                print(f"  [3] Device-specific only ('{device_name}' / {folder_name} only)")
+                scope_c = input("Scope [1-3] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} ({folder_name})"
+                elif scope_c == "3":
+                    r_scope = device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"{device_name} - {folder_name}"
+                else:
+                    r_scope = "Mac (*MacBook*, *iMac*, *Mac*)"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"{suggested_category} - macOS ({folder_name})"
             else:
                 print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
                 print(f"  [2] Device-specific only ('{device_name}' / {folder_name} only)")
@@ -991,7 +1160,7 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
-            record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+            record_applied_rule_folder(conn, rule_id, device_name, norm_path, source_device=src_dev, source_os=src_os)
             ing_rec = get_or_create_ingestion_record(
                 conn=conn,
                 device_name=device_name,
@@ -1001,31 +1170,52 @@ def prompt_user_for_storage_rule(
                 target_folder=r_rel,
                 status="ignored" if suggested_tier in ("discard", "purge") else "pending",
                 total_files=folder_files,
-                total_bytes=folder_bytes
+                total_bytes=folder_bytes,
+                source_device=src_dev,
+                source_os=src_os
             )
-            print(f"\n[Success] ✓ Saved Generic Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier.upper()} {tier_icon} (Category: {rule.category}, Destination: {r_rel})")
-            print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} ({folder_files:,} files) | Local Target: {ing_rec['local_destination']}")
+            src_str = f" [Source: {src_dev} ({src_os}) on {device_name}]" if is_nested else ""
+            print(f"\n[Success] ✓ Saved Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier.upper()} {tier_icon} (Category: {rule.category}, Destination: {r_rel})")
+            print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']}{src_str} ({folder_files:,} files) | Local Target: {ing_rec['local_destination']}")
             return rule
 
         if choice == "2":
             # Priority 4 Temporary Discardable quarantine depot
             print(f"\n--- ROUTE TO PRIORITY 4 TEMPORARY ---")
             print(f"Folder: '{folder_name}' on '{device_name}'")
+            src_dev, src_os, is_nested = resolve_source_os_interactive(device_name, norm_path, detected_info)
             print("Select Scope:")
-            print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
-            print(f"  [2] Device-specific only ('{device_name}' only)")
-            scope_c = input("Scope [1-2] (Default: 1): ").strip()
-            
-            r_rel = "Temporary"
-            if scope_c == "2":
-                r_scope = device_name
-                r_pat = norm_path + "*"
-                r_name = f"Temporary - {device_name} - {folder_name}"
+            if src_os in ("Android", "iOS"):
+                print(f"  [1] All {src_os} Devices (Recommended) [Default]")
+                print(f"  [2] Universal / Generic across ALL devices (*{folder_name}*)")
+                print(f"  [3] Device-specific only ('{src_dev}' via '{device_name}')")
+                scope_c = input("Scope [1-3] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"Temporary - {folder_name}"
+                elif scope_c == "3":
+                    r_scope = f"{device_name} ({src_dev})" if is_nested else device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"Temporary - {src_dev} - {folder_name}"
+                else:
+                    r_scope = f"{src_os} (*{src_dev}*)" if src_os == "Android" else "iOS (*iPhone*, *iPad*)"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"Temporary - {src_os} ({folder_name})"
             else:
-                r_scope = "ALL"
-                r_pat = f"*{folder_name}*"
-                r_name = f"Temporary - {folder_name}"
+                print(f"  [1] Universal / Generic across ALL devices (*{folder_name}*) (Recommended) [Default]")
+                print(f"  [2] Device-specific only ('{device_name}' only)")
+                scope_c = input("Scope [1-2] (Default: 1): ").strip()
+                if scope_c == "2":
+                    r_scope = device_name
+                    r_pat = norm_path + "*"
+                    r_name = f"Temporary - {device_name} - {folder_name}"
+                else:
+                    r_scope = "ALL"
+                    r_pat = f"*{folder_name}*"
+                    r_name = f"Temporary - {folder_name}"
 
+            r_rel = "Temporary"
             rule = StorageRule(
                 name=r_name,
                 device_pattern=r_scope,
@@ -1041,7 +1231,7 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
-            record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+            record_applied_rule_folder(conn, rule_id, device_name, norm_path, source_device=src_dev, source_os=src_os)
             ing_rec = get_or_create_ingestion_record(
                 conn=conn,
                 device_name=device_name,
@@ -1051,7 +1241,9 @@ def prompt_user_for_storage_rule(
                 target_folder="Temporary",
                 status="pending",
                 total_files=folder_files,
-                total_bytes=folder_bytes
+                total_bytes=folder_bytes,
+                source_device=src_dev,
+                source_os=src_os
             )
             print(f"\n[Success] 🟠 Rule #{rule_id} Created: Routed to Priority 4/Temporary/ [Scope: {r_scope}]")
             print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} ({folder_files:,} files) | Local Target: {ing_rec['local_destination']}")
@@ -1061,19 +1253,37 @@ def prompt_user_for_storage_rule(
         if choice == "3":
             print(f"\n--- COMPLETE IGNORE / SKIP ---")
             print(f"Folder: '{norm_path}'")
+            src_dev, src_os, is_nested = resolve_source_os_interactive(device_name, norm_path, detected_info)
             print("Select Match Scope:")
-            print(f"  [1] Universal across ALL devices: '*{folder_name}*' (Recommended) [Default]")
-            print(f"  [2] Device & Folder only: '{norm_path}*' on '{device_name}'")
-            pat_choice = input("Scope [1-2] (Default: 1): ").strip()
-            
-            if pat_choice == "2":
-                pat_val = norm_path + "*"
-                dev_scope = device_name
-                r_name = f"Ignore - {device_name} - {folder_name}"
+            if src_os in ("Android", "iOS"):
+                print(f"  [1] Universal across ALL devices: '*{folder_name}*' (Recommended) [Default]")
+                print(f"  [2] All {src_os} Devices: '*{folder_name}*'")
+                print(f"  [3] Device & Folder only: '{norm_path}*' on '{device_name}'")
+                pat_choice = input("Scope [1-3] (Default: 1): ").strip()
+                if pat_choice == "2":
+                    pat_val = f"*{folder_name}*"
+                    dev_scope = f"{src_os} (*{src_dev}*)" if src_os == "Android" else "iOS (*iPhone*, *iPad*)"
+                    r_name = f"Ignore - {src_os} - {folder_name}"
+                elif pat_choice == "3":
+                    pat_val = norm_path + "*"
+                    dev_scope = device_name
+                    r_name = f"Ignore - {device_name} - {folder_name}"
+                else:
+                    pat_val = f"*{folder_name}*"
+                    dev_scope = "ALL"
+                    r_name = f"Ignore - {folder_name}"
             else:
-                pat_val = f"*{folder_name}*"
-                dev_scope = "ALL"
-                r_name = f"Ignore - {folder_name}"
+                print(f"  [1] Universal across ALL devices: '*{folder_name}*' (Recommended) [Default]")
+                print(f"  [2] Device & Folder only: '{norm_path}*' on '{device_name}'")
+                pat_choice = input("Scope [1-2] (Default: 1): ").strip()
+                if pat_choice == "2":
+                    pat_val = norm_path + "*"
+                    dev_scope = device_name
+                    r_name = f"Ignore - {device_name} - {folder_name}"
+                else:
+                    pat_val = f"*{folder_name}*"
+                    dev_scope = "ALL"
+                    r_name = f"Ignore - {folder_name}"
 
             rule = StorageRule(
                 name=r_name,
@@ -1090,7 +1300,7 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
-            record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+            record_applied_rule_folder(conn, rule_id, device_name, norm_path, source_device=src_dev, source_os=src_os)
             ing_rec = get_or_create_ingestion_record(
                 conn=conn,
                 device_name=device_name,
@@ -1100,7 +1310,9 @@ def prompt_user_for_storage_rule(
                 target_folder="",
                 status="ignored",
                 total_files=folder_files,
-                total_bytes=folder_bytes
+                total_bytes=folder_bytes,
+                source_device=src_dev,
+                source_os=src_os
             )
             print(f"\n[Success] 🚫 Rule #{rule_id} Created: Complete Ignore ({pat_val}) [Scope: {dev_scope}]")
             print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} ({folder_files:,} files - Ignored)")
@@ -1108,10 +1320,12 @@ def prompt_user_for_storage_rule(
 
         if choice == "4":
             print("\n--- DEFINE CUSTOM STORAGE RULE ---")
+            src_dev, src_os, is_nested = resolve_source_os_interactive(device_name, norm_path, detected_info)
             r_name = input(f"Rule Name [{suggested_category} - {folder_name}]: ").strip() or f"{suggested_category} - {folder_name}"
             
-            p_scope = input(f"Device Scope ('ALL' or '{device_name}') [Default: ALL]: ").strip() or "ALL"
-            default_pat = f"*{folder_name}*" if p_scope == "ALL" else (norm_path + "*")
+            default_scope = f"{src_os}" if src_os not in ("Universal", "Unknown", None) else "ALL"
+            p_scope = input(f"Device Scope ('ALL', 'Android', 'iOS', 'Windows', or '{device_name}') [Default: {default_scope}]: ").strip() or default_scope
+            default_pat = f"*{folder_name}*" if p_scope in ("ALL", "Android", "iOS", "Windows") else (norm_path + "*")
             p_pat = input(f"Path Pattern [Default: {default_pat}]: ").strip() or default_pat
             
             print("\nTarget Tier:")
@@ -1153,7 +1367,7 @@ def prompt_user_for_storage_rule(
             )
             rule_id = save_storage_rule(conn, rule)
             rule.rule_id = rule_id
-            record_applied_rule_folder(conn, rule_id, device_name, norm_path)
+            record_applied_rule_folder(conn, rule_id, device_name, norm_path, source_device=src_dev, source_os=src_os)
             ing_rec = get_or_create_ingestion_record(
                 conn=conn,
                 device_name=device_name,
@@ -1163,7 +1377,9 @@ def prompt_user_for_storage_rule(
                 target_folder=rel_val,
                 status="ignored" if tier_val in ("discard", "purge") else "pending",
                 total_files=folder_files,
-                total_bytes=folder_bytes
+                total_bytes=folder_bytes,
+                source_device=src_dev,
+                source_os=src_os
             )
             print(f"\n[Success] ✓ Saved Custom Storage Rule #{rule_id}: '{rule.name}' ➔ {rule.target_tier}")
             print(f"  📦 Ingestion ID: {ing_rec['ingestion_id']} ({folder_files:,} files) | Local Target: {ing_rec['local_destination']}")
@@ -1465,7 +1681,12 @@ def run_device_backup_wizard():
                     delete_drilled_folder(conn, dev_name, current_path)
                     drilled_set.discard(norm_curr_path)
 
-                record_applied_rule_folder(conn, matched_rule.rule_id, dev_name, current_path)
+                src_info = detect_source_device_and_os(dev_name, norm_curr_path)
+                src_dev = src_info.get("source_device") or dev_name
+                src_os = src_info.get("source_os") or ""
+                is_nested = src_info.get("is_nested", False)
+
+                record_applied_rule_folder(conn, matched_rule.rule_id, dev_name, current_path, source_device=src_dev, source_os=src_os)
                 ing_rec = get_or_create_ingestion_record(
                     conn=conn,
                     device_name=dev_name,
@@ -1475,7 +1696,9 @@ def run_device_backup_wizard():
                     target_folder=matched_rule.target_relative_path or "Documents",
                     status="ignored" if matched_rule.target_tier.lower() in ("discard", "purge") else "pending",
                     total_files=curr_fc,
-                    total_bytes=curr_sz
+                    total_bytes=curr_sz,
+                    source_device=src_dev,
+                    source_os=src_os
                 )
                 dev_classified_folders += 1
                 dev_classified_files += curr_fc
@@ -1491,12 +1714,13 @@ def run_device_backup_wizard():
                     prog_str = f"{prog_bar} ({dev_evaluated_folders}/{dev_total_folders} folders evaluated | {dev_classified_folders} Classified, {len(queue)} Remaining)"
 
                 fc_str = f" ({curr_fc:,} files, {format_size_human(curr_sz)})" if curr_fc > 0 or curr_sz > 0 else ""
+                src_str = f" [Source: {src_dev} ({src_os})]" if is_nested else ""
                 if matched_rule.action == "STAGE_DISCARDABLE":
-                    print(f"  [🟠 Temp Discardable] '{current_path}'{fc_str} (Rule: '{matched_rule.name}', Ingestion ID: {ing_rec['ingestion_id']})")
+                    print(f"  [🟠 Temp Discardable] '{current_path}'{fc_str}{src_str} (Rule: '{matched_rule.name}', Ingestion ID: {ing_rec['ingestion_id']})")
                 elif matched_rule.action in ("DISCARD_IGNORE", "PURGE_SKIP") or matched_rule.target_tier.lower() in ("discard", "purge"):
-                    print(f"  [🚫 Discarded / Ignored] '{current_path}'{fc_str} (Rule: '{matched_rule.name}', Ingestion ID: {ing_rec['ingestion_id']})")
+                    print(f"  [🚫 Discarded / Ignored] '{current_path}'{fc_str}{src_str} (Rule: '{matched_rule.name}', Ingestion ID: {ing_rec['ingestion_id']})")
                 else:
-                    print(f"  [✓ Rule Matched] '{current_path}'{fc_str} ➔ '{matched_rule.name}' ({matched_rule.target_tier.upper()}, Ingestion ID: {ing_rec['ingestion_id']})")
+                    print(f"  [✓ Rule Matched] '{current_path}'{fc_str}{src_str} ➔ '{matched_rule.name}' ({matched_rule.target_tier.upper()}, Ingestion ID: {ing_rec['ingestion_id']})")
                 print(f"  ➔ Progress on '{dev_name}': {prog_str}")
                 update_device_crawl_progress(
                     conn, dev_id, dev_name, dev_date, status="in_progress", last_path=current_path,

@@ -69,11 +69,106 @@ def is_windows_device(device_name: str) -> bool:
     return any(k in d for k in ("pc", "asus", "laptop", "desktop", "windows"))
 
 
+def is_android_device(device_name: str) -> bool:
+    """Checks if a device name or OS indicator denotes an Android device (Moto, Samsung, Pixel, Galaxy, Android, etc.)."""
+    d = device_name.lower().strip()
+    android_keywords = (
+        "android", "moto", "motorola", "galaxy", "samsung", "pixel",
+        "nexus", "xperia", "oneplus", "huawei", "xiaomi", "redmi",
+        "oppo", "vivo", "htc", "lg-", "droid"
+    )
+    return any(k in d for k in android_keywords)
+
+
+def detect_host_os(device_name: str, path: str = "") -> Optional[str]:
+    """Detects the host operating system from the device name or root path format."""
+    d = device_name.lower().strip()
+    norm_p = "/" + path.strip().strip("/").replace("\\", "/") + "/"
+    p_lower = norm_p.lower()
+
+    if is_ios_device(d):
+        return "iOS"
+    if is_mac_device(d) or p_lower.startswith(("/library/", "/applications/", "/volumes/", "/system/")):
+        return "macOS"
+    if is_windows_device(d) or p_lower.startswith(("/c/", "/d/", "/e/", "/f/", "/windows/", "/program files/")):
+        return "Windows"
+    if is_android_device(d):
+        return "Android"
+    if any(k in d for k in ("linux", "ubuntu", "debian", "redhat", "centos")) or p_lower.startswith(("/etc/", "/var/", "/usr/", "/opt/", "/home/")):
+        return "Linux"
+    return None
+
+
+def detect_source_device_and_os(device_name: str, path: str) -> Dict[str, Any]:
+    """
+    Analyzes host device and folder path to determine if the folder contains
+    a backup of a secondary/original device (e.g. Android phone backup stored on a Windows PC).
+    Returns dictionary with host_device, host_os, source_device, source_os, is_nested, and confidence.
+    """
+    host_os = detect_host_os(device_name, path) or "Unknown"
+    norm_path = "/" + path.strip().strip("/").replace("\\", "/")
+    segments = [s.strip() for s in norm_path.split("/") if s.strip()]
+
+    source_dev = device_name
+    source_os = host_os
+    is_nested = False
+    confidence = "high" if host_os != "Unknown" else "unknown"
+    source_hint = ""
+
+    # Check path segments for nested device backups
+    for seg in segments:
+        seg_lower = seg.lower()
+
+        # Check Android nested devices
+        if is_android_device(seg_lower) or any(k in seg_lower for k in ("moto", "samsung", "galaxy", "pixel", "android")):
+            clean_name = re.sub(r'(?i)\b(backup|backups|phone|device|files|folder|data)\b', '', seg).strip()
+            source_dev = clean_name or seg
+            source_os = "Android"
+            is_nested = True
+            confidence = "high"
+            source_hint = f"Detected from nested folder '{seg}'"
+            break
+
+        # Check iOS nested devices
+        if is_ios_device(seg_lower) or any(k in seg_lower for k in ("iphone", "ipad", "ipod", "apple backup")):
+            clean_name = re.sub(r'(?i)\b(backup|backups|phone|device|files|folder|data)\b', '', seg).strip()
+            source_dev = clean_name or seg
+            source_os = "iOS"
+            is_nested = True
+            confidence = "high"
+            source_hint = f"Detected from nested folder '{seg}'"
+            break
+
+        # Check generic phone or external backup with unknown OS
+        if any(k in seg_lower for k in ("phone backup", "cell backup", "mobile backup", "old phone", "external backup")):
+            source_dev = seg
+            source_os = "Unknown"
+            is_nested = True
+            confidence = "unknown"
+            source_hint = f"Detected nested backup '{seg}', but Operating System is unconfirmed"
+            break
+
+    # If not nested and host_os is unknown
+    if not is_nested and host_os == "Unknown":
+        confidence = "unknown"
+
+    return {
+        "host_device": device_name,
+        "host_os": host_os,
+        "source_device": source_dev,
+        "source_os": source_os,
+        "is_nested": is_nested,
+        "confidence": confidence,
+        "source_hint": source_hint
+    }
+
+
 def matches_device_pattern(device_name: str, device_pattern: str) -> bool:
     """
     Checks if device_name satisfies device_pattern.
     Supports:
       - 'ALL' or '*'
+      - 'Android' or '[Android OS]' or 'Android devices'
       - 'iOS' or 'all_ios' or 'iOS (*iPhone*, *iPad*)' (matches any iOS device)
       - 'Mac' or 'macOS' or 'all_mac' (matches any Mac)
       - 'Windows' or 'PC' (matches any Windows device)
@@ -86,19 +181,26 @@ def matches_device_pattern(device_name: str, device_pattern: str) -> bool:
     raw_pats = [p.strip().lower() for p in re.split(r'[,|]|\s+or\s+', device_pattern) if p.strip()]
 
     for p in raw_pats:
-        # Check semantic device categories
-        if p in ("ios", "*ios*", "all_ios", "ios devices") or "ios" in p:
-            if is_ios_device(dev_lower):
+        p_clean = p.replace("[", "").replace("]", "").replace("(", "").replace(")", "").strip()
+        # Semantic device categories
+        if "android" in p_clean:
+            if is_android_device(dev_lower) or dev_lower in ("android", "android os"):
                 return True
-        if p in ("mac", "*mac*", "macos", "all_mac", "mac devices"):
-            if is_mac_device(dev_lower):
+            continue
+        if "ios" in p_clean:
+            if is_ios_device(dev_lower) or dev_lower in ("ios", "iphone", "ipad"):
                 return True
-        if p in ("windows", "*windows*", "pc", "*pc*", "windows devices"):
-            if is_windows_device(dev_lower):
+            continue
+        if "mac" in p_clean:
+            if is_mac_device(dev_lower) or dev_lower in ("mac", "macos"):
                 return True
+            continue
+        if "windows" in p_clean or p_clean in ("pc", "*pc*"):
+            if is_windows_device(dev_lower) or dev_lower in ("windows", "pc"):
+                return True
+            continue
 
-        # Clean glob matching
-        clean_glob = p.replace("(", "").replace(")", "").strip()
+        clean_glob = p_clean
         if not clean_glob:
             continue
         if fnmatch.fnmatch(dev_lower, clean_glob) or fnmatch.fnmatch(dev_lower, f"*{clean_glob}*"):
@@ -229,6 +331,8 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
             device_name TEXT NOT NULL,
             folder_path TEXT NOT NULL,
             applied_at TEXT NOT NULL,
+            source_device TEXT,
+            source_os TEXT,
             UNIQUE(rule_id, device_name, folder_path)
         )
     """)
@@ -256,6 +360,8 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
             status TEXT NOT NULL DEFAULT 'pending',
             total_files INTEGER DEFAULT 0,
             total_bytes INTEGER DEFAULT 0,
+            source_device TEXT,
+            source_os TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (rule_id) REFERENCES storage_rules(id)
@@ -280,6 +386,56 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_ingestion_id ON ingestion_records(ingestion_id);
     """)
+
+    # Ensure source_device and source_os columns exist in ingestion_records and applied_rule_folders
+    cur.execute("PRAGMA table_info(ingestion_records)")
+    existing_ing_cols = {r[1] for r in cur.fetchall()}
+    for col_name, col_type in [
+        ("source_device", "TEXT"),
+        ("source_os", "TEXT")
+    ]:
+        if col_name not in existing_ing_cols:
+            try:
+                cur.execute(f"ALTER TABLE ingestion_records ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
+
+    cur.execute("PRAGMA table_info(applied_rule_folders)")
+    existing_app_cols = {r[1] for r in cur.fetchall()}
+    for col_name, col_type in [
+        ("source_device", "TEXT"),
+        ("source_os", "TEXT")
+    ]:
+        if col_name not in existing_app_cols:
+            try:
+                cur.execute(f"ALTER TABLE applied_rule_folders ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
+    conn.commit()
+
+    # Backfill source_device and source_os for existing rows if null
+    try:
+        cur.execute("SELECT id, device_name, folder_path FROM applied_rule_folders WHERE source_device IS NULL OR source_os IS NULL")
+        for r_id, d_name, f_path in cur.fetchall():
+            info = detect_source_device_and_os(d_name, f_path)
+            cur.execute("""
+                UPDATE applied_rule_folders
+                SET source_device = ?, source_os = ?
+                WHERE id = ?
+            """, (info["source_device"], info["source_os"], r_id))
+
+        cur.execute("SELECT id, device_name, source_path FROM ingestion_records WHERE source_device IS NULL OR source_os IS NULL")
+        for r_id, d_name, s_path in cur.fetchall():
+            info = detect_source_device_and_os(d_name, s_path)
+            cur.execute("""
+                UPDATE ingestion_records
+                SET source_device = ?, source_os = ?
+                WHERE id = ?
+            """, (info["source_device"], info["source_os"], r_id))
+        conn.commit()
+    except Exception:
+        pass
+
     # Ensure local_destination in ingestion_records does not have ingestion_id automatically appended
     try:
         cur.execute("""
@@ -288,6 +444,22 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
             WHERE local_destination LIKE '%/' || ingestion_id
         """)
         conn.commit()
+    except Exception:
+        pass
+
+    # Ensure Temporary (Camera) has Scope [Android OS]
+    try:
+        now_str = datetime.datetime.now().isoformat()
+        cur.execute("SELECT id FROM storage_rules WHERE name = 'Temporary (Camera)'")
+        cam_row = cur.fetchone()
+        if cam_row:
+            cur.execute("""
+                UPDATE storage_rules
+                SET device_pattern = '[Android OS]',
+                    updated_at = ?
+                WHERE id = ?
+            """, (now_str, cam_row[0]))
+            conn.commit()
     except Exception:
         pass
 
@@ -332,16 +504,16 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
             if is_ios_device(d_name):
                 for p_name in ("/Photos", "/Videos"):
                     cur.execute("""
-                        INSERT INTO applied_rule_folders (rule_id, device_name, folder_path, applied_at)
-                        VALUES (?, ?, ?, ?)
+                        INSERT INTO applied_rule_folders (rule_id, device_name, folder_path, applied_at, source_device, source_os)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         ON CONFLICT(rule_id, device_name, folder_path) DO UPDATE SET applied_at = excluded.applied_at
-                    """, (rule_id, d_name, p_name, now_str))
+                    """, (rule_id, d_name, p_name, now_str, d_name, "iOS"))
                     cur.execute("""
                         UPDATE ingestion_records
                         SET rule_id = ?, target_tier = 'priority 4', target_folder = 'Temporary',
                             local_destination = '/Volumes/LaCie/Storage/Priority 4/Temporary',
                             status = 'pending', updated_at = ?
-                        WHERE device_name = ? AND source_path = ?
+                            WHERE device_name = ? AND source_path = ?
                     """, (rule_id, now_str, d_name, p_name))
         conn.commit()
     except Exception:
@@ -359,23 +531,33 @@ def get_or_create_ingestion_record(
     target_folder: str = "Documents",
     status: str = "pending",
     total_files: int = 0,
-    total_bytes: int = 0
+    total_bytes: int = 0,
+    source_device: Optional[str] = None,
+    source_os: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Fetches or registers an ingestion record with a unique Ingestion ID (e.g. ING-0001).
     Assigns the clean Local Target Destination (e.g. /Volumes/LaCie/Storage/Priority 2/Documents)
     without appending the Ingestion ID, leaving merge and conflict resolution to the Storage Manager.
+    Records both host device and original source device / OS (e.g. MOTO on ASUS).
     """
     cur = conn.cursor()
     norm_source = "/" + source_path.strip().strip("/").replace("\\", "/")
+    now_str = datetime.datetime.now().isoformat()
+
+    if not source_device or not source_os:
+        info = detect_source_device_and_os(device_name, norm_source)
+        source_device = source_device or info["source_device"]
+        source_os = source_os or info["source_os"]
+
     cur.execute("""
         SELECT id, ingestion_id, device_name, source_path, rule_id, target_tier, 
-               target_folder, local_destination, status, total_files, total_bytes, created_at, updated_at
+               target_folder, local_destination, status, total_files, total_bytes, created_at, updated_at,
+               source_device, source_os
         FROM ingestion_records
         WHERE device_name = ? AND source_path = ?
     """, (device_name, norm_source))
     row = cur.fetchone()
-    now_str = datetime.datetime.now().isoformat()
 
     if row:
         rec_id, ing_id = row[0], row[1]
@@ -390,9 +572,11 @@ def get_or_create_ingestion_record(
             SET rule_id = ?, target_tier = ?, target_folder = ?, local_destination = ?, status = ?,
                 total_files = CASE WHEN ? > 0 THEN ? ELSE total_files END,
                 total_bytes = CASE WHEN ? > 0 THEN ? ELSE total_bytes END,
+                source_device = COALESCE(?, source_device),
+                source_os = COALESCE(?, source_os),
                 updated_at = ?
             WHERE id = ?
-        """, (rule_id, target_tier, target_folder, local_dest, status, total_files, total_files, total_bytes, total_bytes, now_str, rec_id))
+        """, (rule_id, target_tier, target_folder, local_dest, status, total_files, total_files, total_bytes, total_bytes, source_device, source_os, now_str, rec_id))
         conn.commit()
         return {
             "id": rec_id,
@@ -405,7 +589,9 @@ def get_or_create_ingestion_record(
             "local_destination": local_dest,
             "status": status,
             "total_files": total_files or row[9],
-            "total_bytes": total_bytes or row[10]
+            "total_bytes": total_bytes or row[10],
+            "source_device": source_device or (row[13] if len(row) > 13 else None) or device_name,
+            "source_os": source_os or (row[14] if len(row) > 14 else None) or ""
         }
 
     # Generate next sequential Ingestion ID
@@ -421,9 +607,9 @@ def get_or_create_ingestion_record(
 
     cur.execute("""
         INSERT INTO ingestion_records 
-        (ingestion_id, device_name, source_path, rule_id, target_tier, target_folder, local_destination, status, total_files, total_bytes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (ing_id, device_name, norm_source, rule_id, target_tier, target_folder, local_dest, status, total_files, total_bytes, now_str, now_str))
+        (ingestion_id, device_name, source_path, rule_id, target_tier, target_folder, local_destination, status, total_files, total_bytes, source_device, source_os, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (ing_id, device_name, norm_source, rule_id, target_tier, target_folder, local_dest, status, total_files, total_bytes, source_device, source_os, now_str, now_str))
     conn.commit()
     new_id = cur.lastrowid
     return {
@@ -437,17 +623,21 @@ def get_or_create_ingestion_record(
         "local_destination": local_dest,
         "status": status,
         "total_files": total_files,
-        "total_bytes": total_bytes
+        "total_bytes": total_bytes,
+        "source_device": source_device or device_name,
+        "source_os": source_os or ""
     }
 
 
 def get_all_ingestion_records(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """Returns all ingestion records joined with their storage rules."""
+    init_storage_rules_tables(conn)
     cur = conn.cursor()
     cur.execute("""
         SELECT i.id, i.ingestion_id, i.device_name, i.source_path, i.target_tier, 
                r.finder_color, r.name as rule_name, i.local_destination, i.status,
-               i.total_files, i.total_bytes, i.created_at, i.target_folder
+               i.total_files, i.total_bytes, i.created_at, i.target_folder,
+               i.source_device, i.source_os
         FROM ingestion_records i
         LEFT JOIN storage_rules r ON i.rule_id = r.id
         ORDER BY i.id ASC
@@ -468,22 +658,40 @@ def get_all_ingestion_records(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             "total_files": r[9],
             "total_bytes": r[10],
             "created_at": r[11],
-            "target_folder": r[12]
+            "target_folder": r[12],
+            "source_device": r[13] or r[2],
+            "source_os": r[14] or ""
         })
     return res
 
 
-def record_applied_rule_folder(conn: sqlite3.Connection, rule_id: int, device_name: str, folder_path: str) -> None:
-    """Records that a rule was applied to a specific device/folder."""
+def record_applied_rule_folder(
+    conn: sqlite3.Connection,
+    rule_id: int,
+    device_name: str,
+    folder_path: str,
+    source_device: Optional[str] = None,
+    source_os: Optional[str] = None
+) -> None:
+    """Records that a rule was applied to a specific device/folder, optionally tracking original device & OS."""
     if not rule_id:
         return
+    norm_path = "/" + folder_path.strip().strip("/").replace("\\", "/")
+    if not source_device or not source_os:
+        info = detect_source_device_and_os(device_name, norm_path)
+        source_device = source_device or info["source_device"]
+        source_os = source_os or info["source_os"]
+
     now_str = datetime.datetime.now().isoformat()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO applied_rule_folders (rule_id, device_name, folder_path, applied_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(rule_id, device_name, folder_path) DO UPDATE SET applied_at = excluded.applied_at
-    """, (rule_id, device_name, folder_path, now_str))
+        INSERT INTO applied_rule_folders (rule_id, device_name, folder_path, applied_at, source_device, source_os)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(rule_id, device_name, folder_path) DO UPDATE SET 
+            applied_at = excluded.applied_at,
+            source_device = COALESCE(excluded.source_device, applied_rule_folders.source_device),
+            source_os = COALESCE(excluded.source_os, applied_rule_folders.source_os)
+    """, (rule_id, device_name, norm_path, now_str, source_device, source_os))
     conn.commit()
 
 
@@ -705,12 +913,14 @@ def resolve_target_relative_path(template: str, device_name: str, folder_name: s
 
 
 def get_all_applied_resources(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    """Fetches all classified cloud resources joined with their matched storage rules."""
+    """Fetches all classified cloud resources joined with their matched storage rules, including original source device & OS."""
+    init_storage_rules_tables(conn)
     cur = conn.cursor()
     cur.execute("""
         SELECT a.id, a.device_name, a.folder_path, a.applied_at, 
                r.id as rule_id, r.name as rule_name, r.target_tier, 
-               r.finder_color, r.target_relative_path, r.action, r.category
+               r.finder_color, r.target_relative_path, r.action, r.category,
+               a.source_device, a.source_os
         FROM applied_rule_folders a
         JOIN storage_rules r ON a.rule_id = r.id
         ORDER BY a.device_name, a.folder_path
@@ -736,7 +946,9 @@ def get_all_applied_resources(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             "target_relative_path": resolved_target,
             "raw_template": raw_target,
             "action": row[9],
-            "category": row[10]
+            "category": row[10],
+            "source_device": row[11] or dev_name,
+            "source_os": row[12] or ""
         })
     return res
 
@@ -790,6 +1002,7 @@ def delete_storage_rule(conn: sqlite3.Connection, rule_id: int) -> bool:
 
 def load_all_storage_rules(conn: sqlite3.Connection) -> List[StorageRule]:
     """Loads all active storage rules from SQLite ordered by specificity."""
+    init_storage_rules_tables(conn)
     cur = conn.cursor()
     cur.execute("""
         SELECT id, name, device_pattern, path_pattern, ext_pattern,
@@ -845,9 +1058,19 @@ def match_storage_rule(
     norm_path_lower = norm_path.lower()
     dev_lower = device_name.strip().lower()
 
+    # Detect original source device and OS for nested backups
+    src_info = detect_source_device_and_os(device_name, norm_path)
+    src_dev = src_info.get("source_device") or device_name
+    src_os = src_info.get("source_os") or ""
+
     for rule in rules:
-        # Check device pattern (supports 'ALL', 'iOS', 'Mac', 'Windows', or comma-separated lists)
-        if not matches_device_pattern(device_name, rule.device_pattern):
+        # Check device pattern (supports 'ALL', 'iOS', 'Android', 'Mac', 'Windows', or specific device names)
+        # Matches against host device, nested source device, or source OS
+        matches_host = matches_device_pattern(device_name, rule.device_pattern)
+        matches_src = (src_dev != device_name and matches_device_pattern(src_dev, rule.device_pattern))
+        matches_os = (bool(src_os) and src_os != "Unknown" and matches_device_pattern(src_os, rule.device_pattern))
+
+        if not (matches_host or matches_src or matches_os):
             continue
 
         # Check path pattern (supports comma-separated lists, wildcards, recursion, and regex)
