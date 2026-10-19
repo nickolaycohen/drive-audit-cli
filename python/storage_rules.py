@@ -388,6 +388,32 @@ def init_storage_rules_tables(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_ingestion_id ON ingestion_records(ingestion_id);
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS device_cloud_status (
+            device_id TEXT PRIMARY KEY,
+            device_name TEXT NOT NULL,
+            os_type TEXT,
+            latest_lmd TEXT NOT NULL,
+            lmd_path TEXT,
+            total_files INTEGER DEFAULT 0,
+            size_bytes INTEGER DEFAULT 0,
+            status_label TEXT,
+            is_active INTEGER DEFAULT 0,
+            last_verified TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dev_cloud_name ON device_cloud_status(device_name);
+    """)
+
+    cur.execute("PRAGMA table_info(device_cloud_status)")
+    existing_dev_cols = {r[1] for r in cur.fetchall()}
+    if "is_active" not in existing_dev_cols:
+        try:
+            cur.execute("ALTER TABLE device_cloud_status ADD COLUMN is_active INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
     # Ensure source_device and source_os columns exist in ingestion_records and applied_rule_folders
     cur.execute("PRAGMA table_info(ingestion_records)")
     existing_ing_cols = {r[1] for r in cur.fetchall()}
@@ -923,6 +949,76 @@ def get_all_device_crawl_progress(conn: sqlite3.Connection) -> Dict[str, Dict[st
     return res
 
 
+def record_device_cloud_status(
+    conn: sqlite3.Connection,
+    device_id: str,
+    device_name: str,
+    os_type: str,
+    latest_lmd: str,
+    lmd_path: str = "",
+    total_files: int = 0,
+    size_bytes: int = 0,
+    status_label: str = "",
+    is_active: int = 0
+):
+    """Inserts or updates verified cloud device backup status."""
+    now_str = datetime.datetime.now().isoformat()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO device_cloud_status
+        (device_id, device_name, os_type, latest_lmd, lmd_path, total_files, size_bytes, status_label, is_active, last_verified)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (device_id, device_name, os_type, latest_lmd, lmd_path, total_files, size_bytes, status_label, is_active, now_str))
+    conn.commit()
+
+
+def is_device_active(device_name: str, conn: Optional[sqlite3.Connection] = None) -> bool:
+    """Returns True if device is currently active in daily production (excluded from migration rules)."""
+    norm = (device_name or "").strip().lower()
+    active_keywords = ["macmini", "iphone (3)", "iphone (5)", "macbookpro2"]
+    if any(k in norm for k in active_keywords):
+        return True
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT is_active FROM device_cloud_status WHERE LOWER(device_name) = ?", (norm,))
+            r = cur.fetchone()
+            if r and r[0] == 1:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def get_all_device_cloud_status(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Fetches all verified cloud device backup records, sorted latest backup first."""
+    init_storage_rules_tables(conn)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT device_id, device_name, os_type, latest_lmd, lmd_path, total_files, size_bytes, status_label, is_active, last_verified
+        FROM device_cloud_status
+        ORDER BY latest_lmd DESC
+    """)
+    rows = cur.fetchall()
+    res = []
+    for r in rows:
+        dev_nm = r[1]
+        active_flag = (r[8] == 1) or is_device_active(dev_nm)
+        res.append({
+            "device_id": r[0],
+            "device_name": dev_nm,
+            "os_type": r[2],
+            "latest_lmd": r[3],
+            "lmd_path": r[4],
+            "total_files": r[5] or 0,
+            "size_bytes": r[6] or 0,
+            "status_label": r[7] or "",
+            "is_active": active_flag,
+            "last_verified": r[9] if len(r) > 9 else ""
+        })
+    return res
+
+
 def get_applied_folders_for_rule(conn: sqlite3.Connection, rule_id: int) -> List[Tuple[str, str]]:
     """Returns list of (device_name, folder_path) tuples where this rule has been applied."""
     cur = conn.cursor()
@@ -1140,33 +1236,41 @@ def get_tier_color(tier: str, action: str = "") -> str:
 
 def calculate_projected_storage_allocation(conn: sqlite3.Connection) -> Dict[str, Any]:
     """
-    Calculates projected storage usage and disk headroom across all destination folders
-    if existing rules are executed over the iDrive cloud backups.
-    Evaluates both:
-      1. Staged Ingestion Queue (Confirmed classified cloud folders in ingestion_records)
-      2. Full Cloud Scope (All discovered and matching cloud backup folders across iDrive devices)
+    Calculates verified projected storage usage and disk headroom across all destination folders
+    based on the active Ingestion Records in the shared SQLite database.
+    Strictly filters rules execution to INACTIVE devices on iDrive.
+    Breaks down space inflow by device and destination.
     """
     init_storage_rules_tables(conn)
     rules = load_all_storage_rules(conn)
     cur = conn.cursor()
 
-    # 1. Staged records from ingestion_records
+    # 1. Fetch staged records from ingestion_records with source OS
     cur.execute("""
         SELECT id, ingestion_id, device_name, source_path, target_tier, 
-               target_folder, local_destination, status, total_files, total_bytes, rule_id
+               target_folder, local_destination, status, total_files, total_bytes, rule_id,
+               source_device, source_os
         FROM ingestion_records
     """)
     rows = cur.fetchall()
 
-    staged_dest: Dict[str, Dict[str, Any]] = {}
-    staged_keys: Set[Tuple[str, str]] = set()
+    staged_dest: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    device_rollups: Dict[str, Dict[str, Any]] = {}
     rule_stats: Dict[int, Dict[str, int]] = {}
+    active_devices_excluded: List[str] = []
 
     for r in rows:
         ing_id, dev, src_path = r[1], r[2], r[3]
         t_tier, t_fld, loc_dest, status = r[4], r[5], r[6], r[7]
         fl_cnt, byte_cnt, r_id = max(0, r[8] or 0), max(0, r[9] or 0), r[10]
-        staged_keys.add((dev, src_path))
+        src_dev = r[11] or dev
+        src_os = r[12] or ""
+
+        # Enforce requirement: Show rules execution ONLY for inactive devices on iDrive
+        if is_device_active(dev, conn):
+            if dev not in active_devices_excluded:
+                active_devices_excluded.append(dev)
+            continue
 
         is_discard = (
             t_tier.lower() in ("discard", "purge")
@@ -1175,143 +1279,83 @@ def calculate_projected_storage_allocation(conn: sqlite3.Connection) -> Dict[str
             or "cloud ignored" in loc_dest.lower()
         )
 
-        if loc_dest not in staged_dest:
-            staged_dest[loc_dest] = {
+        # Key by (device_name, local_destination) to show space inflow by device
+        key = (dev, loc_dest)
+        if key not in staged_dest:
+            staged_dest[key] = {
+                "device_name": dev,
+                "source_os": src_os,
                 "target_destination": loc_dest,
                 "tier": t_tier,
                 "target_folder": t_fld,
                 "is_discard": is_discard,
                 "staged_folders": 0,
                 "staged_files": 0,
-                "staged_bytes": 0,
-                "cloud_folders": 0,
-                "cloud_files": 0,
-                "cloud_bytes": 0,
-                "devices": set()
+                "staged_bytes": 0
             }
 
-        staged_dest[loc_dest]["staged_folders"] += 1
-        staged_dest[loc_dest]["staged_files"] += fl_cnt
-        staged_dest[loc_dest]["staged_bytes"] += byte_cnt
-        staged_dest[loc_dest]["cloud_folders"] += 1
-        staged_dest[loc_dest]["cloud_files"] += fl_cnt
-        staged_dest[loc_dest]["cloud_bytes"] += byte_cnt
-        staged_dest[loc_dest]["devices"].add(dev)
+        staged_dest[key]["staged_folders"] += 1
+        staged_dest[key]["staged_files"] += fl_cnt
+        staged_dest[key]["staged_bytes"] += byte_cnt
+
+        # Device level rollup
+        if dev not in device_rollups:
+            device_rollups[dev] = {
+                "device_name": dev,
+                "source_os": src_os,
+                "inflow_folders": 0,
+                "inflow_files": 0,
+                "inflow_bytes": 0,
+                "discard_folders": 0,
+                "discard_files": 0,
+                "discard_bytes": 0
+            }
+
+        if is_discard:
+            device_rollups[dev]["discard_folders"] += 1
+            device_rollups[dev]["discard_files"] += fl_cnt
+            device_rollups[dev]["discard_bytes"] += byte_cnt
+        else:
+            device_rollups[dev]["inflow_folders"] += 1
+            device_rollups[dev]["inflow_files"] += fl_cnt
+            device_rollups[dev]["inflow_bytes"] += byte_cnt
 
         if r_id:
             if r_id not in rule_stats:
                 rule_stats[r_id] = {
-                    "staged_folders": 0, "staged_files": 0, "staged_bytes": 0,
-                    "cloud_folders": 0, "cloud_files": 0, "cloud_bytes": 0
+                    "staged_folders": 0, "staged_files": 0, "staged_bytes": 0
                 }
             rule_stats[r_id]["staged_folders"] += 1
             rule_stats[r_id]["staged_files"] += fl_cnt
             rule_stats[r_id]["staged_bytes"] += byte_cnt
-            rule_stats[r_id]["cloud_folders"] += 1
-            rule_stats[r_id]["cloud_files"] += fl_cnt
-            rule_stats[r_id]["cloud_bytes"] += byte_cnt
 
-    # 2. Check idrive_audit.db for additional cloud backups matching rules
-    idrive_db_path = "/Users/nickolaycohen/dev/idrive-audit/idrive_audit.db"
-    if os.path.exists(idrive_db_path):
-        try:
-            conn_i = sqlite3.connect(idrive_db_path)
-            cur_i = conn_i.cursor()
-            cur_i.execute("""
-                SELECT device_name, path, filecount, size 
-                FROM api_calls 
-                WHERE endpoint = 'getProperties' AND (filecount > 0 OR size > 0)
-                AND path NOT LIKE '/%/%'
-                ORDER BY device_name, path
-            """)
-            for dev, p, fc, sz in cur_i.fetchall():
-                if (dev, p) in staged_keys:
-                    continue
-                m = match_storage_rule(dev, p, rules=rules)
-                if m:
-                    is_disc = (
-                        m.action in ("DISCARD_IGNORE", "PURGE_SKIP")
-                        or m.target_tier.lower() in ("discard", "purge")
-                    )
-                    if is_disc:
-                        dest = "(Do Not Store / Cloud Ignored)"
-                        tier = "discard"
-                    else:
-                        tier = m.target_tier.lower()
-                        clean_folder = m.target_relative_path or "Documents"
-                        clean_folder = clean_folder.strip("/").split("/")[0] if clean_folder else "Documents"
-                        dest = f"/Volumes/LaCie/Storage/{m.target_tier.title()}/{clean_folder}"
-
-                    if dest not in staged_dest:
-                        staged_dest[dest] = {
-                            "target_destination": dest,
-                            "tier": tier,
-                            "target_folder": m.target_relative_path or "Documents",
-                            "is_discard": is_disc,
-                            "staged_folders": 0,
-                            "staged_files": 0,
-                            "staged_bytes": 0,
-                            "cloud_folders": 0,
-                            "cloud_files": 0,
-                            "cloud_bytes": 0,
-                            "devices": set()
-                        }
-
-                    fc_val = max(0, fc or 0)
-                    sz_val = max(0, sz or 0)
-                    staged_dest[dest]["cloud_folders"] += 1
-                    staged_dest[dest]["cloud_files"] += fc_val
-                    staged_dest[dest]["cloud_bytes"] += sz_val
-                    staged_dest[dest]["devices"].add(dev)
-
-                    if m.rule_id:
-                        if m.rule_id not in rule_stats:
-                            rule_stats[m.rule_id] = {
-                                "staged_folders": 0, "staged_files": 0, "staged_bytes": 0,
-                                "cloud_folders": 0, "cloud_files": 0, "cloud_bytes": 0
-                            }
-                        rule_stats[m.rule_id]["cloud_folders"] += 1
-                        rule_stats[m.rule_id]["cloud_files"] += fc_val
-                        rule_stats[m.rule_id]["cloud_bytes"] += sz_val
-            conn_i.close()
-        except Exception:
-            pass
-
-    # 3. Calculate Totals
+    # 2. Calculate Totals across inactive devices
     tot_staged_inflow = sum(v["staged_bytes"] for v in staged_dest.values() if not v["is_discard"])
     tot_staged_files = sum(v["staged_files"] for v in staged_dest.values() if not v["is_discard"])
     tot_staged_folders = sum(v["staged_folders"] for v in staged_dest.values() if not v["is_discard"])
-
-    tot_cloud_inflow = sum(v["cloud_bytes"] for v in staged_dest.values() if not v["is_discard"])
-    tot_cloud_files = sum(v["cloud_files"] for v in staged_dest.values() if not v["is_discard"])
-    tot_cloud_folders = sum(v["cloud_folders"] for v in staged_dest.values() if not v["is_discard"])
 
     tot_staged_ignored_b = sum(v["staged_bytes"] for v in staged_dest.values() if v["is_discard"])
     tot_staged_ignored_fl = sum(v["staged_files"] for v in staged_dest.values() if v["is_discard"])
     tot_staged_ignored_fld = sum(v["staged_folders"] for v in staged_dest.values() if v["is_discard"])
 
-    tot_cloud_ignored_b = sum(v["cloud_bytes"] for v in staged_dest.values() if v["is_discard"])
-    tot_cloud_ignored_fl = sum(v["cloud_files"] for v in staged_dest.values() if v["is_discard"])
-    tot_cloud_ignored_fld = sum(v["cloud_folders"] for v in staged_dest.values() if v["is_discard"])
-
     # Calculate percentage share
-    for d, info in staged_dest.items():
-        if not info["is_discard"] and tot_staged_inflow > 0:
-            info["pct_share"] = (info["staged_bytes"] / tot_staged_inflow) * 100
+    for d_info in staged_dest.values():
+        if not d_info["is_discard"] and tot_staged_inflow > 0:
+            d_info["pct_share"] = (d_info["staged_bytes"] / tot_staged_inflow) * 100
         else:
-            info["pct_share"] = 0.0
+            d_info["pct_share"] = 0.0
 
-        if not info["is_discard"] and tot_cloud_inflow > 0:
-            info["cloud_pct_share"] = (info["cloud_bytes"] / tot_cloud_inflow) * 100
+    for dev_r in device_rollups.values():
+        if tot_staged_inflow > 0:
+            dev_r["pct_share"] = (dev_r["inflow_bytes"] / tot_staged_inflow) * 100
         else:
-            info["cloud_pct_share"] = 0.0
+            dev_r["pct_share"] = 0.0
 
-    # 4. Determine Destination Volume & Headroom
+    # 3. Determine Destination Volume & Headroom
     vol = "/Volumes/LaCie"
     if not os.path.exists(vol):
-        # Find volume from destination paths
         found_vol = False
-        for d in staged_dest.keys():
+        for (_, d) in staged_dest.keys():
             if d.startswith("/Volumes/"):
                 parts = d.split("/")
                 candidate = f"/Volumes/{parts[2]}" if len(parts) > 2 else d
@@ -1328,30 +1372,33 @@ def calculate_projected_storage_allocation(conn: sqlite3.Connection) -> Dict[str
         t_tot, t_used, t_free = 0, 0, 0
 
     staged_post_free = max(0, t_free - tot_staged_inflow)
-    cloud_post_free = t_free - tot_cloud_inflow
 
     # Sorted list: active inflows first (descending by bytes), then discarded
     sorted_destinations = sorted(
         staged_dest.values(),
-        key=lambda x: (x["is_discard"], -x["cloud_bytes"], -x["staged_bytes"])
+        key=lambda x: (x["is_discard"], -x["staged_bytes"])
     )
+
+    sorted_device_rollups = sorted(
+        device_rollups.values(),
+        key=lambda x: -x["inflow_bytes"]
+    )
+
+    cloud_devices = get_all_device_cloud_status(conn)
 
     return {
         "destinations": sorted_destinations,
+        "device_rollups": sorted_device_rollups,
         "rule_stats": rule_stats,
+        "cloud_devices": cloud_devices,
+        "active_devices_excluded": active_devices_excluded,
         "totals": {
             "staged_inflow_bytes": tot_staged_inflow,
             "staged_inflow_files": tot_staged_files,
             "staged_inflow_folders": tot_staged_folders,
             "staged_ignored_bytes": tot_staged_ignored_b,
             "staged_ignored_files": tot_staged_ignored_fl,
-            "staged_ignored_folders": tot_staged_ignored_fld,
-            "cloud_inflow_bytes": tot_cloud_inflow,
-            "cloud_inflow_files": tot_cloud_files,
-            "cloud_inflow_folders": tot_cloud_folders,
-            "cloud_ignored_bytes": tot_cloud_ignored_b,
-            "cloud_ignored_files": tot_cloud_ignored_fl,
-            "cloud_ignored_folders": tot_cloud_ignored_fld,
+            "staged_ignored_folders": tot_staged_ignored_fld
         },
         "headroom": {
             "volume": vol,
@@ -1359,9 +1406,7 @@ def calculate_projected_storage_allocation(conn: sqlite3.Connection) -> Dict[str
             "used_bytes": t_used,
             "free_bytes": t_free,
             "staged_post_free": staged_post_free,
-            "cloud_post_free": cloud_post_free,
-            "staged_status": "SAFE" if t_free >= tot_staged_inflow else "EXCEEDED",
-            "cloud_status": "SAFE" if cloud_post_free >= 0 else "EXCEEDED"
+            "staged_status": "SAFE" if t_free >= tot_staged_inflow else "EXCEEDED"
         }
     }
 

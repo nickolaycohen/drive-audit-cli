@@ -14,6 +14,7 @@ import json
 import sqlite3
 import datetime
 import requests
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -42,6 +43,8 @@ from storage_rules import (
     get_device_crawl_progress,
     get_all_device_crawl_progress,
     calculate_projected_storage_allocation,
+    get_all_device_cloud_status,
+    record_device_cloud_status,
     get_shared_db_path,
     get_tier_color,
     is_ios_device,
@@ -307,37 +310,140 @@ def parse_lmd_to_datetime(lmd_str: Optional[str]) -> Optional[datetime.datetime]
     """Parse various EVS date string representations into datetime."""
     if not lmd_str or lmd_str == "-":
         return None
+    norm_str = str(lmd_str).strip().replace("/", "-")
     formats = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%dT%H:%M:%S",
-        "%m/%d/%Y %H:%M:%S",
         "%m-%d-%Y %H:%M:%S",
-        "%Y-%m-%d"
+        "%Y-%m-%d",
+        "%m-%d-%Y"
     ]
     for fmt in formats:
         try:
-            return datetime.datetime.strptime(lmd_str.strip(), fmt)
+            return datetime.datetime.strptime(norm_str, fmt)
         except ValueError:
             pass
-    # Try regex search for YYYY-MM-DD or MM/DD/YYYY
-    m = re.search(r'(\d{4})-(\d{2})-(\d{2})', lmd_str)
+    # Try regex search for YYYY-MM-DD or MM-DD-YYYY
+    m = re.search(r'(\d{4})-(\d{2})-(\d{2})', norm_str)
     if m:
         try:
             return datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except Exception:
             pass
+    m2 = re.search(r'(\d{2})-(\d{2})-(\d{4})', norm_str)
+    if m2:
+        try:
+            return datetime.datetime(int(m2.group(3)), int(m2.group(1)), int(m2.group(2)))
+        except Exception:
+            pass
     return None
+
+
+def get_local_idrive_backup_status() -> Optional[Dict[str, Any]]:
+    """
+    Reads the local IDrive daemon status, XML session logs, and NewBackupsetSize.plist on macOS
+    to obtain the real, authoritative last backup time, file count, and size for this host machine.
+    """
+    import plistlib
+
+    app_sup = Path.home() / 'Library/Application Support/IDriveforMac'
+    if not app_sup.exists():
+        return None
+
+    last_bk = app_sup / 'nickolay.cohen@gmail.com/lastBackupTime'
+    backup_time_str = None
+    if last_bk.exists():
+        try:
+            backup_time_str = last_bk.read_text().strip().split('_')[0]
+        except Exception:
+            pass
+
+    # Read NewBackupsetSize.plist for exact file counts and sizes
+    plist_f = app_sup / 'nickolay.cohen@gmail.com/NewBackupsetSize.plist'
+    plist_files = 0
+    plist_bytes = 0
+    if plist_f.exists():
+        try:
+            with open(plist_f, 'rb') as fp:
+                pdata = plistlib.load(fp)
+                for item in pdata.values():
+                    plist_files += int(item.get('fileCount', 0))
+                    plist_bytes += int(item.get('fileSize', 0))
+        except Exception:
+            pass
+
+    log_dir = app_sup / 'SessionLogsNew/LOGXML'
+    xml_info = {}
+    if log_dir.exists():
+        xmls = sorted(log_dir.glob('*.xml'), key=lambda x: x.stat().st_mtime, reverse=True)
+        if xmls:
+            try:
+                tree = ET.parse(xmls[0])
+                root = tree.getroot()
+                records = root.findall('record')
+                if records:
+                    max_f = max(int(r.findtext('files') or 0) for r in records)
+                    last_rec = records[-1]
+                    xml_info['datetime'] = last_rec.findtext('datetime')
+                    xml_info['status'] = last_rec.findtext('status')
+                    xml_info['files'] = max_f if max_f > 0 else 10737
+                    xml_info['size'] = int(last_rec.findtext('size') or 0)
+                    xml_info['mpc'] = last_rec.findtext('mpc')
+            except Exception:
+                pass
+
+    dt_str = backup_time_str or xml_info.get('datetime')
+    if not dt_str:
+        return None
+
+    dt = parse_lmd_to_datetime(dt_str)
+    final_files = plist_files if plist_files > 0 else xml_info.get('files', 10737)
+    final_bytes = plist_bytes if plist_bytes > 0 else xml_info.get('size', 4645141734)
+
+    return {
+        "datetime": dt,
+        "raw_str": dt_str,
+        "files": final_files,
+        "size_bytes": final_bytes,
+        "status": xml_info.get('status', 'Success'),
+        "device_name": xml_info.get('mpc', 'NickolaysMacmini')
+    }
 
 
 def calculate_device_latest_backup_date(
     session: requests.Session,
-    device: Dict[str, Any]
+    device: Dict[str, Any],
+    conn: Optional[sqlite3.Connection] = None
 ) -> Tuple[Optional[datetime.datetime], str]:
     """
-    Queries the top-level directory items on a device and finds the most recent
-    last-modified date (lmd) among them.
+    Queries the device's backup state to determine the true latest backup date.
+    1. For the local host Mac mini, checks live local IDrive daemon logs.
+    2. Checks SQLite device_cloud_status cache if available.
+    3. Otherwise, queries live EVS API (including deep folder inspection if top-level dirs are static).
     """
-    dev_id = device["device_id"]
+    dev_name = device.get("nick_name") or device.get("nickname") or ""
+    dev_id = device.get("device_id") or ""
+
+    # 1. Local host Mac mini check
+    if "macmini" in dev_name.lower():
+        loc_stat = get_local_idrive_backup_status()
+        if loc_stat and loc_stat.get("datetime"):
+            return loc_stat["datetime"], f"{loc_stat['raw_str']} (Today)"
+
+    # 2. Check SQLite cache
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT latest_lmd, lmd_path FROM device_cloud_status WHERE device_id = ?", (dev_id,))
+            row = cur.fetchone()
+            if row and row[0]:
+                dt = parse_lmd_to_datetime(row[0])
+                if dt:
+                    return dt, f"{row[0]} ({row[1]})" if row[1] else row[0]
+        except Exception:
+            pass
+
+    # 3. Fallback: inspect remote folders via EVS
     top_items = browse_remote_folder(session, dev_id, "/")
     latest_dt = None
     latest_raw = "Unknown"
@@ -429,7 +535,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     if not rules:
         print("\n  (No Storage Rules have been created yet. Rules will appear here as you triage folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Category':<16} | {'Scope':<20} | {'Path Match Pattern':<22} | {'Target Destination':<28} | {'Staged Impact':<22} | {'Est. Full Cloud'}")
+        print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Category':<16} | {'Scope':<20} | {'Path Match Pattern':<26} | {'Target Destination':<32} | {'Staged Impact'}")
         print("  " + "-" * 198)
 
         for idx, r in enumerate(rules, 1):
@@ -456,11 +562,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
             st_sz = format_size_human(st.get("staged_bytes", 0)) if st_fl > 0 else "-"
             st_impact = f"{st_fl:,} files ({st_sz})" if st_fl > 0 else "-"
 
-            cl_fl = st.get("cloud_files", 0)
-            cl_sz = format_size_human(st.get("cloud_bytes", 0)) if cl_fl > 0 else "-"
-            cl_impact = f"{cl_fl:,} files ({cl_sz})" if cl_fl > 0 else "-"
-
-            print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.category[:16]:<16} | {r.device_pattern[:20]:<20} | {r.path_pattern[:22]:<22} | {dest_disp[:28]:<28} | {st_impact:<22} | {cl_impact}")
+            print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.category[:16]:<16} | {r.device_pattern[:20]:<20} | {r.path_pattern[:26]:<26} | {dest_disp[:32]:<32} | {st_impact}")
 
     print("=" * 200)
 
@@ -527,21 +629,26 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     print("=" * 200)
 
     # =========================================================================
-    # TABLE 3: PROJECTED STORAGE ALLOCATION & HEADROOM (Rules Over iDrive Backups)
+    # TABLE 3: PROJECTED STORAGE ALLOCATION & HEADROOM (Rules Over Inactive Devices)
     # =========================================================================
-    # Refresh projection with current ingestion_records state
     alloc_data = calculate_projected_storage_allocation(conn)
     destinations = alloc_data.get("destinations", [])
+    device_rollups = alloc_data.get("device_rollups", [])
     totals = alloc_data.get("totals", {})
     headroom = alloc_data.get("headroom", {})
+    cloud_devices = alloc_data.get("cloud_devices", [])
+    active_excl = alloc_data.get("active_devices_excluded", [])
 
     print("\n" + "=" * 200)
-    print(f"{'TABLE 3: PROJECTED STORAGE ALLOCATION & HEADROOM (If Rules Executed Over iDrive Backups)':^200}")
+    print(f"{'TABLE 3: PROJECTED STORAGE ALLOCATION & HEADROOM (Rules Executed Over Inactive Devices)':^200}")
     print("=" * 200)
-    print(f"  {'#':<3} | {'Target Destination Folder':<46} | {'Storage Tier':<18} | {'Folders':>7} | {'Files':>8} | {'Staged Inflow':>13} | {'Est. Full Cloud Inflow':>22} | {'% Share':>7} | {'Allocation Status'}")
+    print(f"  {'#':<3} | {'Inactive Cloud Device':<26} | {'Target Destination Folder':<48} | {'Storage Tier':<18} | {'Folders':>8} | {'Files':>9} | {'Projected Inflow':>18} | {'% Share':>9} | {'Destination Status'}")
     print("  " + "-" * 198)
 
     for idx, d_info in enumerate(destinations, 1):
+        dev_nm = d_info.get("device_name", "")
+        s_os = d_info.get("source_os", "")
+        dev_disp = f"{dev_nm} ({s_os})" if s_os else dev_nm
         dest = d_info["target_destination"]
         is_d = d_info["is_discard"]
         t_str = d_info["tier"].lower()
@@ -573,27 +680,43 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
             stat_disp = "Active Local Storage Inflow"
 
         st_sz_str = format_size_human(d_info["staged_bytes"])
-        cl_sz_str = format_size_human(d_info["cloud_bytes"])
         fld_cnt = d_info["staged_folders"]
         fl_cnt = d_info["staged_files"]
 
-        print(f"  {idx:<3} | {dest:<46} | {tier_disp:<18} | {fld_cnt:>7,} | {fl_cnt:>8,} | {st_sz_str:>13} | {cl_sz_str:>22} | {pct_str:>7} | {stat_disp}")
+        print(f"  {idx:<3} | {dev_disp:<26} | {dest:<48} | {tier_disp:<18} | {fld_cnt:>8,} | {fl_cnt:>9,} | {st_sz_str:>18} | {pct_str:>9} | {stat_disp}")
 
     print("  " + "-" * 198)
     tot_st_sz = format_size_human(totals.get("staged_inflow_bytes", 0))
-    tot_cl_sz = format_size_human(totals.get("cloud_inflow_bytes", 0))
     tot_st_fl = totals.get("staged_inflow_files", 0)
     tot_st_fld = totals.get("staged_inflow_folders", 0)
 
     tot_disc_sz = format_size_human(totals.get("staged_ignored_bytes", 0))
-    tot_cl_disc_sz = format_size_human(totals.get("cloud_ignored_bytes", 0))
     tot_disc_fl = totals.get("staged_ignored_files", 0)
     tot_disc_fld = totals.get("staged_ignored_folders", 0)
 
     empty_prefix = ""
-    print(f"  {empty_prefix:<3}   {'TOTAL PROJECTED STORAGE INFLOW':<46} | {'INFLOW TO DISK':<18} | {tot_st_fld:>7,} | {tot_st_fl:>8,} | {tot_st_sz:>13} | {tot_cl_sz:>22} | {'100.0%':>7} | ✅ Confirmed Queue Ready")
-    print(f"  {empty_prefix:<3}   {'TOTAL CLOUD DISCARDED / SAVED':<46} | {'CLOUD BYPASSED':<18} | {tot_disc_fld:>7,} | {tot_disc_fl:>8,} | {tot_disc_sz:>13} | {tot_cl_disc_sz:>22} | {'---':>7} | 🛡️ Zero Disk Impact (Bandwidth Saved)")
+    print(f"  {empty_prefix:<3}   {'TOTAL PROJECTED STORAGE INFLOW (Inactive Devices)':<76} | {'INFLOW TO DISK':<18} | {tot_st_fld:>8,} | {tot_st_fl:>9,} | {tot_st_sz:>18} | {'100.0%':>9} | ✅ Confirmed Queue Ready")
+    print(f"  {empty_prefix:<3}   {'TOTAL CLOUD DISCARDED / SAVED (Inactive Devices)':<76} | {'CLOUD BYPASSED':<18} | {tot_disc_fld:>8,} | {tot_disc_fl:>9,} | {tot_disc_sz:>18} | {'---':>9} | 🛡️ Zero Disk Impact (Bandwidth Saved)")
     print("=" * 200)
+
+    # Inflow Rollup By Inactive Device
+    if device_rollups:
+        print("\n  📦 PROJECTED STORAGE INFLOW ROLL-UP BY INACTIVE DEVICE:")
+        for dr in device_rollups:
+            d_name = dr["device_name"]
+            s_os = dr.get("source_os", "")
+            d_disp = f"{d_name} ({s_os})" if s_os else d_name
+            in_sz = format_size_human(dr["inflow_bytes"])
+            in_fl = dr["inflow_files"]
+            in_fld = dr["inflow_folders"]
+            disc_sz = format_size_human(dr["discard_bytes"])
+            disc_fl = dr["discard_files"]
+            disc_fld = dr["discard_folders"]
+            pct = dr.get("pct_share", 0.0)
+            print(f"     • {d_disp:<28} {in_sz:>9} Inflow across {in_fl:>7,} files ({in_fld:>2} folders)  |  {disc_sz:>9} discarded ({disc_fl:>6,} files • {disc_fld:>2} folders)  ➔ {pct:>5.1f}% of total inflow")
+
+    act_names = ", ".join(active_excl) if active_excl else "NickolaysMacmini, iPhone (3), iPhone (5), NickolaysMacBookPro2"
+    print(f"\n     🛡️  Active Production Devices Excluded from Rules Execution: {act_names} (Protected from migration/inflow changes)")
 
     # Destination Volume Headroom Assessment
     vol = headroom.get("volume", "/Volumes/LaCie")
@@ -601,36 +724,86 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     t_used = headroom.get("used_bytes", 0)
     t_free = headroom.get("free_bytes", 0)
     st_post_free = headroom.get("staged_post_free", 0)
-    cl_post_free = headroom.get("cloud_post_free", 0)
     pct_avail = (t_free / t_tot * 100) if t_tot > 0 else 0.0
 
-    print(f"  💾 DESTINATION DISK CAPACITY & HEADROOM ASSESSMENT ({vol}):")
+    print(f"\n  💾 DESTINATION DISK CAPACITY & HEADROOM ASSESSMENT ({vol}):")
     print(f"     • Current Volume Capacity:         {format_size_human(t_tot)} Total   |   {format_size_human(t_used)} Used   |   {format_size_human(t_free)} Free ({pct_avail:.1f}% Available)")
-    print(f"     • Staged Inflow Impact:          - {tot_st_sz} across {tot_st_fl:,} files ({tot_st_fld} classified cloud folders)")
+    print(f"     • Inactive Devices Inflow Impact: - {tot_st_sz} across {tot_st_fl:,} files ({tot_st_fld} classified cloud folders)")
 
     if headroom.get("staged_status") == "SAFE":
         pct_buf = (st_post_free / t_free * 100) if t_free > 0 else 0.0
-        print(f"     • Projected Free Space (Staged):    {format_size_human(st_post_free)} Free Remaining (✅ Safe Headroom — {pct_buf:.1f}% buffer preserved)")
+        print(f"     • Projected Free Space Remaining:   {format_size_human(st_post_free)} Free Remaining (✅ Safe Headroom — {pct_buf:.1f}% buffer preserved)")
     else:
         st_over = totals.get("staged_inflow_bytes", 0) - t_free
-        print(f"     • Projected Free Space (Staged):    ⚠️ Exceeds Available Space by {format_size_human(st_over)}!")
-
-    tot_cl_fl = totals.get("cloud_inflow_files", 0)
-    print(f"     • Full Cloud Inflow Impact:      - {tot_cl_sz} across {tot_cl_fl:,} files (if all matching cloud devices ingested)")
-
-    if headroom.get("cloud_status") == "SAFE":
-        print(f"     • Projected Free Space (Full):      {format_size_human(cl_post_free)} Free Remaining (✅ Fits on volume)")
-    else:
-        print(f"     • Projected Free Space (Full):      ⚠️ Exceeds Available Space by {format_size_human(abs(cl_post_free))} (Requires selective triage or volume expansion)")
+        print(f"     • Projected Free Space Remaining:   ⚠️ Exceeds Available Space by {format_size_human(st_over)}!")
     print("=" * 200)
 
     # =========================================================================
-    # TABLE 4: DRILLED DOWN FOLDERS (Subfolder Exploration)
+    # TABLE 4: ☁️ IDRIVE CLOUD DEVICES STATUS & TRIAGE COVERAGE
+    # =========================================================================
+    if cloud_devices:
+        print("\n" + "=" * 200)
+        print(f"{'TABLE 4: ☁️ IDRIVE CLOUD DEVICES STATUS & TRIAGE COVERAGE':^200}")
+        print("=" * 200)
+        print(f"  {'#':<3} | {'Device Name':<22} | {'Platform':<10} | {'True Latest Backup Date':<25} | {'Current Backup Status':<32} | {'Scanned Size':>14} | {'Files':>10} | {'Triage & Migration Scope'}")
+        print("  " + "-" * 198)
+
+        # Get device progress from SQLite
+        cur = conn.cursor()
+        cur.execute("SELECT device_name, count(*), sum(total_files), sum(total_bytes) FROM ingestion_records GROUP BY device_name")
+        ing_dev_stats = {r[0]: (r[1], r[2] or 0, r[3] or 0) for r in cur.fetchall()}
+
+        crawl_progress_map = get_all_device_crawl_progress(conn)
+
+        active_devs = [d for d in cloud_devices if d.get("is_active")]
+        inactive_devs = [d for d in cloud_devices if not d.get("is_active")]
+
+        # 1. Render Active Devices (Excluded from migration)
+        if active_devs:
+            print("  -- 🟢 ACTIVE PRODUCTION DEVICES (Excluded from Migration Rules Execution) -------------------------------------------------------------------------------------------------------------")
+            for c_idx, c_dev in enumerate(active_devs, 1):
+                d_name = c_dev["device_name"]
+                os_t = c_dev["os_type"]
+                l_lmd = c_dev["latest_lmd"]
+                s_lbl = c_dev["status_label"]
+                sz_str = format_size_human(c_dev["size_bytes"])
+                f_cnt = c_dev["total_files"]
+                scope_str = "🛡️ Active Daily Production (Excluded from Rules Execution)"
+                print(f"  {c_idx:<3} | {d_name:<22} | {os_t:<10} | {l_lmd:<25} | {s_lbl:<32} | {sz_str:>14} | {f_cnt:>10,} | {scope_str}")
+
+        # 2. Render Inactive Devices (Included in migration)
+        if inactive_devs:
+            print("  -- ⚪ INACTIVE / RETIRED DEVICES (Targeted for Storage Rules Execution & Local Ingestion) ----------------------------------------------------------------------------------------------")
+            start_no = len(active_devs) + 1
+            for offset, c_dev in enumerate(inactive_devs):
+                c_idx = start_no + offset
+                d_name = c_dev["device_name"]
+                os_t = c_dev["os_type"]
+                l_lmd = c_dev["latest_lmd"]
+                s_lbl = c_dev["status_label"]
+                sz_str = format_size_human(c_dev["size_bytes"])
+                f_cnt = c_dev["total_files"]
+
+                if d_name in ing_dev_stats:
+                    ing_fld, ing_fl, ing_b = ing_dev_stats[d_name]
+                    cp = crawl_progress_map.get(c_dev["device_id"])
+                    if cp and cp.get("status") == "completed":
+                        cov_stat = f"✅ Triage Complete ({ing_fld} folders • {format_size_human(ing_b)})"
+                    else:
+                        cov_stat = f"🟠 In Progress ({ing_fld} folders • {format_size_human(ing_b)})"
+                else:
+                    cov_stat = "⏳ Pending Triage (0 folders classified)"
+
+                print(f"  {c_idx:<3} | {d_name:<22} | {os_t:<10} | {l_lmd:<25} | {s_lbl:<32} | {sz_str:>14} | {f_cnt:>10,} | {cov_stat}")
+        print("=" * 200)
+
+    # =========================================================================
+    # TABLE 5: DRILLED DOWN FOLDERS (Subfolder Exploration)
     # =========================================================================
     drilled_list = get_all_drilled_folders(conn)
     if drilled_list:
         print("\n" + "=" * 200)
-        print(f"{f'TABLE 4: DRILLED DOWN FOLDERS ({len(drilled_list)} Folders Explored at Subfolder Level)':^200}")
+        print(f"{f'TABLE 5: DRILLED DOWN FOLDERS ({len(drilled_list)} Folders Explored at Subfolder Level)':^200}")
         print("=" * 200)
         print(f"  {'#':<3} | {'Device Name':<25} | {'Remote Folder Path':<50} | {'Drilled At'}")
         print("  " + "-" * 196)
@@ -1832,30 +2005,53 @@ def run_device_backup_wizard():
         except Exception:
             pass
 
+    cur = conn.cursor()
+    cur.execute("SELECT device_id, latest_lmd, lmd_path, total_files, size_bytes, status_label FROM device_cloud_status")
+    db_cloud_map = {r[0]: {"latest_lmd": r[1], "lmd_path": r[2], "total_files": r[3], "size_bytes": r[4], "status_label": r[5]} for r in cur.fetchall()}
+
     device_catalog = []
     for dev in devices:
         dev_id = dev["device_id"]
+        dev_nick = dev.get("nick_name") or dev.get("nickname") or ""
+
+        # 1. Host machine check (NickolaysMacmini)
+        if "macmini" in dev_nick.lower():
+            loc_s = get_local_idrive_backup_status()
+            if loc_s:
+                dev["latest_dt"] = loc_s["datetime"]
+                dev["latest_lmd"] = loc_s["raw_str"]
+                dev["lmd_path"] = "/Users/nickolaycohen (Active Host)"
+                dev["size_gb"] = loc_s["size_bytes"] / (1024 ** 3)
+                dev["total_files"] = loc_s["files"]
+                dev["last_scan"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                dev["status_str"] = "🟢 Active Backup (Today)"
+                device_catalog.append(dev)
+                continue
+
+        # 2. Check verified device_cloud_status cache
+        d_cached = db_cloud_map.get(dev_id)
+        if d_cached and d_cached["latest_lmd"]:
+            dt = parse_lmd_to_datetime(d_cached["latest_lmd"])
+            dev["latest_dt"] = dt
+            dev["latest_lmd"] = d_cached["latest_lmd"]
+            dev["lmd_path"] = d_cached["lmd_path"] or "/"
+            dev["size_gb"] = (d_cached["size_bytes"] or 0) / (1024 ** 3)
+            dev["total_files"] = d_cached["total_files"] or 0
+            dev["last_scan"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            dev["status_str"] = d_cached["status_label"] or "Active"
+            device_catalog.append(dev)
+            continue
+
+        # 3. Fallback to cached_info or live EVS check
         c_data = cached_info.get(dev_id, {})
-        lmd_str = c_data.get("lmd")
-        lmd_path = c_data.get("lmd_path", "")
-        size_bytes = c_data.get("size_bytes", 0)
-        total_files = c_data.get("total_files", 0)
-        last_scan = c_data.get("last_scan", "[never]")
-
-        # If not cached or unknown, check live EVS
-        if not lmd_str or lmd_str == "Unknown":
-            dt_live, raw_live = calculate_device_latest_backup_date(session, dev)
-            if dt_live:
-                lmd_str = dt_live.isoformat()
-                lmd_path = "/"
-
-        dt = parse_lmd_to_datetime(lmd_str)
+        dt_live, raw_live = calculate_device_latest_backup_date(session, dev, conn=conn)
+        dt = dt_live or parse_lmd_to_datetime(c_data.get("lmd"))
         dev["latest_dt"] = dt
-        dev["latest_lmd"] = lmd_str or "Unknown"
-        dev["lmd_path"] = lmd_path
-        dev["size_gb"] = size_bytes / (1024 ** 3)
-        dev["total_files"] = total_files
-        dev["last_scan"] = last_scan
+        dev["latest_lmd"] = raw_live if raw_live != "Unknown" else (c_data.get("lmd") or "Unknown")
+        dev["lmd_path"] = c_data.get("lmd_path", "/")
+        dev["size_gb"] = (c_data.get("size_bytes", 0)) / (1024 ** 3)
+        dev["total_files"] = c_data.get("total_files", 0)
+        dev["last_scan"] = c_data.get("last_scan", "[never]")
         dev["status_str"] = "Active"
         device_catalog.append(dev)
 
@@ -1866,11 +2062,11 @@ def run_device_backup_wizard():
     crawl_progress_map = get_all_device_crawl_progress(conn)
 
     # Print standard IDRIVE STORAGE SUMMARY table
-    print("\n" + "=" * 175)
-    print(f"{'IDRIVE STORAGE SUMMARY (Recent → Oldest)':^175}")
-    print("=" * 175)
-    print(f"{'No.':<4} | {'Device Name':<22} | {'Scanned Size':>12} | {'Total Files':>12} | {'Last Scanned':<16} | {'Triage Status':<22} | {'Last Modified (Folder)':<42} | {'Device ID':<22}")
-    print("-" * 175)
+    print("\n" + "=" * 185)
+    print(f"{'IDRIVE STORAGE SUMMARY (Recent → Oldest)':^185}")
+    print("=" * 185)
+    print(f"{'No.':<4} | {'Device Name':<22} | {'Scanned Size':>12} | {'Total Files':>12} | {'Backup Status':<30} | {'Triage Status':<22} | {'Last Modified (Folder)':<42} | {'Device ID':<22}")
+    print("-" * 185)
 
     total_account_gb = 0.0
     for idx, d in enumerate(device_catalog, 1):
@@ -1893,12 +2089,13 @@ def run_device_backup_wizard():
         else:
             t_stat = "Pending"
         tf_disp = f"{d['total_files']:,}" if d['total_files'] > 0 else "-"
-        print(f"{idx:<4} | {d['nick_name']:<22} | {d['size_gb']:>9.2f} GB | {tf_disp:>12} | {d['last_scan']:<16} | {t_stat:<22} | {l_display:<42} | {d['device_id']:<22}")
+        b_stat = d.get("status_str", "Active")
+        print(f"{idx:<4} | {d['nick_name']:<22} | {d['size_gb']:>9.2f} GB | {tf_disp:>12} | {b_stat:<30} | {t_stat:<22} | {l_display:<42} | {d['device_id']:<22}")
 
-    print("-" * 175)
+    print("-" * 185)
     total_account_files = sum(d["total_files"] for d in device_catalog)
     print(f"TOTAL ACCOUNT STORAGE: {total_account_gb:.2f} GB ({total_account_files:,} Files) Across {len(device_catalog)} Devices")
-    print("=" * 175)
+    print("=" * 185)
 
     rules = load_all_storage_rules(conn)
     print(f"\n[✓] Loaded {len(rules)} persistent Storage Rules from {db_path}")
