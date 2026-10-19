@@ -41,6 +41,7 @@ from storage_rules import (
     update_device_crawl_progress,
     get_device_crawl_progress,
     get_all_device_crawl_progress,
+    calculate_projected_storage_allocation,
     get_shared_db_path,
     get_tier_color,
     is_ios_device,
@@ -414,18 +415,22 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     color_icons = {"Red": "🔴", "Blue": "🔵", "Purple": "🟣", "Yellow": "🟡", "Orange": "🟠"}
     tier_counts = {"priority 1": 0, "priority 2": 0, "priority 3": 0, "priority 4": 0, "discard": 0}
 
+    # Calculate projected storage allocation and rule-by-rule statistics
+    alloc_data = calculate_projected_storage_allocation(conn)
+    rule_stats = alloc_data.get("rule_stats", {})
+
     # =========================================================================
     # TABLE 1: STORAGE RULES LEDGER
     # =========================================================================
-    print("\n" + "=" * 190)
-    print(f"{f'TABLE 1: STORAGE RULES LEDGER ({len(rules)} Active Rules)':^190}")
-    print("=" * 190)
+    print("\n" + "=" * 200)
+    print(f"{f'TABLE 1: STORAGE RULES LEDGER ({len(rules)} Active Rules)':^200}")
+    print("=" * 200)
 
     if not rules:
         print("\n  (No Storage Rules have been created yet. Rules will appear here as you triage folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Rule Name':<32} | {'Tier & Color':<22} | {'Category':<20} | {'Scope':<24} | {'Path Match Pattern':<25} | {'Target Destination'}")
-        print("  " + "-" * 188)
+        print(f"  {'#':<3} | {'Rule Name':<30} | {'Tier & Color':<22} | {'Category':<16} | {'Scope':<20} | {'Path Match Pattern':<22} | {'Target Destination':<28} | {'Staged Impact':<22} | {'Est. Full Cloud'}")
+        print("  " + "-" * 198)
 
         for idx, r in enumerate(rules, 1):
             t_key = r.target_tier.lower()
@@ -446,9 +451,18 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
             if dest_disp.startswith("Temporary"):
                 dest_disp = f"Priority 4/{dest_disp}"
 
-            print(f"  {idx:<3} | {r.name[:32]:<32} | {tier_disp:<22} | {r.category[:20]:<20} | {r.device_pattern[:24]:<24} | {r.path_pattern:<25} | {dest_disp}")
+            st = rule_stats.get(r.rule_id, {})
+            st_fl = st.get("staged_files", 0)
+            st_sz = format_size_human(st.get("staged_bytes", 0)) if st_fl > 0 else "-"
+            st_impact = f"{st_fl:,} files ({st_sz})" if st_fl > 0 else "-"
 
-    print("=" * 190)
+            cl_fl = st.get("cloud_files", 0)
+            cl_sz = format_size_human(st.get("cloud_bytes", 0)) if cl_fl > 0 else "-"
+            cl_impact = f"{cl_fl:,} files ({cl_sz})" if cl_fl > 0 else "-"
+
+            print(f"  {idx:<3} | {r.name[:30]:<30} | {tier_disp:<22} | {r.category[:16]:<16} | {r.device_pattern[:20]:<20} | {r.path_pattern[:22]:<22} | {dest_disp[:28]:<28} | {st_impact:<22} | {cl_impact}")
+
+    print("=" * 200)
 
     # =========================================================================
     # TABLE 2: CLASSIFIED CLOUD RESOURCES & INGESTION LEDGER
@@ -478,7 +492,7 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
     if not ingestion_records:
         print("\n  (No cloud folders have matched or been assigned to rules yet. Run the triage wizard to link folders.)\n")
     else:
-        print(f"  {'#':<3} | {'Ingestion ID':<12} | {'Device Name':<20} | {'Remote Folder Path':<25} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<32} | {'Local Target Destination'}")
+        print(f"  {'#':<3} | {'Ingestion ID':<10} | {'Device Name':<18} | {'Remote Folder Path':<25} | {'Files':>7} | {'Size':>9} | {'Assigned Tier & Color':<22} | {'Matched Rule Policy':<28} | {'Local Target Destination'}")
         print("  " + "-" * 198)
 
         for idx, rec in enumerate(ingestion_records, 1):
@@ -501,19 +515,122 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
                 os_tag = f" - {src_os}" if src_os else ""
                 dev_disp = f"{rec['device_name'][:10]} ({src_dev[:8]}{os_tag})"
             else:
-                dev_disp = rec["device_name"][:20]
+                dev_disp = rec["device_name"][:18]
 
-            print(f"  {idx:<3} | {rec['ingestion_id']:<12} | {dev_disp:<20} | {rec['source_path'][:25]:<25} | {tier_disp:<22} | {rec['rule_name'][:32]:<32} | {dest_disp}")
+            fl_cnt = rec.get("total_files", 0) or 0
+            sz_str = format_size_human(rec.get("total_bytes", 0) or 0)
+            ing_id = rec.get("ingestion_id", "")
+            rule_nm = rec.get("rule_name", "Manual") or "Manual"
+
+            print(f"  {idx:<3} | {ing_id:^10} | {dev_disp:<18} | {rec['source_path'][:25]:<25} | {fl_cnt:>7,} | {sz_str:>9} | {tier_disp:<22} | {rule_nm[:28]:<28} | {dest_disp}")
 
     print("=" * 200)
 
     # =========================================================================
-    # TABLE 3: DRILLED DOWN FOLDERS (Subfolder Exploration)
+    # TABLE 3: PROJECTED STORAGE ALLOCATION & HEADROOM (Rules Over iDrive Backups)
+    # =========================================================================
+    # Refresh projection with current ingestion_records state
+    alloc_data = calculate_projected_storage_allocation(conn)
+    destinations = alloc_data.get("destinations", [])
+    totals = alloc_data.get("totals", {})
+    headroom = alloc_data.get("headroom", {})
+
+    print("\n" + "=" * 200)
+    print(f"{'TABLE 3: PROJECTED STORAGE ALLOCATION & HEADROOM (If Rules Executed Over iDrive Backups)':^200}")
+    print("=" * 200)
+    print(f"  {'#':<3} | {'Target Destination Folder':<46} | {'Storage Tier':<18} | {'Folders':>7} | {'Files':>8} | {'Staged Inflow':>13} | {'Est. Full Cloud Inflow':>22} | {'% Share':>7} | {'Allocation Status'}")
+    print("  " + "-" * 198)
+
+    for idx, d_info in enumerate(destinations, 1):
+        dest = d_info["target_destination"]
+        is_d = d_info["is_discard"]
+        t_str = d_info["tier"].lower()
+
+        if is_d:
+            tier_disp = "DISCARD 🚫"
+            pct_str = "---"
+            stat_disp = "🚫 Cloud Bandwidth Saved (Bypassed)"
+        elif "priority 4" in t_str or "temp" in t_str:
+            tier_disp = "PRIORITY 4 🟠"
+            pct_str = f"{d_info['pct_share']:>5.1f}%"
+            stat_disp = "Active Local Storage Inflow"
+        elif "priority 3" in t_str:
+            tier_disp = "PRIORITY 3 🟣"
+            pct_str = f"{d_info['pct_share']:>5.1f}%"
+            stat_disp = "Active Local Storage Inflow"
+        elif "priority 2" in t_str:
+            tier_disp = "PRIORITY 2 🔵"
+            pct_str = f"{d_info['pct_share']:>5.1f}%"
+            stat_disp = "Active Local Storage Inflow"
+        elif "priority 1" in t_str:
+            tier_disp = "PRIORITY 1 🔴"
+            pct_str = f"{d_info['pct_share']:>5.1f}%"
+            stat_disp = "Active Local Storage Inflow"
+        else:
+            raw_tier = d_info["tier"].upper()
+            tier_disp = f"{raw_tier} ⚪"
+            pct_str = f"{d_info['pct_share']:>5.1f}%"
+            stat_disp = "Active Local Storage Inflow"
+
+        st_sz_str = format_size_human(d_info["staged_bytes"])
+        cl_sz_str = format_size_human(d_info["cloud_bytes"])
+        fld_cnt = d_info["staged_folders"]
+        fl_cnt = d_info["staged_files"]
+
+        print(f"  {idx:<3} | {dest:<46} | {tier_disp:<18} | {fld_cnt:>7,} | {fl_cnt:>8,} | {st_sz_str:>13} | {cl_sz_str:>22} | {pct_str:>7} | {stat_disp}")
+
+    print("  " + "-" * 198)
+    tot_st_sz = format_size_human(totals.get("staged_inflow_bytes", 0))
+    tot_cl_sz = format_size_human(totals.get("cloud_inflow_bytes", 0))
+    tot_st_fl = totals.get("staged_inflow_files", 0)
+    tot_st_fld = totals.get("staged_inflow_folders", 0)
+
+    tot_disc_sz = format_size_human(totals.get("staged_ignored_bytes", 0))
+    tot_cl_disc_sz = format_size_human(totals.get("cloud_ignored_bytes", 0))
+    tot_disc_fl = totals.get("staged_ignored_files", 0)
+    tot_disc_fld = totals.get("staged_ignored_folders", 0)
+
+    empty_prefix = ""
+    print(f"  {empty_prefix:<3}   {'TOTAL PROJECTED STORAGE INFLOW':<46} | {'INFLOW TO DISK':<18} | {tot_st_fld:>7,} | {tot_st_fl:>8,} | {tot_st_sz:>13} | {tot_cl_sz:>22} | {'100.0%':>7} | ✅ Confirmed Queue Ready")
+    print(f"  {empty_prefix:<3}   {'TOTAL CLOUD DISCARDED / SAVED':<46} | {'CLOUD BYPASSED':<18} | {tot_disc_fld:>7,} | {tot_disc_fl:>8,} | {tot_disc_sz:>13} | {tot_cl_disc_sz:>22} | {'---':>7} | 🛡️ Zero Disk Impact (Bandwidth Saved)")
+    print("=" * 200)
+
+    # Destination Volume Headroom Assessment
+    vol = headroom.get("volume", "/Volumes/LaCie")
+    t_tot = headroom.get("total_bytes", 0)
+    t_used = headroom.get("used_bytes", 0)
+    t_free = headroom.get("free_bytes", 0)
+    st_post_free = headroom.get("staged_post_free", 0)
+    cl_post_free = headroom.get("cloud_post_free", 0)
+    pct_avail = (t_free / t_tot * 100) if t_tot > 0 else 0.0
+
+    print(f"  💾 DESTINATION DISK CAPACITY & HEADROOM ASSESSMENT ({vol}):")
+    print(f"     • Current Volume Capacity:         {format_size_human(t_tot)} Total   |   {format_size_human(t_used)} Used   |   {format_size_human(t_free)} Free ({pct_avail:.1f}% Available)")
+    print(f"     • Staged Inflow Impact:          - {tot_st_sz} across {tot_st_fl:,} files ({tot_st_fld} classified cloud folders)")
+
+    if headroom.get("staged_status") == "SAFE":
+        pct_buf = (st_post_free / t_free * 100) if t_free > 0 else 0.0
+        print(f"     • Projected Free Space (Staged):    {format_size_human(st_post_free)} Free Remaining (✅ Safe Headroom — {pct_buf:.1f}% buffer preserved)")
+    else:
+        st_over = totals.get("staged_inflow_bytes", 0) - t_free
+        print(f"     • Projected Free Space (Staged):    ⚠️ Exceeds Available Space by {format_size_human(st_over)}!")
+
+    tot_cl_fl = totals.get("cloud_inflow_files", 0)
+    print(f"     • Full Cloud Inflow Impact:      - {tot_cl_sz} across {tot_cl_fl:,} files (if all matching cloud devices ingested)")
+
+    if headroom.get("cloud_status") == "SAFE":
+        print(f"     • Projected Free Space (Full):      {format_size_human(cl_post_free)} Free Remaining (✅ Fits on volume)")
+    else:
+        print(f"     • Projected Free Space (Full):      ⚠️ Exceeds Available Space by {format_size_human(abs(cl_post_free))} (Requires selective triage or volume expansion)")
+    print("=" * 200)
+
+    # =========================================================================
+    # TABLE 4: DRILLED DOWN FOLDERS (Subfolder Exploration)
     # =========================================================================
     drilled_list = get_all_drilled_folders(conn)
     if drilled_list:
         print("\n" + "=" * 200)
-        print(f"{f'TABLE 3: DRILLED DOWN FOLDERS ({len(drilled_list)} Folders Explored at Subfolder Level)':^200}")
+        print(f"{f'TABLE 4: DRILLED DOWN FOLDERS ({len(drilled_list)} Folders Explored at Subfolder Level)':^200}")
         print("=" * 200)
         print(f"  {'#':<3} | {'Device Name':<25} | {'Remote Folder Path':<50} | {'Drilled At'}")
         print("  " + "-" * 196)
@@ -522,8 +639,9 @@ def display_all_assigned_rules(conn: sqlite3.Connection):
         print("=" * 200)
 
     drilled_str = f" | {len(drilled_list)} Drilled Down Folders 📂" if drilled_list else ""
-    print(f"  📊 Summary: Total: {len(rules)} Rules Established across {len(ingestion_records)} Classified Cloud Folders{drilled_str}")
+    print(f"  📊 Summary: Total: {len(rules)} Rules Established across {len(ingestion_records)} Classified Folders{drilled_str}")
     print(f"     Priority 1 🔴: {tier_counts['priority 1']} | Priority 2 🔵: {tier_counts['priority 2']} | Priority 3 🟣: {tier_counts['priority 3']} | Priority 4 / Temp 🟠: {tier_counts['priority 4']} | Discarded 🚫: {tier_counts['discard']}")
+    print(f"     💾 Total Staged Inflow: {tot_st_sz} across {tot_st_fl:,} files  |  🛡️ Cloud Discarded / Bandwidth Saved: {tot_disc_sz}")
     print("=" * 200)
 
     act_prompt = "\nActions: [e] Edit/Rename Rules  |  [i] Reassign/Edit Ingestions"

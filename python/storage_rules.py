@@ -14,6 +14,7 @@ import re
 import fnmatch
 import sqlite3
 import datetime
+import shutil
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional, List, Dict, Any, Tuple, Set
@@ -1135,3 +1136,232 @@ def get_tier_color(tier: str, action: str = "") -> str:
     elif "priority 4" in t or t == "p4":
         return "Yellow"
     return "Gray"
+
+
+def calculate_projected_storage_allocation(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """
+    Calculates projected storage usage and disk headroom across all destination folders
+    if existing rules are executed over the iDrive cloud backups.
+    Evaluates both:
+      1. Staged Ingestion Queue (Confirmed classified cloud folders in ingestion_records)
+      2. Full Cloud Scope (All discovered and matching cloud backup folders across iDrive devices)
+    """
+    init_storage_rules_tables(conn)
+    rules = load_all_storage_rules(conn)
+    cur = conn.cursor()
+
+    # 1. Staged records from ingestion_records
+    cur.execute("""
+        SELECT id, ingestion_id, device_name, source_path, target_tier, 
+               target_folder, local_destination, status, total_files, total_bytes, rule_id
+        FROM ingestion_records
+    """)
+    rows = cur.fetchall()
+
+    staged_dest: Dict[str, Dict[str, Any]] = {}
+    staged_keys: Set[Tuple[str, str]] = set()
+    rule_stats: Dict[int, Dict[str, int]] = {}
+
+    for r in rows:
+        ing_id, dev, src_path = r[1], r[2], r[3]
+        t_tier, t_fld, loc_dest, status = r[4], r[5], r[6], r[7]
+        fl_cnt, byte_cnt, r_id = max(0, r[8] or 0), max(0, r[9] or 0), r[10]
+        staged_keys.add((dev, src_path))
+
+        is_discard = (
+            t_tier.lower() in ("discard", "purge")
+            or status == "ignored"
+            or "discard" in loc_dest.lower()
+            or "cloud ignored" in loc_dest.lower()
+        )
+
+        if loc_dest not in staged_dest:
+            staged_dest[loc_dest] = {
+                "target_destination": loc_dest,
+                "tier": t_tier,
+                "target_folder": t_fld,
+                "is_discard": is_discard,
+                "staged_folders": 0,
+                "staged_files": 0,
+                "staged_bytes": 0,
+                "cloud_folders": 0,
+                "cloud_files": 0,
+                "cloud_bytes": 0,
+                "devices": set()
+            }
+
+        staged_dest[loc_dest]["staged_folders"] += 1
+        staged_dest[loc_dest]["staged_files"] += fl_cnt
+        staged_dest[loc_dest]["staged_bytes"] += byte_cnt
+        staged_dest[loc_dest]["cloud_folders"] += 1
+        staged_dest[loc_dest]["cloud_files"] += fl_cnt
+        staged_dest[loc_dest]["cloud_bytes"] += byte_cnt
+        staged_dest[loc_dest]["devices"].add(dev)
+
+        if r_id:
+            if r_id not in rule_stats:
+                rule_stats[r_id] = {
+                    "staged_folders": 0, "staged_files": 0, "staged_bytes": 0,
+                    "cloud_folders": 0, "cloud_files": 0, "cloud_bytes": 0
+                }
+            rule_stats[r_id]["staged_folders"] += 1
+            rule_stats[r_id]["staged_files"] += fl_cnt
+            rule_stats[r_id]["staged_bytes"] += byte_cnt
+            rule_stats[r_id]["cloud_folders"] += 1
+            rule_stats[r_id]["cloud_files"] += fl_cnt
+            rule_stats[r_id]["cloud_bytes"] += byte_cnt
+
+    # 2. Check idrive_audit.db for additional cloud backups matching rules
+    idrive_db_path = "/Users/nickolaycohen/dev/idrive-audit/idrive_audit.db"
+    if os.path.exists(idrive_db_path):
+        try:
+            conn_i = sqlite3.connect(idrive_db_path)
+            cur_i = conn_i.cursor()
+            cur_i.execute("""
+                SELECT device_name, path, filecount, size 
+                FROM api_calls 
+                WHERE endpoint = 'getProperties' AND (filecount > 0 OR size > 0)
+                AND path NOT LIKE '/%/%'
+                ORDER BY device_name, path
+            """)
+            for dev, p, fc, sz in cur_i.fetchall():
+                if (dev, p) in staged_keys:
+                    continue
+                m = match_storage_rule(dev, p, rules=rules)
+                if m:
+                    is_disc = (
+                        m.action in ("DISCARD_IGNORE", "PURGE_SKIP")
+                        or m.target_tier.lower() in ("discard", "purge")
+                    )
+                    if is_disc:
+                        dest = "(Do Not Store / Cloud Ignored)"
+                        tier = "discard"
+                    else:
+                        tier = m.target_tier.lower()
+                        clean_folder = m.target_relative_path or "Documents"
+                        clean_folder = clean_folder.strip("/").split("/")[0] if clean_folder else "Documents"
+                        dest = f"/Volumes/LaCie/Storage/{m.target_tier.title()}/{clean_folder}"
+
+                    if dest not in staged_dest:
+                        staged_dest[dest] = {
+                            "target_destination": dest,
+                            "tier": tier,
+                            "target_folder": m.target_relative_path or "Documents",
+                            "is_discard": is_disc,
+                            "staged_folders": 0,
+                            "staged_files": 0,
+                            "staged_bytes": 0,
+                            "cloud_folders": 0,
+                            "cloud_files": 0,
+                            "cloud_bytes": 0,
+                            "devices": set()
+                        }
+
+                    fc_val = max(0, fc or 0)
+                    sz_val = max(0, sz or 0)
+                    staged_dest[dest]["cloud_folders"] += 1
+                    staged_dest[dest]["cloud_files"] += fc_val
+                    staged_dest[dest]["cloud_bytes"] += sz_val
+                    staged_dest[dest]["devices"].add(dev)
+
+                    if m.rule_id:
+                        if m.rule_id not in rule_stats:
+                            rule_stats[m.rule_id] = {
+                                "staged_folders": 0, "staged_files": 0, "staged_bytes": 0,
+                                "cloud_folders": 0, "cloud_files": 0, "cloud_bytes": 0
+                            }
+                        rule_stats[m.rule_id]["cloud_folders"] += 1
+                        rule_stats[m.rule_id]["cloud_files"] += fc_val
+                        rule_stats[m.rule_id]["cloud_bytes"] += sz_val
+            conn_i.close()
+        except Exception:
+            pass
+
+    # 3. Calculate Totals
+    tot_staged_inflow = sum(v["staged_bytes"] for v in staged_dest.values() if not v["is_discard"])
+    tot_staged_files = sum(v["staged_files"] for v in staged_dest.values() if not v["is_discard"])
+    tot_staged_folders = sum(v["staged_folders"] for v in staged_dest.values() if not v["is_discard"])
+
+    tot_cloud_inflow = sum(v["cloud_bytes"] for v in staged_dest.values() if not v["is_discard"])
+    tot_cloud_files = sum(v["cloud_files"] for v in staged_dest.values() if not v["is_discard"])
+    tot_cloud_folders = sum(v["cloud_folders"] for v in staged_dest.values() if not v["is_discard"])
+
+    tot_staged_ignored_b = sum(v["staged_bytes"] for v in staged_dest.values() if v["is_discard"])
+    tot_staged_ignored_fl = sum(v["staged_files"] for v in staged_dest.values() if v["is_discard"])
+    tot_staged_ignored_fld = sum(v["staged_folders"] for v in staged_dest.values() if v["is_discard"])
+
+    tot_cloud_ignored_b = sum(v["cloud_bytes"] for v in staged_dest.values() if v["is_discard"])
+    tot_cloud_ignored_fl = sum(v["cloud_files"] for v in staged_dest.values() if v["is_discard"])
+    tot_cloud_ignored_fld = sum(v["cloud_folders"] for v in staged_dest.values() if v["is_discard"])
+
+    # Calculate percentage share
+    for d, info in staged_dest.items():
+        if not info["is_discard"] and tot_staged_inflow > 0:
+            info["pct_share"] = (info["staged_bytes"] / tot_staged_inflow) * 100
+        else:
+            info["pct_share"] = 0.0
+
+        if not info["is_discard"] and tot_cloud_inflow > 0:
+            info["cloud_pct_share"] = (info["cloud_bytes"] / tot_cloud_inflow) * 100
+        else:
+            info["cloud_pct_share"] = 0.0
+
+    # 4. Determine Destination Volume & Headroom
+    vol = "/Volumes/LaCie"
+    if not os.path.exists(vol):
+        # Find volume from destination paths
+        found_vol = False
+        for d in staged_dest.keys():
+            if d.startswith("/Volumes/"):
+                parts = d.split("/")
+                candidate = f"/Volumes/{parts[2]}" if len(parts) > 2 else d
+                if os.path.exists(candidate):
+                    vol = candidate
+                    found_vol = True
+                    break
+        if not found_vol:
+            vol = "/"
+
+    try:
+        t_tot, t_used, t_free = shutil.disk_usage(vol)
+    except Exception:
+        t_tot, t_used, t_free = 0, 0, 0
+
+    staged_post_free = max(0, t_free - tot_staged_inflow)
+    cloud_post_free = t_free - tot_cloud_inflow
+
+    # Sorted list: active inflows first (descending by bytes), then discarded
+    sorted_destinations = sorted(
+        staged_dest.values(),
+        key=lambda x: (x["is_discard"], -x["cloud_bytes"], -x["staged_bytes"])
+    )
+
+    return {
+        "destinations": sorted_destinations,
+        "rule_stats": rule_stats,
+        "totals": {
+            "staged_inflow_bytes": tot_staged_inflow,
+            "staged_inflow_files": tot_staged_files,
+            "staged_inflow_folders": tot_staged_folders,
+            "staged_ignored_bytes": tot_staged_ignored_b,
+            "staged_ignored_files": tot_staged_ignored_fl,
+            "staged_ignored_folders": tot_staged_ignored_fld,
+            "cloud_inflow_bytes": tot_cloud_inflow,
+            "cloud_inflow_files": tot_cloud_files,
+            "cloud_inflow_folders": tot_cloud_folders,
+            "cloud_ignored_bytes": tot_cloud_ignored_b,
+            "cloud_ignored_files": tot_cloud_ignored_fl,
+            "cloud_ignored_folders": tot_cloud_ignored_fld,
+        },
+        "headroom": {
+            "volume": vol,
+            "total_bytes": t_tot,
+            "used_bytes": t_used,
+            "free_bytes": t_free,
+            "staged_post_free": staged_post_free,
+            "cloud_post_free": cloud_post_free,
+            "staged_status": "SAFE" if t_free >= tot_staged_inflow else "EXCEEDED",
+            "cloud_status": "SAFE" if cloud_post_free >= 0 else "EXCEEDED"
+        }
+    }
+

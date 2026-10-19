@@ -7978,7 +7978,7 @@ def main():
             {"key": "11", "label": "Detect & clean duplicate files (Interactive duplicate resolver)"},
             {"key": "12", "label": "View Curation & Verification Report (Approved vs Unapproved folders)"},
             {"key": "13", "label": "☁️ Launch iDrive Device Backup Wizard (Triage remote devices & create Storage Rules)"},
-            {"key": "14", "label": "📋 View & Edit Storage Rules (Interactive Cloud Rules Manager)"},
+            {"key": "14", "label": "📋 View & Edit Storage Rules & Projected Usage (Interactive Cloud Rules Manager)"},
             {"key": "15", "label": "Exit"}
         ]
         main_usage = get_menu_option_usage(db_file, "main_menu")
