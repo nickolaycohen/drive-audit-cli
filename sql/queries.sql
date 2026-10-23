@@ -292,11 +292,12 @@ LEFT JOIN files f ON f.directory_id = child.id
 WHERE d.path IN (
     '/Volumes/LaCie/Storage/Priority 1',
     '/Volumes/LaCie/Storage/Priority 2',
-    '/Volumes/LaCie/Storage/Priority 3',
+    '/Volumes/DELL1TB02/Storage/Priority 3',
     '/Volumes/LaCie/Storage/Priority 4'
 ) OR (
-    d.path LIKE '/Volumes/LaCie/Storage/Priority %/%'
+    (d.path LIKE '/Volumes/LaCie/Storage/Priority %/%' OR d.path LIKE '/Volumes/DELL1TB02/Storage/Priority %/%')
     AND d.path NOT LIKE '/Volumes/LaCie/Storage/Priority %/%/%'
+    AND d.path NOT LIKE '/Volumes/DELL1TB02/Storage/Priority %/%/%'
 )
 GROUP BY d.id
 ORDER BY d.path;
@@ -315,8 +316,9 @@ SELECT
 FROM directories d
 LEFT JOIN directory_tags dt ON d.id = dt.directory_id
 LEFT JOIN files f ON f.directory_id = d.id
-WHERE d.path LIKE '/Volumes/LaCie/Storage/Priority %/%/%'
+WHERE (d.path LIKE '/Volumes/LaCie/Storage/Priority %/%/%' OR d.path LIKE '/Volumes/DELL1TB02/Storage/Priority %/%/%')
   AND d.path NOT LIKE '/Volumes/LaCie/Storage/Priority %/%/%/%'
+  AND d.path NOT LIKE '/Volumes/DELL1TB02/Storage/Priority %/%/%/%'
 GROUP BY d.id
 ORDER BY d.path;
 

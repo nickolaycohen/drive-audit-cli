@@ -249,6 +249,13 @@ def matches_path_pattern(path: str, path_pattern: str, is_recursive: bool = True
         if any(c in pat_lower for c in ("*", "?", "[")):
             if fnmatch.fnmatch(norm_path_lower, pat_lower) or fnmatch.fnmatch(norm_path_lower, f"*{pat_lower}*"):
                 return True
+            # Also test folder path with trailing slash for subtree patterns ending in /* or /
+            if fnmatch.fnmatch(norm_path_lower + "/", pat_lower) or fnmatch.fnmatch(norm_path_lower + "/", f"*{pat_lower}*"):
+                return True
+            if pat_lower.endswith("/*"):
+                base_pat = pat_lower[:-2]
+                if fnmatch.fnmatch(norm_path_lower, base_pat) or fnmatch.fnmatch(norm_path_lower, f"*{base_pat}*"):
+                    return True
         else:
             # Substring match if no wildcards
             f_name = Path(norm_path_lower).name
@@ -260,10 +267,11 @@ def matches_path_pattern(path: str, path_pattern: str, is_recursive: bool = True
 
         # Check recursion
         if is_recursive:
-            dir_pat = pat_lower.rstrip("/") + "/*"
+            clean_rec_base = pat_lower.rstrip("/*").rstrip("/")
+            dir_pat = clean_rec_base + "/*"
             if fnmatch.fnmatch(norm_path_lower, dir_pat) or fnmatch.fnmatch(norm_path_lower, f"*{dir_pat}"):
                 return True
-            if norm_path_lower.startswith(pat_lower.rstrip("/") + "/"):
+            if norm_path_lower.startswith(clean_rec_base + "/"):
                 return True
 
     return False

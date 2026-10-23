@@ -1361,7 +1361,7 @@ def prompt_user_for_storage_rule(
         suggested_category = "Archives"
         suggested_color = "Purple"
         suggested_rel_path = "Archives"
-        suggested_dest = "/Volumes/LaCie/Storage/Priority 3/Archives/"
+        suggested_dest = "/Volumes/DELL1TB02/Storage/Priority 3/Archives/"
         suggested_impact = "Will be archived in external Priority 3 cold storage"
     else:
         suggested_tier = "priority 2"
@@ -1817,23 +1817,72 @@ def prompt_user_for_storage_rule(
             return rule
 
         if choice == "4":
-            print("\n--- DEFINE CUSTOM STORAGE RULE ---")
             src_dev, src_os, is_nested = resolve_source_os_interactive(device_name, norm_path, detected_info)
-            r_name = input(f"Rule Name [{suggested_category} - {folder_name}]: ").strip() or f"{suggested_category} - {folder_name}"
-            
-            default_scope = f"{src_os}" if src_os not in ("Universal", "Unknown", None) else "ALL"
-            p_scope = input(f"Device Scope ('ALL', 'Android', 'iOS', 'Windows', or '{device_name}') [Default: {default_scope}]: ").strip() or default_scope
-            default_pat = f"*{folder_name}*" if p_scope in ("ALL", "Android", "iOS", "Windows") else (norm_path + "*")
-            p_pat = input(f"Path Pattern [Default: {default_pat}]: ").strip() or default_pat
-            
-            print("\nTarget Tier:")
-            print("  [1] Priority 1 (Active Personal, Legal, Quicken) 🔴")
-            print("  [2] Priority 2 (Systems, Profiles, Legacy Windows) 🔵")
-            print("  [3] Priority 3 (Historical Records, Reference Archive) 🟣")
-            print("  [4] Priority 4 (Media Intake / Temporary Quarantine) 🟡/🟠")
-            print("  [5] Complete Ignore (Never download) 🚫")
-            t_choice = input("Select Tier (1-5) [Default: 2]: ").strip()
-            
+
+            # Query existing distinct categories and destinations from database
+            db_cats = []
+            db_dests = []
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT DISTINCT category FROM storage_rules WHERE category IS NOT NULL AND category != '' ORDER BY category")
+                db_cats = [r[0] for r in cur.fetchall() if r[0]]
+                cur.execute("SELECT DISTINCT target_relative_path FROM storage_rules WHERE target_relative_path IS NOT NULL AND target_relative_path != '' ORDER BY target_relative_path")
+                db_dests = [r[0] for r in cur.fetchall() if r[0]]
+            except Exception:
+                pass
+
+            standard_cats = ["Documents", "Financial", "Family", "Archives", "Temporary", "AppData", "System", "References", "Audio", "Legacy"]
+            all_cats = []
+            for c in standard_cats + db_cats:
+                if c and c not in all_cats:
+                    all_cats.append(c)
+
+            standard_dests = ["Documents", "Archives", "Temporary", "Family", "Data", "AppData", "References", "System", "Audio"]
+            all_dests = []
+            for d in standard_dests + db_dests:
+                if d and d not in all_dests:
+                    all_dests.append(d)
+
+            print("\n" + "=" * 90)
+            print("                       DEFINE CUSTOM STORAGE RULE")
+            print("=" * 90)
+            print(f"  Target Folder:  '{folder_name}' ({norm_path})")
+            print(f"  Source Device:  '{src_dev}' ({src_os})")
+            if suggested_category and suggested_tier:
+                print(f"  Recommendation: {suggested_tier.upper()} ({suggested_category} ➔ {suggested_rel_path or 'Root'})")
+            print("-" * 90)
+            print("AVAILABLE STORAGE RULE OPTIONS OVERVIEW:")
+            print("  • STORAGE TIERS:")
+            print("      [1] Priority 1 🔴 (Active Personal, Legal, Financial) ➔ /Volumes/LaCie/Storage/Priority 1/")
+            print("      [2] Priority 2 🔵 (Systems, Profiles, Legacy Windows) ➔ /Volumes/LaCie/Storage/Priority 2/")
+            print("      [3] Priority 3 🟣 (Historical Records, Reference)     ➔ /Volumes/DELL1TB02/Storage/Priority 3/")
+            print("      [4] Priority 4 🟠 (Media Intake / Temporary Staging)  ➔ /Volumes/LaCie/Storage/Priority 4/")
+            print("      [5] Discard    🚫 (Complete Ignore / Never Download)")
+            print(f"  • COMMON DESTINATIONS: {', '.join(all_dests[:7])}, (Root), or Custom")
+            print(f"  • COMMON CATEGORIES:   {', '.join(all_cats[:7])}, or Custom")
+            print(f"  • DEVICE SCOPES:       Universal ('ALL'), OS-wide ('{src_os}'), Device-specific ('{device_name}'), or Custom")
+            print(f"  • MATCH PATTERNS:      Wildcard (*{folder_name}*), Path Prefix ({norm_path}*), Subtree (*/{folder_name}/*)")
+            print("=" * 90)
+
+            # 1. Target Tier
+            tier_key_map = {
+                "priority 1": "1",
+                "priority 2": "2",
+                "priority 3": "3",
+                "priority 4": "4",
+                "discard": "5",
+                "purge": "5"
+            }
+            default_t_choice = tier_key_map.get(suggested_tier.lower(), "2")
+
+            print("\nStep 1/6 — Target Storage Tier:")
+            print("  [1] Priority 1 (Active Personal, Legal, Financial) 🔴 ➔ High-speed restore")
+            print("  [2] Priority 2 (Systems, Profiles, Legacy Windows) 🔵 ➔ Active reference storage")
+            print("  [3] Priority 3 (Historical Records, Reference Archive) 🟣 ➔ Cold archive")
+            print("  [4] Priority 4 (Media Intake / Temporary Quarantine) 🟠 ➔ Staging / intake triage")
+            print("  [5] Complete Ignore / Discard (Never download from cloud) 🚫")
+            t_choice = input(f"Select Tier (1-5) [Default: {default_t_choice}]: ").strip() or default_t_choice
+
             tier_map = {
                 "1": ("priority 1", "SURGICAL_RESTORE", "Red", "Documents"),
                 "2": ("priority 2", "SURGICAL_RESTORE", "Blue", "Documents"),
@@ -1841,15 +1890,164 @@ def prompt_user_for_storage_rule(
                 "4": ("priority 4", "STAGE_DISCARDABLE", "Orange", "Temporary"),
                 "5": ("discard", "DISCARD_IGNORE", "Orange", "")
             }
-            tier_val, act_val, col_val, default_rel = tier_map.get(t_choice, ("priority 2", "SURGICAL_RESTORE", "Blue", "Documents"))
+            tier_val, act_val, col_val, default_rel = tier_map.get(t_choice, tier_map[default_t_choice])
 
-            raw_cat = input(f"Category (One word only) [{suggested_category}]: ").strip() or suggested_category
-            cat_val = raw_cat.split()[0] if raw_cat else "General"
+            if tier_val == "priority 4" and any(k in norm_path.lower() for k in ["photo", "video", "dcim", "media", "camera", "pictures"]):
+                act_val = "MEDIA_INTAKE"
 
-            raw_rel = input(f"Destination Folder (Single level) [{default_rel}]: ").strip() or default_rel
-            rel_val = raw_rel.strip("/").split("/")[0] if raw_rel else default_rel
+            # 2. Target Destination Folder
+            if tier_val in ("discard", "purge"):
+                rel_val = ""
+                print("\nStep 2/6 — Target Destination: (None / Discard - files will not be downloaded)")
+            else:
+                dest_options = []
+                pref_dest = suggested_rel_path if (suggested_rel_path and suggested_tier == tier_val) else default_rel
+                if pref_dest:
+                    dest_options.append(pref_dest)
+                for d in all_dests:
+                    if d not in dest_options and d:
+                        dest_options.append(d)
+
+                shown_dests = dest_options[:8]
+                root_idx = len(shown_dests) + 1
+                cust_dest_idx = root_idx + 1
+
+                print(f"\nStep 2/6 — Target Destination Folder (Single-level folder within {tier_val.upper()}):")
+                for i, d in enumerate(shown_dests, 1):
+                    def_mark = " [Default]" if i == 1 else ""
+                    print(f"  [{i}] {d}{def_mark}")
+                print(f"  [{root_idx}] (None / Root of Tier)")
+                print(f"  [{cust_dest_idx}] Custom Destination Folder (type custom name)")
+
+                raw_dest_sel = input(f"Select Destination [1-{cust_dest_idx}] or type name [Default: 1]: ").strip()
+                digit_dest_match = re.match(r"^(\d+)", raw_dest_sel)
+                if not raw_dest_sel or raw_dest_sel == "1":
+                    rel_val = shown_dests[0]
+                elif digit_dest_match and int(digit_dest_match.group(1)) == root_idx:
+                    rel_val = ""
+                elif digit_dest_match and 1 <= int(digit_dest_match.group(1)) <= len(shown_dests):
+                    rel_val = shown_dests[int(digit_dest_match.group(1)) - 1]
+                elif digit_dest_match and int(digit_dest_match.group(1)) == cust_dest_idx:
+                    cust_dest = input("  Enter Custom Destination Folder: ").strip()
+                    rel_val = cust_dest.strip("/").split("/")[0] if cust_dest else shown_dests[0]
+                else:
+                    rel_val = raw_dest_sel.strip("/").split("/")[0]
+
+            # 3. Category
+            cat_options = []
+            pref_cat = suggested_category if suggested_category else "Documents"
+            cat_options.append(pref_cat)
+            for c in all_cats:
+                if c not in cat_options and c:
+                    cat_options.append(c)
+
+            shown_cats = cat_options[:8]
+            cust_cat_idx = len(shown_cats) + 1
+
+            print("\nStep 3/6 — Classification Category (Single-word semantic category):")
+            for i, c in enumerate(shown_cats, 1):
+                def_mark = " [Default]" if i == 1 else ""
+                print(f"  [{i}] {c}{def_mark}")
+            print(f"  [{cust_cat_idx}] Custom Category (type custom word)")
+
+            raw_cat_sel = input(f"Select Category [1-{cust_cat_idx}] or type name [Default: 1]: ").strip()
+            digit_cat_match = re.match(r"^(\d+)", raw_cat_sel)
+            if not raw_cat_sel or raw_cat_sel == "1":
+                cat_val = shown_cats[0]
+            elif digit_cat_match and 1 <= int(digit_cat_match.group(1)) <= len(shown_cats):
+                cat_val = shown_cats[int(digit_cat_match.group(1)) - 1]
+            elif digit_cat_match and int(digit_cat_match.group(1)) == cust_cat_idx:
+                cust_cat = input("  Enter Custom Category: ").strip()
+                cat_val = cust_cat.split()[0] if cust_cat else shown_cats[0]
+            else:
+                cat_val = raw_cat_sel.split()[0]
+
+            # 4. Device Scope
+            scope_options = [
+                ("Universal across ALL devices", "ALL")
+            ]
+            if src_os and src_os not in ("Universal", "Unknown"):
+                if src_os == "Android":
+                    scope_options.append(("All Android Devices", "Android (*Moto*, *Samsung*, *Pixel*, *Galaxy*)"))
+                elif src_os == "iOS":
+                    scope_options.append(("All iOS Devices", "iOS (*iPhone*, *iPad*)"))
+                elif src_os == "Windows":
+                    scope_options.append(("All Windows Devices", "Windows"))
+                elif src_os == "macOS":
+                    scope_options.append(("All macOS Devices", "macOS"))
+                else:
+                    scope_options.append((f"All {src_os} Devices", src_os))
+
+            dev_label = f"{device_name} ({src_dev})" if is_nested else device_name
+            scope_options.append((f"Device-specific only ('{dev_label}')", dev_label))
+
+            print("\nStep 4/6 — Device Scope:")
+            for i, (label, val) in enumerate(scope_options, 1):
+                def_mark = " [Default]" if i == 1 else ""
+                print(f"  [{i}] {label:<38} ➔ '{val}'{def_mark}")
+            cust_scope_idx = len(scope_options) + 1
+            print(f"  [{cust_scope_idx}] Custom Scope (type custom device name or pattern)")
+
+            raw_scope_sel = input(f"Select Device Scope [1-{cust_scope_idx}] or type name [Default: 1]: ").strip()
+            digit_scope_match = re.match(r"^(\d+)", raw_scope_sel)
+            if not raw_scope_sel or raw_scope_sel == "1":
+                p_scope = scope_options[0][1]
+            elif digit_scope_match and 1 <= int(digit_scope_match.group(1)) <= len(scope_options):
+                p_scope = scope_options[int(digit_scope_match.group(1)) - 1][1]
+            elif digit_scope_match and int(digit_scope_match.group(1)) == cust_scope_idx:
+                p_scope = input("  Enter Custom Device Scope: ").strip() or "ALL"
+            else:
+                # Match against known scope options by name (case-insensitive)
+                matched_scope = None
+                for lbl, val in scope_options:
+                    if raw_scope_sel.lower() in (val.lower(), lbl.lower()):
+                        matched_scope = val
+                        break
+                p_scope = matched_scope if matched_scope else raw_scope_sel
+
+            # 5. Path Match Pattern
+            pattern_options = [
+                (f"Universal Wildcard (*{folder_name}*)", f"*{folder_name}*"),
+                (f"Exact Path Prefix  ({norm_path}*)", norm_path + "*"),
+                (f"Subtree Boundary    (*/{folder_name}*)", f"*/{folder_name}*"),
+            ]
+            print("\nStep 5/6 — Path Match Pattern:")
+            for i, (label, pat) in enumerate(pattern_options, 1):
+                def_mark = " [Default]" if i == 1 else ""
+                print(f"  [{i}] {label:<38} ➔ '{pat}'{def_mark}")
+            cust_pat_idx = len(pattern_options) + 1
+            print(f"  [{cust_pat_idx}] Custom Pattern (type custom pattern)")
+
+            raw_pat_sel = input(f"Select Path Pattern [1-{cust_pat_idx}] or type pattern [Default: 1]: ").strip()
+            digit_pat_match = re.match(r"^(\d+)", raw_pat_sel)
+            if not raw_pat_sel or raw_pat_sel == "1":
+                p_pat = pattern_options[0][1]
+            elif digit_pat_match and 1 <= int(digit_pat_match.group(1)) <= len(pattern_options):
+                p_pat = pattern_options[int(digit_pat_match.group(1)) - 1][1]
+            elif digit_pat_match and int(digit_pat_match.group(1)) == cust_pat_idx:
+                p_pat = input("  Enter Custom Path Pattern: ").strip() or f"*{folder_name}*"
+            else:
+                p_pat = raw_pat_sel
+
+            # 6. Rule Name & Optional Context
+            def_name = f"{cat_val} - {folder_name}"
+            print("\nStep 6/6 — Rule Name & Story:")
+            r_name = input(f"Rule Name [{def_name}]: ").strip() or def_name
             desc_val = input("Human Story / Context (Optional): ").strip()
-            
+
+            print("\n" + "-" * 75)
+            print("ESTABLISHING CUSTOM STORAGE RULE:")
+            print(f"  • Name:             {r_name}")
+            print(f"  • Device Scope:     {p_scope}")
+            print(f"  • Path Pattern:     {p_pat}")
+            print(f"  • Target Tier:      {tier_val.upper()} {col_val}")
+            print(f"  • Destination:      {rel_val or '(None / Ignored)'}")
+            print(f"  • Category:         {cat_val}")
+            print(f"  • Action:           {act_val}")
+            if desc_val:
+                print(f"  • Description:      {desc_val}")
+            print("-" * 75)
+
             rule = StorageRule(
                 name=r_name,
                 device_pattern=p_scope,
