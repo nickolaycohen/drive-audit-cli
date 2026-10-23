@@ -299,8 +299,9 @@ def discover_candidate_volumes() -> List[str]:
                 continue
             if os.path.islink(full_path):
                 continue
-            # Skip installer DMGs or known read-only mounts if obvious
-            if entry in ("Antigravity", "Recovery"):
+            # Skip virtual disk images (installer DMGs, etc.) or known read-only mounts
+            dinfo = get_diskutil_info(full_path)
+            if dinfo.get("protocol") == "Disk Image" or entry in ("Antigravity", "Recovery"):
                 continue
             candidates.append(full_path)
     return candidates
